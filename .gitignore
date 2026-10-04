@@ -1,0 +1,66 @@
+/target
+# Build output. Cargo.lock stays tracked: release archives and the container
+# image are built with --locked.
+/target/
+**/*.rs.bk
+
+# JetBrains: the whole settings directory, and project files it may write
+# beside it
+/.idea/
+*.iml
+*.ipr
+*.iws
+
+# VS Code: personal state stays out; shared settings and tasks may go in
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+!.vscode/*.code-snippets
+.history/
+
+# Vim swap, undo, and session files
+[._]*.sw[a-p]
+[._]sw[a-p]
+[._]*.un~
+Session.vim
+Sessionx.vim
+.netrwhist
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+*.icloud
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+[Dd]esktop.ini
+$RECYCLE.BIN/
+*.stackdump
+*.lnk
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
