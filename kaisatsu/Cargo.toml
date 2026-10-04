@@ -13,9 +13,21 @@ default = []
 ## Heap-backed conveniences.
 alloc = []
 ## Ticket encoding and signing, used by the Kippu backend.
-issuer = ["alloc"]
+issuer = ["alloc", "ed25519-dalek/zeroize"]
 
 [dependencies]
+ed25519-dalek.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+hex.workspace = true
+proptest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[[test]]
+name = "issue_and_verify"
+required-features = ["issuer"]
 
 [lints]
 workspace = true

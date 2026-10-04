@@ -17,8 +17,22 @@ jobs:
       - run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets
-      - run: cargo test --workspace
+      - run: cargo clippy --workspace --all-targets --all-features
+      - run: cargo test --workspace --all-features
+
+  kaisatsu:
+    name: kaisatsu · no_std · C ABI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup target add thumbv7em-none-eabihf
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --package kaisatsu --target thumbv7em-none-eabihf
+      - run: cargo build --package kaisatsu-ffi --no-default-features --target thumbv7em-none-eabihf --profile release-small
+      - run: cargo xtask vectors --check
+      - run: cargo xtask header --check
+      - run: cargo xtask c-example
+      - run: cargo xtask size
 
   deny:
     name: cargo-deny

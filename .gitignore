@@ -64,3 +64,9 @@ $RECYCLE.BIN/
 .Trash-*
 .nfs*
 
+
+# cargo-fuzz working directories
+/kaisatsu/fuzz/target/
+/kaisatsu/fuzz/corpus/
+/kaisatsu/fuzz/artifacts/
+/kaisatsu/fuzz/coverage/

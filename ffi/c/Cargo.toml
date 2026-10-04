@@ -10,6 +10,12 @@ publish.workspace = true
 name = "kaisatsu"
 crate-type = ["staticlib", "cdylib"]
 
+[features]
+default = ["std"]
+## Link the standard library. Disable for bare-metal targets, which then get a minimal
+## panic handler (Kaisatsu itself never panics).
+std = []
+
 [dependencies]
 kaisatsu.workspace = true
 
