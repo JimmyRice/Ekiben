@@ -1,0 +1,12 @@
+[package]
+name = "kippu-store-sqlite"
+description = "SQLite storage adapter for Kippu."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

@@ -1,0 +1,18 @@
+[package]
+name = "kippu-server"
+description = "Launcher for Kippu: CLI, configuration sources and adapter wiring."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+default = ["sqlite"]
+## SQLite storage adapter.
+sqlite = []
+
+[dependencies]
+kippu-core.workspace = true
+
+[lints]
+workspace = true

@@ -1,6 +1,152 @@
-[package]
-name = "ekiben"
+# Ekiben (駅弁) — ticketing infrastructure for conventions.
+#
+#   kippu/     Kippu (切符): the stateless ticketing backend, split into layered crates.
+#   kaisatsu/  Kaisatsu (改札): the minimal, `no_std` ticket verification library.
+#   ffi/       Language bindings for Kaisatsu.
+#
+# This manifest is both the workspace root and the `ekiben` package, whose only job is
+# to produce the batteries-included `kippu` binary from `src/main.rs`.
+
+[workspace]
+resolver = "3"
+members = [
+    # Backend
+    "kippu/domain",
+    "kippu/store",
+    "kippu/core",
+    "kippu/server",
+    "kippu/adapters/sqlite",
+    # Ticket verification core
+    "kaisatsu",
+    # Bindings
+    "ffi/c",
+    # Tooling
+    "xtask",
+]
+exclude = ["kaisatsu/fuzz"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.98"
+publish = false
+
+[workspace.dependencies]
+# ── Internal crates ─────────────────────────────────────────────────────────────
+kaisatsu = { path = "kaisatsu", version = "0.1.0", default-features = false }
+kippu-domain = { path = "kippu/domain" }
+kippu-store = { path = "kippu/store" }
+kippu-store-sqlite = { path = "kippu/adapters/sqlite" }
+kippu-core = { path = "kippu/core" }
+kippu-server = { path = "kippu/server", default-features = false }
+
+# ── Async runtime & HTTP ────────────────────────────────────────────────────────
+async-trait = "0.1.92"
+axum = "0.8.9"
+tokio = "1.53"
+tokio-util = "0.7.19"
+tower = "0.5.3"
+tower-http = "0.7.1"
+
+# ── Serialization & domain primitives ───────────────────────────────────────────
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+time = "0.3.55"
+uuid = "1.27"
+
+# ── Storage ─────────────────────────────────────────────────────────────────────
+sqlx = { version = "0.9.0", default-features = false }
+
+# ── Configuration, CLI & errors ─────────────────────────────────────────────────
+clap = { version = "4.6", features = ["derive", "env"] }
+figment = "0.10.19"
+thiserror = "2.0.21"
+
+# ── Cryptography ────────────────────────────────────────────────────────────────
+argon2 = "0.6"
+base64 = "0.23"
+ed25519-dalek = { version = "3.0", default-features = false }
+getrandom = "0.4"
+jsonwebtoken = { version = "11.1", default-features = false }
+secrecy = "0.10.3"
+sha2 = { version = "0.11", default-features = false }
+
+# ── Observability & API documentation ───────────────────────────────────────────
+tracing = "0.1.44"
+tracing-subscriber = "0.3.23"
+utoipa = "6.0"
+utoipa-axum = "0.3"
+
+# ── Binary ──────────────────────────────────────────────────────────────────────
+mimalloc = "0.1.52"
+
+# ── Testing & tooling ───────────────────────────────────────────────────────────
+cbindgen = "0.29"
+proptest = "1.11"
+tempfile = "3.27"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+unreachable_pub = "warn"
+unused_qualifications = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Pedantic lints that add noise without improving readability.
+missing_errors_doc = "allow"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+# Restriction lints we opt into. Tests may unwrap (see clippy.toml).
+dbg_macro = "warn"
+expect_used = "warn"
+todo = "warn"
+unwrap_used = "warn"
+
+# ── The `ekiben` package: the `kippu` server binary ─────────────────────────────
+
+[package]
+name = "ekiben"
+description = "The batteries-included `kippu` server binary."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "kippu"
+path = "src/main.rs"
+
+[features]
+default = ["sqlite", "mimalloc"]
+## Storage adapters compiled into the binary.
+sqlite = ["kippu-server/sqlite"]
+## Use mimalloc as the global allocator.
+mimalloc = ["dep:mimalloc"]
 
 [dependencies]
+kippu-core.workspace = true
+kippu-server.workspace = true
+mimalloc = { workspace = true, optional = true }
+
+[lints]
+workspace = true
+
+# ── Build profiles ──────────────────────────────────────────────────────────────
+
+# Server builds: favour throughput.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "debuginfo" # Keep symbol names so panic backtraces stay readable.
+panic = "unwind"    # A panicking request is caught by tower-http instead of killing the process.
+
+# Kaisatsu FFI / WebAssembly / microcontroller builds: favour size.
+# Embedded targets can squeeze further with `CARGO_PROFILE_RELEASE_SMALL_OPT_LEVEL=z`.
+[profile.release-small]
+inherits = "release"
+opt-level = "s"
+panic = "abort"
+strip = "symbols"

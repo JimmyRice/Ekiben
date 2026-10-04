@@ -1,0 +1,12 @@
+[package]
+name = "kippu-core"
+description = "Kippu's application core: modules, authentication, HTTP API and background workers."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

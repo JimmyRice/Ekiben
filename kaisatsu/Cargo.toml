@@ -1,0 +1,21 @@
+[package]
+name = "kaisatsu"
+description = "Kaisatsu (改札): minimal, no_std verification of tickets issued by Kippu."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = true
+categories = ["cryptography", "no-std", "embedded"]
+keywords = ["ticket", "ed25519", "verification", "no_std", "qr"]
+
+[features]
+default = []
+## Heap-backed conveniences.
+alloc = []
+## Ticket encoding and signing, used by the Kippu backend.
+issuer = ["alloc"]
+
+[dependencies]
+
+[lints]
+workspace = true
