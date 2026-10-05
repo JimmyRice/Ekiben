@@ -69,6 +69,10 @@ as `shop`, `attestor`, `reserve`, `drain`); the full journey over real TCP is
   The wire format is defined only in `kaisatsu` (`issuer` feature) — never duplicate it.
   Changing the format means regenerating vectors (`cargo xtask vectors`) and updating
   `spec/ticket-protocol.md`.
+- **Logging:** requests run in a `request` span and task runs in a `task` span, defined with
+  their fields in `crates/kippu/core/src/http/trace.rs`; `crates/kippu/server/src/telemetry.rs`
+  renders them (pretty blocks, compact lines, JSON). Log business milestones with
+  `tracing::info!` and they land in the right block. Never record headers, bodies or tokens.
 - **FFI:** every `unsafe` block has a `// SAFETY:` comment; regenerate the header with
   `cargo xtask header`; ship builds with `--no-default-features --profile release-small`.
 

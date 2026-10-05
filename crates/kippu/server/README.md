@@ -13,6 +13,14 @@ kippu verify --key <public key> <ticket>             check a ticket offline, lik
 kippu config check                                   effective configuration, secrets redacted
 ```
 
+Logs go to stdout. `--log-format pretty` (the default) writes one block per request, from
+arrival to response — method, path, request id, client, caller, idempotency key, the events
+logged while handling it, the problem type, status and latency — so concurrent requests never
+interleave; background task runs that did something get a block too. `compact` writes one line
+per request, and `json` one object per event tagged with `request_id`, plus a
+`request finished` object per request. Authorization headers and request bodies are never
+logged. `RUST_LOG` filters as usual.
+
 Configuration is merged from, in increasing priority: built-in defaults, the TOML file given
 with `--config` (or `KIPPU_CONFIG`), environment variables (`KIPPU_DATABASE__URL`, with `__`
 between section and key) and command-line flags. See `kippu.example.toml` at the repository

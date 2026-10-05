@@ -118,6 +118,11 @@ impl ApiError {
     pub const fn kind(&self) -> &'static str {
         self.kind
     }
+
+    /// The human-readable explanation.
+    pub fn detail(&self) -> &str {
+        &self.detail
+    }
 }
 
 impl std::fmt::Display for ApiError {
@@ -180,6 +185,7 @@ pub struct Problem {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        crate::http::trace::record_problem(&self);
         if self.status.is_server_error() {
             tracing::error!(error = %self, source = ?self.source, "request failed");
         }

@@ -41,8 +41,14 @@ pub(crate) async fn submit(
         updated_at: now,
     };
     match state.store().insert_purchase_request(&request).await? {
-        Insertion::Inserted => Ok(request),
-        Insertion::Existing(existing) if existing.basket == request.basket => Ok(existing),
+        Insertion::Inserted => {
+            tracing::info!(id = %request.id, "purchase request queued");
+            Ok(request)
+        }
+        Insertion::Existing(existing) if existing.basket == request.basket => {
+            tracing::info!(id = %existing.id, "purchase request already queued");
+            Ok(existing)
+        }
         Insertion::Existing(_) => Err(ApiError::new(
             axum::http::StatusCode::UNPROCESSABLE_ENTITY,
             "idempotency-key-reused",
@@ -111,6 +117,7 @@ async fn reject(
     tx.purchases()
         .set_purchase_status(request.id, PurchaseStatus::Rejected { reason }, state.now())
         .await?;
+    tracing::info!(request = %request.id, ?reason, "purchase request rejected");
     Ok(())
 }
 
@@ -192,7 +199,14 @@ pub(crate) async fn process(state: &AppState, request: &PurchaseRequest) -> ApiR
             now,
         )
         .await?;
-    Ok(tx.commit().await?)
+    tx.commit().await?;
+    tracing::info!(
+        request = %current.id,
+        reservation = %reservation.id,
+        total = %reservation.total,
+        "tickets reserved"
+    );
+    Ok(())
 }
 
 /// Background task: claims a batch of queued requests and processes them in order.
@@ -251,7 +265,9 @@ pub(crate) async fn expire(state: &AppState, id: ReservationId) -> ApiResult<()>
             now,
         )
         .await?;
-    Ok(tx.commit().await?)
+    tx.commit().await?;
+    tracing::info!(reservation = %id, "reservation expired");
+    Ok(())
 }
 
 /// Background task: expires a batch of overdue reservations.
@@ -289,6 +305,7 @@ pub(crate) async fn cancel(state: &AppState, reservation: &Reservation) -> ApiRe
         release(&mut *tx, &current).await?;
     }
     tx.commit().await?;
+    tracing::info!(reservation = %current.id, "reservation cancelled");
     Ok(current)
 }
 

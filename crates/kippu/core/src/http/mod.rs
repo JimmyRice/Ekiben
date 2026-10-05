@@ -1,6 +1,7 @@
 //! HTTP assembly: module routes, health checks, OpenAPI and cross-cutting middleware.
 
 pub mod idempotency;
+pub mod trace;
 
 use serde::Deserialize;
 use utoipa::IntoParams;
@@ -105,7 +106,16 @@ pub(crate) fn router(state: &AppState, modules: &[Arc<dyn Module>]) -> Router {
     let server = &state.config().server;
     let cross_cutting = ServiceBuilder::new()
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
-        .layer(TraceLayer::new_for_http())
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(trace::make_span)
+                .on_request(())
+                .on_response(trace::on_response)
+                .on_body_chunk(())
+                .on_eos(())
+                // Error responses are logged where they are created, with their cause.
+                .on_failure(()),
+        )
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(CatchPanicLayer::new())
         .layer(TimeoutLayer::with_status_code(

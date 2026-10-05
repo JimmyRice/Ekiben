@@ -19,7 +19,7 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-use crate::cli::{Cli, Command, ConfigCommand};
+use crate::cli::{Cli, Command, ConfigCommand, LogFormat};
 
 /// Builds and runs a Kippu instance from the command line.
 ///
@@ -64,6 +64,7 @@ impl Launcher {
             Ok(runtime) => runtime,
             Err(error) => return fail(&error.into()),
         };
+        let format = cli.log_format;
         let result = runtime.block_on(async {
             match &cli.command {
                 Command::Serve(args) => commands::serve(&cli, args, self.modules).await,
@@ -77,13 +78,17 @@ impl Launcher {
         });
         match result {
             Ok(()) => ExitCode::SUCCESS,
-            Err(error) => fail(&error),
+            Err(error) => {
+                if format == LogFormat::Json {
+                    tracing::error!(%error, "kippu failed");
+                }
+                fail(&error)
+            }
         }
     }
 }
 
 fn fail(error: &BoxError) -> ExitCode {
-    tracing::error!(%error, "kippu failed");
     eprintln!("error: {error}");
     ExitCode::FAILURE
 }
@@ -113,7 +118,10 @@ pub async fn serve_app(
         app.spawn_tasks(&tracker, &shutdown);
     }
     tracker.close();
-    axum::serve(listener, app.router())
+    let service = app
+        .router()
+        .into_make_service_with_connect_info::<std::net::SocketAddr>();
+    axum::serve(listener, service)
         .with_graceful_shutdown(shutdown.clone().cancelled_owned())
         .await?;
     shutdown.cancel();

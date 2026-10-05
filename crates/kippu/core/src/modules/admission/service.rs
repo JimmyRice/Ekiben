@@ -27,7 +27,7 @@ pub(crate) async fn admit_batches(state: AppState) -> Result<Progress, BoxError>
                 .advance_waiting_room(sale_id, room.admitted_through, next)
                 .await?
         {
-            tracing::debug!(sale = %sale_id, admitted_through = next, backlog, "admitted a batch");
+            tracing::info!(sale = %sale_id, admitted_through = next, backlog, "admitted a batch");
         }
     }
     Ok(Progress::Idle)

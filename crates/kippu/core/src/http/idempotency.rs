@@ -91,6 +91,7 @@ async fn handle(
 
     let store = state.store();
     if let Some(record) = store.idempotency_record(&scope, key.as_str()).await? {
+        tracing::info!("replaying the response stored for this Idempotency-Key");
         return Ok(replay(&record, &fingerprint));
     }
 
@@ -128,7 +129,14 @@ fn scope(state: &AppState, request: &Request) -> String {
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
         .and_then(|token| state.tokens().authenticate(token, state.now()).ok())
-        .map_or_else(|| "anonymous".to_owned(), |principal| principal.actor())
+        .map_or_else(
+            || "anonymous".to_owned(),
+            |principal| {
+                // A replayed response never reaches the handler, so record the caller here.
+                super::trace::record_caller(&principal);
+                principal.actor()
+            },
+        )
 }
 
 fn replay(record: &IdempotencyRecord, fingerprint: &str) -> Response {

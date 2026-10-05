@@ -159,7 +159,18 @@ pub(crate) async fn settle(
         }
     };
     tx.commit().await?;
+    log_settlement(attestor, &view);
     Ok(view)
+}
+
+fn log_settlement(attestor: &Attestor, view: &SettlementView) {
+    tracing::info!(
+        reservation = %view.reservation.id,
+        attestor = %attestor.id,
+        disposition = ?view.disposition,
+        tickets = view.ticket_ids.len(),
+        "payment recorded"
+    );
 }
 
 async fn issue(

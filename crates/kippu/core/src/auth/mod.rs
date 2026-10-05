@@ -104,6 +104,9 @@ impl OptionalFromRequestParts<AppState> for Principal {
                 .map(|token| state.tokens().authenticate(token, state.now()))
                 .transpose()
         });
+        if let Ok(Some(principal)) = &principal {
+            crate::http::trace::record_caller(principal);
+        }
         std::future::ready(principal)
     }
 }

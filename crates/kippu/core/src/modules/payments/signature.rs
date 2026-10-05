@@ -148,6 +148,7 @@ impl FromRequest<AppState> for Attested {
                 &header.signature,
             )
             .map_err(|_| rejected())?;
+        crate::http::trace::record_attestor(attestor.id);
         Ok(Self { attestor, body })
     }
 }

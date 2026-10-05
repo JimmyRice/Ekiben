@@ -31,9 +31,11 @@ pub struct Cli {
 /// How logs are written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum LogFormat {
-    /// Human-readable lines.
+    /// A block per request, from arrival to response, for people.
     Pretty,
-    /// One JSON object per line, for log collectors.
+    /// One line per request.
+    Compact,
+    /// One JSON object per event, tagged with `request_id`, for log collectors.
     Json,
 }
 
