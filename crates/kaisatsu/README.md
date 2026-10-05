@@ -38,4 +38,4 @@ match verifier.verify(scan()) {
 | `alloc` | `KeyRing` for `Vec<TrustedKey>`, `base45::encode`. |
 | `issuer` | `Issuer` and `Claims`: encoding and signing, as used by the Kippu backend. |
 
-The wire format is specified in [`spec/ticket-protocol.md`](../spec/ticket-protocol.md).
+The wire format is specified in [`spec/ticket-protocol.md`](../../spec/ticket-protocol.md).

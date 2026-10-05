@@ -1,5 +1,5 @@
 //! Builds the C ABI exactly as it ships (no `std`, `release-small`), compiles
-//! `ffi/c/examples/verify.c` against it and runs every test vector through the resulting program.
+//! `crates/ffi/c/examples/verify.c` against it and runs every test vector through the resulting program.
 
 use std::process::Command;
 
@@ -26,8 +26,8 @@ pub(crate) fn run() -> Result {
         .arg("-std=c11")
         .args(["-Wall", "-Wextra", "-Werror", "-O2"])
         .arg("-I")
-        .arg(root.join("ffi/c/include"))
-        .arg(root.join("ffi/c/examples/verify.c"))
+        .arg(root.join("crates/ffi/c/include"))
+        .arg(root.join("crates/ffi/c/examples/verify.c"))
         .arg(root.join("target/release-small/libkaisatsu.a"))
         .arg("-o")
         .arg(&program);

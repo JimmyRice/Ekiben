@@ -1,7 +1,7 @@
 # KP1 — Kippu Ticket Protocol, version 1
 
 Status: draft. This document is normative; the reference implementation is the
-[`kaisatsu`](../kaisatsu) crate, and [`test-vectors/v1`](test-vectors/v1) is authoritative where
+[`kaisatsu`](../crates/kaisatsu) crate, and [`test-vectors/v1`](test-vectors/v1) is authoritative where
 the two disagree with this text.
 
 The key words MUST, MUST NOT, SHOULD and MAY are to be interpreted as in RFC 2119.

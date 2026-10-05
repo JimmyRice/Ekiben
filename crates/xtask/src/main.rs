@@ -3,8 +3,8 @@
 //! | Command | What it does |
 //! |---|---|
 //! | `vectors [--check]` | (Re)generate `spec/test-vectors/v1/vectors.json`. |
-//! | `header [--check]` | (Re)generate `ffi/c/include/kaisatsu.h` with cbindgen. |
-//! | `c-example` | Build the C ABI, compile `ffi/c/examples/verify.c` and run it on every vector. |
+//! | `header [--check]` | (Re)generate `crates/ffi/c/include/kaisatsu.h` with cbindgen. |
+//! | `c-example` | Build the C ABI, compile `crates/ffi/c/examples/verify.c` and run it on every vector. |
 //! | `size` | Report the size of the Kaisatsu C library built with the `release-small` profile. |
 //!
 //! `--check` fails instead of writing when the generated file is out of date, for CI.
@@ -43,10 +43,11 @@ fn main() -> ExitCode {
     }
 }
 
-/// The repository root.
+/// The repository root: this crate lives in `crates/xtask`.
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
+        .ancestors()
+        .nth(2)
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
 }
 

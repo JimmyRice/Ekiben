@@ -52,7 +52,7 @@ struct TimeCheck {
 
 const VECTORS: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../spec/test-vectors/v1/vectors.json"
+    "/../../spec/test-vectors/v1/vectors.json"
 );
 
 fn outcome<T>(result: Result<T, kaisatsu::Pinpon>) -> String {

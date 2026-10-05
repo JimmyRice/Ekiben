@@ -1,8 +1,9 @@
 # Ekiben (駅弁) — ticketing infrastructure for conventions.
 #
-#   kippu/     Kippu (切符): the stateless ticketing backend, split into layered crates.
-#   kaisatsu/  Kaisatsu (改札): the minimal, `no_std` ticket verification library.
-#   ffi/       Language bindings for Kaisatsu.
+#   crates/kippu/     Kippu (切符): the stateless ticketing backend, split into layered crates.
+#   crates/kaisatsu/  Kaisatsu (改札): the minimal, `no_std` ticket verification library.
+#   crates/ffi/       Language bindings for Kaisatsu.
+#   crates/xtask/     Repository automation (`cargo xtask`).
 #
 # This manifest is both the workspace root and the `ekiben` package, whose only job is
 # to produce the batteries-included `kippu` binary from `src/main.rs`.
@@ -11,19 +12,19 @@
 resolver = "3"
 members = [
     # Backend
-    "kippu/domain",
-    "kippu/store",
-    "kippu/core",
-    "kippu/server",
-    "kippu/adapters/sqlite",
+    "crates/kippu/domain",
+    "crates/kippu/store",
+    "crates/kippu/core",
+    "crates/kippu/server",
+    "crates/kippu/adapters/sqlite",
     # Ticket verification core
-    "kaisatsu",
+    "crates/kaisatsu",
     # Bindings
-    "ffi/c",
+    "crates/ffi/c",
     # Tooling
-    "xtask",
+    "crates/xtask",
 ]
-exclude = ["kaisatsu/fuzz"]
+exclude = ["crates/kaisatsu/fuzz"]
 
 [workspace.package]
 version = "0.1.0"
@@ -33,12 +34,12 @@ publish = false
 
 [workspace.dependencies]
 # ── Internal crates ─────────────────────────────────────────────────────────────
-kaisatsu = { path = "kaisatsu", version = "0.1.0", default-features = false }
-kippu-domain = { path = "kippu/domain" }
-kippu-store = { path = "kippu/store" }
-kippu-store-sqlite = { path = "kippu/adapters/sqlite" }
-kippu-core = { path = "kippu/core" }
-kippu-server = { path = "kippu/server", default-features = false }
+kaisatsu = { path = "crates/kaisatsu", version = "0.1.0", default-features = false }
+kippu-domain = { path = "crates/kippu/domain" }
+kippu-store = { path = "crates/kippu/store" }
+kippu-store-sqlite = { path = "crates/kippu/adapters/sqlite" }
+kippu-core = { path = "crates/kippu/core" }
+kippu-server = { path = "crates/kippu/server", default-features = false }
 
 # ── Async runtime & HTTP ────────────────────────────────────────────────────────
 async-trait = "0.1.92"

@@ -3,7 +3,7 @@
 use crate::{Result, workspace_root, write_or_check};
 
 pub(crate) fn run(check: bool) -> Result {
-    let crate_dir = workspace_root().join("ffi/c");
+    let crate_dir = workspace_root().join("crates/ffi/c");
     let config = cbindgen::Config::from_file(crate_dir.join("cbindgen.toml"))?;
     let bindings = cbindgen::Builder::new()
         .with_crate(&crate_dir)
