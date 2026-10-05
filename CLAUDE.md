@@ -17,6 +17,7 @@ crates/kippu/core              Module system, auth/RBAC, HTTP, background tasks,
 crates/kippu/server            launcher: CLI (`kippu …`), config sources, adapter wiring
 crates/kippu/adapters/sqlite   SQLite adapter (single writer)
 crates/kippu/adapters/postgres PostgreSQL adapter (concurrent writers, SKIP LOCKED, advisory-locked outbox)
+crates/kippu/adapters/mysql    MySQL 8 adapter (READ COMMITTED, no RETURNING/ON CONFLICT, row-locked outbox)
 crates/kaisatsu                KP1 encode/verify, no_std; `issuer` feature for signing; fuzz/
 crates/ffi/c                   C ABI (the only crate with `unsafe`), generated include/kaisatsu.h
 crates/xtask                   `cargo xtask vectors|header [--check] | c-example | size`
@@ -29,7 +30,7 @@ Keep the repository root uncluttered and do not add speculative `.gitignore` ent
 ## Commands
 
 ```bash
-cargo test --workspace --all-features                                   # 137 tests incl. e2e over TCP
+cargo test --workspace --all-features                                   # 160 tests incl. e2e over TCP
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets           # default features too
 cargo fmt --all
@@ -44,9 +45,12 @@ tests can run on PostgreSQL too; locally:
 
 ```bash
 docker run -d --rm --name kippu-test-postgres -e POSTGRES_USER=kippu -e POSTGRES_PASSWORD=kippu -p 55432:5432 postgres:17-alpine
+docker run -d --rm --name kippu-test-mysql -e MYSQL_ROOT_PASSWORD=kippu -p 53306:3306 mysql:8.4
 export KIPPU_TEST_POSTGRES_URL=postgres://kippu:kippu@localhost:55432/kippu
-cargo test -p kippu-store-postgres                                      # conformance on PostgreSQL
+export KIPPU_TEST_MYSQL_URL=mysql://root:kippu@127.0.0.1:53306/mysql
+cargo test -p kippu-store-postgres -p kippu-store-mysql                 # conformance on both
 KIPPU_TEST_BACKEND=postgres cargo test -p kippu-core                    # HTTP tests on PostgreSQL
+KIPPU_TEST_BACKEND=mysql cargo test -p kippu-core                       # … and on MySQL
 ```
 
 Run all of the checks before every commit. Tests for HTTP behaviour live in
@@ -113,6 +117,11 @@ as `shop`, `attestor`, `reserve`, `drain`); the full journey over real TCP is
 - **Outbox order on concurrent databases:** identity/serial values are assigned at insert,
   not commit; PostgreSQL appends take `pg_advisory_xact_lock` so a reader never skips a late
   commit (`outbox_readers_never_skip_late_commits`). Any new adapter needs the same.
+- **MySQL:** `?` placeholders are positional (bind repeated values twice); no `RETURNING` or
+  `ON CONFLICT` — catch duplicate keys with `is_duplicate`; `FOUND_ROWS` is on, so UPDATE
+  reports matched rows; force the index when `FOR UPDATE SKIP LOCKED` meets `LIMIT`; bind
+  quantities as `i64` (unsigned arithmetic cannot go negative). sqlx's `rsa` feature stays
+  off (advisory), so MySQL 8 auth needs TLS — both server adapters use rustls.
 - **sqlx PostgreSQL** has no `u32`/`u16` encoding: store counts as `BIGINT` and convert
   (`convert::count`/`uncount`).
 - **SQLite cannot relax a column in place:** rebuild the table in a migration that starts

@@ -10,6 +10,8 @@ pub const COMPILED_ADAPTERS: &[&str] = &[
     "sqlite",
     #[cfg(feature = "postgres")]
     "postgres",
+    #[cfg(feature = "mysql")]
+    "mysql",
 ];
 
 /// Connects to the database named by `url`, choosing the adapter by the URL's scheme.
@@ -24,6 +26,8 @@ pub async fn connect(url: &str) -> Result<Arc<dyn Store>, BoxError> {
         "postgres" | "postgresql" => Ok(Arc::new(
             kippu_store_postgres::PostgresStore::connect(url).await?,
         )),
+        #[cfg(feature = "mysql")]
+        "mysql" => Ok(Arc::new(kippu_store_mysql::MySqlStore::connect(url).await?)),
         _ => Err(format!(
             "no adapter for `{scheme}:` URLs; this binary supports: {}",
             COMPILED_ADAPTERS.join(", ")

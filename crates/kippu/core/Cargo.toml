@@ -34,9 +34,10 @@ uuid.workspace = true
 
 
 [dev-dependencies]
+kippu-store-mysql.workspace = true
 kippu-store-postgres.workspace = true
 kippu-store-sqlite.workspace = true
-sqlx = { workspace = true, features = ["postgres"] }
+sqlx = { workspace = true, features = ["postgres", "mysql"] }
 tempfile.workspace = true
 tower = { workspace = true, features = ["util"] }
 

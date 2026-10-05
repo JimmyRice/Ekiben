@@ -1,5 +1,6 @@
 //! An in-process Kippu instance on a temporary SQLite database (or, with
-//! `KIPPU_TEST_BACKEND=postgres`, a fresh PostgreSQL schema), driven through its router.
+//! `KIPPU_TEST_BACKEND=postgres` or `mysql`, a fresh schema or database), driven through its
+//! router.
 #![allow(
     dead_code,
     unreachable_pub,
@@ -24,9 +25,11 @@ use kippu_core::config::{
 use kippu_core::{App, Kippu, ManualClock, Module};
 use kippu_domain::{Duration, Timestamp};
 use kippu_store::Store;
+use kippu_store_mysql::MySqlStore;
 use kippu_store_postgres::PostgresStore;
 use kippu_store_sqlite::SqliteStore;
 use serde_json::{Value, json};
+use sqlx::mysql::MySqlConnectOptions;
 use sqlx::postgres::PgConnectOptions;
 use std::str::FromStr;
 use tower::ServiceExt;
@@ -48,10 +51,28 @@ pub struct Reply {
     pub bytes: Vec<u8>,
 }
 
-/// The database the tests run on: SQLite in `dir`, unless `KIPPU_TEST_BACKEND=postgres`
-/// selects a fresh schema on the server at `KIPPU_TEST_POSTGRES_URL`.
+/// The database the tests run on: SQLite in `dir`, unless `KIPPU_TEST_BACKEND` selects a fresh
+/// schema on the server at `KIPPU_TEST_POSTGRES_URL` (`postgres`) or a fresh database on the
+/// server at `KIPPU_TEST_MYSQL_URL` (`mysql`).
 async fn test_store(dir: &tempfile::TempDir) -> (Arc<dyn Store>, String) {
-    if std::env::var("KIPPU_TEST_BACKEND").as_deref() == Ok("postgres") {
+    let backend = std::env::var("KIPPU_TEST_BACKEND").unwrap_or_default();
+    if backend == "mysql" {
+        let url = std::env::var("KIPPU_TEST_MYSQL_URL")
+            .expect("KIPPU_TEST_BACKEND=mysql needs KIPPU_TEST_MYSQL_URL");
+        let database = format!("core_{}", uuid_suffix());
+        let admin = MySqlStore::connect(&url).await.unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {database}")))
+            .execute(admin.pool())
+            .await
+            .unwrap();
+        let options = MySqlConnectOptions::from_str(&url)
+            .unwrap()
+            .database(&database);
+        let store = MySqlStore::connect_with(options, 16).await.unwrap();
+        store.migrate().await.unwrap();
+        return (Arc::new(store), url);
+    }
+    if backend == "postgres" {
         let url = std::env::var("KIPPU_TEST_POSTGRES_URL")
             .expect("KIPPU_TEST_BACKEND=postgres needs KIPPU_TEST_POSTGRES_URL");
         let schema = format!("core_{}", uuid_suffix());
