@@ -20,7 +20,7 @@ use ed25519_dalek::SigningKey;
 use kippu_core::auth::tokens::mint_root_token;
 use kippu_core::config::{
     AuthConfig, Config, DatabaseConfig, IssuerConfig, KeysConfig, RootConfig, RootKey,
-    ServerConfig, WorkersConfig,
+    ServerConfig, WebhooksConfig, WorkersConfig,
 };
 use kippu_core::{App, Kippu, ManualClock, Module};
 use kippu_domain::{Duration, Timestamp};
@@ -122,6 +122,7 @@ impl TestApp {
                 ticket_signing_key: STANDARD.encode([1; 32]).into(),
                 retired_ticket_keys: Vec::new(),
                 token_signing_key: STANDARD.encode([2; 32]).into(),
+                webhook_signing_key: None,
             },
             root: RootConfig {
                 keys: vec![RootKey {
@@ -132,6 +133,7 @@ impl TestApp {
             },
             auth: AuthConfig::default(),
             workers: WorkersConfig::default(),
+            webhooks: WebhooksConfig::default(),
         };
         let clock = Arc::new(ManualClock::new(Timestamp::from_unix_seconds(
             1_798_761_600,

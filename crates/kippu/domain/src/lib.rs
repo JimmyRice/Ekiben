@@ -13,6 +13,7 @@ pub mod reservation;
 pub mod ticket;
 mod timestamp;
 pub mod validation;
+pub mod webhook;
 
 pub use id::*;
 pub use money::{Currency, Money};

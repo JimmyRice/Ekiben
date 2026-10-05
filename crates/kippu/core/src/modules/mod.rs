@@ -6,6 +6,7 @@ pub mod catalog;
 pub mod payments;
 pub mod purchasing;
 pub mod ticketing;
+pub mod webhooks;
 
 use std::sync::Arc;
 
@@ -20,5 +21,6 @@ pub fn default_modules() -> Vec<Arc<dyn Module>> {
         Arc::new(purchasing::Purchasing),
         Arc::new(payments::Payments),
         Arc::new(ticketing::Ticketing),
+        Arc::new(webhooks::Webhooks),
     ]
 }

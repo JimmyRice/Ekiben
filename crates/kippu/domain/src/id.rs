@@ -103,3 +103,7 @@ define_id!(
     /// A refresh-token session.
     SessionId
 );
+define_id!(
+    /// An endpoint that receives integration events.
+    WebhookId
+);

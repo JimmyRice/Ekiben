@@ -29,6 +29,13 @@ impl OutboxStore for SqliteStore {
             })
             .collect()
     }
+
+    async fn latest_sequence(&self) -> StoreResult<i64> {
+        sqlx::query_scalar::<_, i64>("SELECT COALESCE(MAX(sequence), 0) FROM outbox")
+            .fetch_one(&self.reader)
+            .await
+            .map_err(error)
+    }
 }
 
 #[async_trait]

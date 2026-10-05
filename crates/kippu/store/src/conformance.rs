@@ -31,12 +31,15 @@ use kippu_domain::payment::{Environment, PaymentAttestation, PaymentDisposition}
 use kippu_domain::purchase::{Basket, LineItem, PurchaseRequest, PurchaseStatus};
 use kippu_domain::reservation::{Reservation, ReservationStatus, ReservedItem};
 use kippu_domain::validation::{Email, IdempotencyKey, ProviderName, Slug, Subject};
+use kippu_domain::webhook::Webhook;
 use kippu_domain::{
     AccountId, AttestorId, Currency, Duration, EventId, Money, OrganizationId, PurchaseRequestId,
-    ReservationId, SaleId, SessionId, TicketTypeId, Timestamp,
+    ReservationId, SaleId, SessionId, TicketTypeId, Timestamp, WebhookId,
 };
 
-use crate::{Hold, Insertion, Lease, Session, SessionRenewal, Store, StoreError, Unlink};
+use crate::{
+    Hold, Insertion, Lease, Session, SessionRenewal, Store, StoreError, Unlink, WebhookRun,
+};
 
 /// A store under test, plus whatever must outlive it (e.g. a temporary directory).
 pub struct Harness {
@@ -91,6 +94,8 @@ macro_rules! conformance_tests {
             first_external_sign_ins_create_one_account,
             identities_link_to_one_account,
             the_last_sign_in_method_is_kept,
+            webhooks_are_claimed_by_one_worker_when_due,
+            webhook_settings_and_progress_are_separate,
         );
     };
     (@cases $mode:tt; $($case:ident),* $(,)?) => {
@@ -1087,4 +1092,177 @@ pub async fn outbox_readers_never_skip_late_commits(store: Arc<dyn Store>) {
     written.sort();
     seen.sort();
     assert_eq!(seen, written);
+}
+
+fn webhook(organization: Option<OrganizationId>, delivered_through: i64) -> Webhook {
+    Webhook {
+        id: WebhookId::generate(),
+        organization_id: organization,
+        url: format!("https://hooks.example.org/{}", unique_suffix()),
+        topics: Vec::new(),
+        active: true,
+        delivered_through,
+        failures: 0,
+        last_error: None,
+        next_attempt_at: now(),
+        created_at: now(),
+        version: 1,
+    }
+}
+
+async fn append_expired(store: &dyn Store) -> i64 {
+    let mut tx = store.begin().await.unwrap();
+    tx.outbox()
+        .append_event(
+            &IntegrationEvent::ReservationExpired {
+                reservation_id: ReservationId::generate(),
+            },
+            now(),
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    store.latest_sequence().await.unwrap()
+}
+
+/// Claims every claimable webhook, returning their ids; leases end at `until`.
+async fn claim_all(store: &dyn Store, at: Timestamp, until: Timestamp) -> HashSet<WebhookId> {
+    let lease = Lease { now: at, until };
+    let mut claimed = HashSet::new();
+    while let Some(webhook) = store.claim_webhook(lease).await.unwrap() {
+        assert!(claimed.insert(webhook.id), "claimed twice under one lease");
+    }
+    claimed
+}
+
+pub async fn webhooks_are_claimed_by_one_worker_when_due(store: Arc<dyn Store>) {
+    let head = append_expired(store.as_ref()).await;
+    assert!(head > 0);
+    // Pending: behind the head. Caught up: nothing to deliver. Paused and not yet due: skipped.
+    let pending = webhook(None, head - 1);
+    let caught_up = webhook(None, head);
+    let paused = Webhook {
+        active: false,
+        ..webhook(None, 0)
+    };
+    let later = Webhook {
+        next_attempt_at: now() + Duration::minutes(5),
+        ..webhook(None, 0)
+    };
+    for webhook in [&pending, &caught_up, &paused, &later] {
+        store.insert_webhook(webhook).await.unwrap();
+    }
+
+    let until = now() + Duration::seconds(60);
+    let claimed = claim_all(store.as_ref(), now(), until).await;
+    assert!(claimed.contains(&pending.id));
+    for skipped in [&caught_up, &paused, &later] {
+        assert!(!claimed.contains(&skipped.id));
+    }
+    // Leased: nobody else gets it until the lease lapses.
+    assert!(
+        !claim_all(store.as_ref(), now(), until)
+            .await
+            .contains(&pending.id)
+    );
+
+    // A worker that outlived its lease cannot record over the next one's.
+    let lapsed = now() + Duration::seconds(61);
+    let next_until = lapsed + Duration::seconds(60);
+    assert!(
+        claim_all(store.as_ref(), lapsed, next_until)
+            .await
+            .contains(&pending.id)
+    );
+    let run = WebhookRun {
+        delivered_through: head,
+        failures: 0,
+        last_error: None,
+        next_attempt_at: lapsed,
+    };
+    assert!(
+        !store
+            .finish_webhook_run(pending.id, until, &run)
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .finish_webhook_run(pending.id, next_until, &run)
+            .await
+            .unwrap()
+    );
+    let finished = store.webhook(pending.id).await.unwrap().unwrap();
+    assert_eq!(finished.delivered_through, head);
+    // Caught up now, so not claimable even though its lease was released.
+    assert!(
+        !claim_all(
+            store.as_ref(),
+            next_until,
+            next_until + Duration::seconds(60)
+        )
+        .await
+        .contains(&pending.id)
+    );
+}
+
+pub async fn webhook_settings_and_progress_are_separate(store: Arc<dyn Store>) {
+    let organization = organization(store.as_ref()).await;
+    let hook = webhook(Some(organization), 0);
+    store.insert_webhook(&hook).await.unwrap();
+    assert_eq!(store.webhook(hook.id).await.unwrap(), Some(hook.clone()));
+    assert_eq!(
+        store.list_webhooks(Some(organization)).await.unwrap(),
+        vec![hook.clone()]
+    );
+    assert!(
+        !store
+            .list_webhooks(None)
+            .await
+            .unwrap()
+            .iter()
+            .any(|listed| listed.id == hook.id)
+    );
+
+    // Progress recorded by a run survives a settings update that read the webhook earlier.
+    let until = now() + Duration::seconds(60);
+    append_expired(store.as_ref()).await;
+    let claimed = claim_all(store.as_ref(), now(), until).await;
+    assert!(claimed.contains(&hook.id));
+    let run = WebhookRun {
+        delivered_through: 7,
+        failures: 3,
+        last_error: Some("HTTP 500".to_owned()),
+        next_attempt_at: now() + Duration::seconds(8),
+    };
+    assert!(
+        store
+            .finish_webhook_run(hook.id, until, &run)
+            .await
+            .unwrap()
+    );
+    let edited = Webhook {
+        url: "https://hooks.example.org/moved".to_owned(),
+        topics: vec!["tickets.issued".to_owned()],
+        active: false,
+        version: 2,
+        ..hook.clone()
+    };
+    store.update_webhook(&edited, 1).await.unwrap();
+    let stored = store.webhook(hook.id).await.unwrap().unwrap();
+    assert_eq!(
+        (stored.url.as_str(), stored.active, stored.version),
+        ("https://hooks.example.org/moved", false, 2)
+    );
+    assert_eq!(stored.topics, vec!["tickets.issued".to_owned()]);
+    assert_eq!(
+        (stored.delivered_through, stored.failures, stored.last_error),
+        (7, 3, Some("HTTP 500".to_owned()))
+    );
+    assert!(matches!(
+        store.update_webhook(&edited, 1).await,
+        Err(StoreError::Conflict("version"))
+    ));
+    assert!(store.delete_webhook(hook.id).await.unwrap());
+    assert!(!store.delete_webhook(hook.id).await.unwrap());
 }

@@ -19,6 +19,7 @@ use kippu_domain::reservation::ReservedItem;
 use kippu_domain::reservation::{Reservation, ReservationStatus};
 use kippu_domain::ticket::{Ticket, TicketStatus};
 use kippu_domain::validation::{Email, ProviderName, Slug, Subject};
+use kippu_domain::webhook::Webhook;
 use kippu_domain::{Currency, Money, Timestamp};
 use kippu_store::StoreError;
 use sqlx::types::Json;
@@ -540,6 +541,41 @@ impl TryFrom<TicketRow> for Ticket {
             issued_at: instant(row.issued_at),
             status,
             encoded: row.encoded,
+        })
+    }
+}
+
+#[derive(sqlx::FromRow)]
+pub(crate) struct WebhookRow {
+    id: Uuid,
+    organization_id: Option<Uuid>,
+    url: String,
+    topics: Json<Vec<String>>,
+    active: bool,
+    delivered_through: i64,
+    failures: i64,
+    last_error: Option<String>,
+    next_attempt_at: OffsetDateTime,
+    created_at: OffsetDateTime,
+    version: i64,
+}
+
+impl TryFrom<WebhookRow> for Webhook {
+    type Error = StoreError;
+
+    fn try_from(row: WebhookRow) -> Result<Self, StoreError> {
+        Ok(Self {
+            id: row.id.into(),
+            organization_id: row.organization_id.map(Into::into),
+            url: row.url,
+            topics: row.topics.0,
+            active: row.active,
+            delivered_through: row.delivered_through,
+            failures: uncount(row.failures)?,
+            last_error: row.last_error,
+            next_attempt_at: instant(row.next_attempt_at),
+            created_at: instant(row.created_at),
+            version: row.version,
         })
     }
 }

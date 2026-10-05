@@ -29,6 +29,7 @@ id = "kippu.example.org"
 # `kippu keygen` and provide them through the environment:
 #   KIPPU_KEYS__TICKET_SIGNING_KEY   signs tickets (public key published for gates)
 #   KIPPU_KEYS__TOKEN_SIGNING_KEY    signs access tokens, queue tickets and admission passes
+#   KIPPU_KEYS__WEBHOOK_SIGNING_KEY  signs webhook deliveries (optional; enables webhooks)
 #
 # After rotating the ticket key, list the previous public key here so gates keep accepting
 # tickets issued before the rotation:
@@ -51,6 +52,17 @@ admission_pass_ttl_seconds = 600
 # email when the provider verified it. Kippu does not verify registration emails, so only turn
 # this on if every account's email is known to be verified.
 link_by_verified_email = false
+
+[webhooks]
+# Deliveries are signed with keys.webhook_signing_key (KIPPU_KEYS__WEBHOOK_SIGNING_KEY); without
+# it webhooks are unavailable. Receivers verify with /.well-known/kippu/webhook-keys.
+interval_ms = 1000
+batch_size = 50
+timeout_seconds = 10
+lease_seconds = 60
+# Leave both off in production: they let a registered URL reach Kippu's own network.
+allow_http = false
+allow_private_networks = false
 
 [workers]
 # Background work runs on every instance; all tasks coordinate through the database.

@@ -10,6 +10,7 @@ mod payments;
 mod purchasing;
 mod ticketing;
 mod tx;
+mod webhooks;
 
 use std::str::FromStr;
 use std::time::Duration;

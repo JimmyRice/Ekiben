@@ -11,6 +11,7 @@ mod outbox;
 mod payments;
 mod purchasing;
 mod ticketing;
+mod webhooks;
 
 use async_trait::async_trait;
 use kippu_domain::Timestamp;
@@ -23,6 +24,7 @@ pub use outbox::{OutboxRecord, OutboxStore, OutboxTx};
 pub use payments::{PaymentStore, PaymentsTx};
 pub use purchasing::{Hold, InventoryTx, PurchaseStore, PurchasesTx, ReservationsTx};
 pub use ticketing::{TicketStore, TicketsTx};
+pub use webhooks::{WebhookRun, WebhookStore};
 
 /// Result of a storage operation.
 pub type StoreResult<T> = Result<T, StoreError>;
@@ -40,6 +42,7 @@ pub trait Store:
     + TicketStore
     + OutboxStore
     + HousekeepingStore
+    + WebhookStore
     + Send
     + Sync
     + 'static

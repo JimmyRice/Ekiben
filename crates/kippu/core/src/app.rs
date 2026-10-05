@@ -5,6 +5,7 @@ use std::fmt::Display;
 use std::sync::Arc;
 
 use axum::Router;
+use ed25519_dalek::SigningKey;
 use kippu_domain::Timestamp;
 use kippu_store::{AuditEntry, Store};
 use tokio_util::sync::CancellationToken;
@@ -34,6 +35,7 @@ struct Inner {
     clock: Arc<dyn Clock>,
     tokens: Tokens,
     tickets: TicketKeys,
+    webhook_key: Option<SigningKey>,
     policy: Policy,
 }
 
@@ -61,6 +63,11 @@ impl AppState {
     /// Signs tickets and lists the keys verifiers should trust.
     pub fn tickets(&self) -> &TicketKeys {
         &self.inner.tickets
+    }
+
+    /// Signs webhook deliveries, if the deployment configured a key.
+    pub fn webhook_key(&self) -> Option<&SigningKey> {
+        self.inner.webhook_key.as_ref()
     }
 
     /// Which roles hold which permissions.
@@ -150,6 +157,12 @@ impl Kippu {
                 parse_verifying_key(&format!("keys.retired_ticket_keys[{index}]"), key)
             })
             .collect::<Result<_, _>>()?;
+        let webhook_key = config
+            .keys
+            .webhook_signing_key
+            .as_ref()
+            .map(|key| parse_signing_key("keys.webhook_signing_key", key))
+            .transpose()?;
         let tasks = self
             .modules
             .iter()
@@ -160,6 +173,7 @@ impl Kippu {
             inner: Arc::new(Inner {
                 tokens: Tokens::from_config(&config)?,
                 tickets: TicketKeys::new(&ticket_key, retired),
+                webhook_key,
                 config,
                 store,
                 clock,

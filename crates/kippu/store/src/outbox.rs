@@ -24,6 +24,9 @@ pub trait OutboxStore {
     /// `n`, no event below `n` can still appear, so remembering the last sequence seen never
     /// skips an event — even while many transactions append concurrently.
     async fn outbox_after(&self, after: i64, limit: u32) -> StoreResult<Vec<OutboxRecord>>;
+
+    /// The sequence of the latest event, or 0 if there is none.
+    async fn latest_sequence(&self) -> StoreResult<i64>;
 }
 
 /// Writing the outbox inside a transaction.

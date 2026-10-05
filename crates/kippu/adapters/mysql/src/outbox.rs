@@ -29,6 +29,15 @@ impl OutboxStore for MySqlStore {
             })
             .collect()
     }
+
+    async fn latest_sequence(&self) -> StoreResult<i64> {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT CAST(COALESCE(MAX(sequence), 0) AS SIGNED) FROM outbox",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(error)
+    }
 }
 
 #[async_trait]

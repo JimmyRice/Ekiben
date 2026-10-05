@@ -56,6 +56,24 @@ pub enum IntegrationEvent {
 }
 
 impl IntegrationEvent {
+    /// Every topic there is.
+    pub const TOPICS: [&'static str; 4] = [
+        "payment.requested",
+        "tickets.issued",
+        "refund.required",
+        "reservation.expired",
+    ];
+
+    /// The reservation the event is about. Every event concerns one.
+    pub const fn reservation_id(&self) -> ReservationId {
+        match self {
+            Self::PaymentRequested { reservation_id, .. }
+            | Self::TicketsIssued { reservation_id, .. }
+            | Self::RefundRequired { reservation_id, .. }
+            | Self::ReservationExpired { reservation_id } => *reservation_id,
+        }
+    }
+
     /// The event's topic, e.g. `"payment.requested"`.
     pub const fn topic(&self) -> &'static str {
         match self {
@@ -78,5 +96,6 @@ mod tests {
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["topic"], event.topic());
+        assert!(IntegrationEvent::TOPICS.contains(&event.topic()));
     }
 }

@@ -29,6 +29,9 @@ pub struct Config {
     /// Background work.
     #[serde(default)]
     pub workers: WorkersConfig,
+    /// Delivering integration events to webhooks.
+    #[serde(default)]
+    pub webhooks: WebhooksConfig,
 }
 
 /// HTTP server settings.
@@ -102,6 +105,10 @@ pub struct KeysConfig {
     pub retired_ticket_keys: Vec<String>,
     /// Signs access tokens, queue tickets and admission passes. Every instance must share it.
     pub token_signing_key: SecretString,
+    /// Signs webhook deliveries; its public key is published at
+    /// `/.well-known/kippu/webhook-keys`. Webhooks are unavailable without it.
+    #[serde(default)]
+    pub webhook_signing_key: Option<SecretString>,
 }
 
 /// Root credentials. Root has no password and no database record: it is whoever holds the
@@ -161,6 +168,39 @@ impl Default for AuthConfig {
             queue_ticket_ttl_seconds: 6 * 60 * 60,
             admission_pass_ttl_seconds: 10 * 60,
             link_by_verified_email: false,
+        }
+    }
+}
+
+/// Delivering integration events to webhooks.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WebhooksConfig {
+    /// How often due webhooks are looked for.
+    pub interval_ms: u64,
+    /// Events delivered per webhook per run, at most.
+    pub batch_size: u32,
+    /// How long one delivery may take before it counts as failed.
+    pub timeout_seconds: u64,
+    /// How long a worker holds a webhook while delivering to it.
+    pub lease_seconds: u32,
+    /// Allow `http://` URLs. Off by default: deliveries carry business data.
+    pub allow_http: bool,
+    /// Allow URLs that point to loopback, private or link-local addresses (including cloud
+    /// metadata services). Off by default, so that registering a webhook cannot be used to
+    /// make Kippu call into its own network.
+    pub allow_private_networks: bool,
+}
+
+impl Default for WebhooksConfig {
+    fn default() -> Self {
+        Self {
+            interval_ms: 1_000,
+            batch_size: 50,
+            timeout_seconds: 10,
+            lease_seconds: 60,
+            allow_http: false,
+            allow_private_networks: false,
         }
     }
 }

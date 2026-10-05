@@ -17,6 +17,9 @@ hex.workspace = true
 kaisatsu = { workspace = true, features = ["issuer"] }
 kippu-domain = { workspace = true, features = ["openapi"] }
 kippu-store.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+rustls-native-certs.workspace = true
 secrecy = { workspace = true, features = ["serde"] }
 serde.workspace = true
 serde_json.workspace = true
