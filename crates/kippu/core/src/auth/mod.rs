@@ -1,8 +1,10 @@
 //! Authentication (who is calling) and authorization (what they may do).
 
+pub mod external;
 pub mod jwt;
 pub mod password;
 pub mod policy;
+pub mod sessions;
 pub mod tokens;
 
 use axum::extract::{FromRequestParts, OptionalFromRequestParts};

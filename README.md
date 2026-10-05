@@ -18,7 +18,7 @@ called `Pinpon`.
 ```text
 src/main.rs                     the `kippu` binary — about ten lines of wiring
 spec/                           language-neutral protocols and test vectors
-docs/                           walkthrough: from an empty database to a verified ticket
+docs/                           walkthrough (empty database → verified ticket), external sign-in
 crates/
 ├── kippu/domain                kippu-domain        pure domain model, no I/O
 ├── kippu/store                 kippu-store         storage ports + consistency contract

@@ -47,6 +47,10 @@ access_token_ttl_seconds = 900
 refresh_token_ttl_seconds = 2592000
 queue_ticket_ttl_seconds = 21600
 admission_pass_ttl_seconds = 600
+# Link an external sign-in (Sign in with Apple, WeChat…) to the existing account with the same
+# email when the provider verified it. Kippu does not verify registration emails, so only turn
+# this on if every account's email is known to be verified.
+link_by_verified_email = false
 
 [workers]
 # Background work runs on every instance; all tasks coordinate through the database.

@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::validation::{Email, Slug};
+use crate::validation::{Email, ProviderName, Slug, Subject};
 use crate::{AccountId, OrganizationId, Timestamp};
 
 /// What an authenticated principal may do. Ordered from least to most privileged.
@@ -62,19 +62,37 @@ impl std::str::FromStr for Role {
     }
 }
 
-/// A person who can sign in. Credentials are stored separately.
+/// A person who can sign in. Credentials are stored separately: a password, external
+/// [`Identity`]s (Sign in with Apple, WeChat, …), or both.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Account {
     /// Identity of the account.
     pub id: AccountId,
-    /// Sign-in address, unique across accounts.
-    pub email: Email,
+    /// Sign-in address, unique across accounts. Accounts created through an external sign-in
+    /// that shared no address have none.
+    pub email: Option<Email>,
     /// Name shown to other people.
     pub display_name: String,
     /// What the account may do.
     pub role: Role,
     /// When the account was created.
+    pub created_at: Timestamp,
+}
+
+/// A sign-in method outside Kippu, linked to an account: the account is whoever the
+/// provider vouches for as `subject`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct Identity {
+    /// Which provider, e.g. `apple` or `wechat`.
+    pub provider: ProviderName,
+    /// The provider's stable identifier for the person, e.g. Apple's `sub` or WeChat's
+    /// `unionid`. Unique per provider.
+    pub subject: Subject,
+    /// The linked account.
+    pub account_id: AccountId,
+    /// When it was linked.
     pub created_at: Timestamp,
 }
 

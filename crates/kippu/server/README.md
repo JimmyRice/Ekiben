@@ -26,6 +26,9 @@ with `--config` (or `KIPPU_CONFIG`), environment variables (`KIPPU_DATABASE__URL
 between section and key) and command-line flags. See `kippu.example.toml` at the repository
 root.
 
+The `external_login` example is such a distribution: the default modules plus a sign-in module
+for a pretend OAuth provider (see `docs/external-login.md`).
+
 Build your own distribution — with extra modules, or different adapters — without forking:
 
 ```rust,ignore

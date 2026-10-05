@@ -15,7 +15,7 @@ mod ticketing;
 use async_trait::async_trait;
 use kippu_domain::Timestamp;
 
-pub use accounts::{AccountStore, Session, SessionRenewal};
+pub use accounts::{AccountStore, Session, SessionRenewal, Unlink};
 pub use catalog::{CatalogStore, EventFilter};
 pub use error::{BoxError, StoreError};
 pub use housekeeping::{AuditEntry, HousekeepingStore, IdempotencyRecord};

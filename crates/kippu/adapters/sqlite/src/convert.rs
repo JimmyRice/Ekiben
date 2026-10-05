@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::str::FromStr;
 
-use kippu_domain::account::{Account, Organization, Role};
+use kippu_domain::account::{Account, Identity, Organization, Role};
 use kippu_domain::catalog::{Event, EventStatus, Inventory, Sale, TicketType};
 use kippu_domain::payment::{
     Attestor, AttestorKey, Environment, PaymentAttestation, PaymentDisposition,
@@ -15,7 +15,7 @@ use kippu_domain::payment::{
 use kippu_domain::purchase::{Basket, PurchaseRequest, PurchaseStatus, RejectionReason};
 use kippu_domain::reservation::{Reservation, ReservationStatus};
 use kippu_domain::ticket::{Ticket, TicketStatus};
-use kippu_domain::validation::{Email, Slug};
+use kippu_domain::validation::{Email, ProviderName, Slug, Subject};
 use kippu_domain::{Currency, Money, Timestamp};
 use kippu_store::StoreError;
 use serde::Serialize;
@@ -75,7 +75,7 @@ fn extensions_from_json(text: &str) -> Result<BTreeMap<u8, String>, StoreError> 
 #[derive(sqlx::FromRow)]
 pub(crate) struct AccountRow {
     id: Uuid,
-    email: String,
+    email: Option<String>,
     display_name: String,
     role: String,
     created_at: i64,
@@ -87,7 +87,11 @@ impl TryFrom<AccountRow> for Account {
     fn try_from(row: AccountRow) -> Result<Self, StoreError> {
         Ok(Self {
             id: row.id.into(),
-            email: Email::new(row.email).map_err(StoreError::backend)?,
+            email: row
+                .email
+                .map(Email::new)
+                .transpose()
+                .map_err(StoreError::backend)?,
             display_name: row.display_name,
             role: parse::<Role>(&row.role)?,
             created_at: instant(row.created_at),
@@ -99,7 +103,28 @@ impl TryFrom<AccountRow> for Account {
 pub(crate) struct CredentialsRow {
     #[sqlx(flatten)]
     pub(crate) account: AccountRow,
-    pub(crate) password_hash: String,
+    pub(crate) password_hash: Option<String>,
+}
+
+#[derive(sqlx::FromRow)]
+pub(crate) struct IdentityRow {
+    provider: String,
+    subject: String,
+    account_id: Uuid,
+    created_at: i64,
+}
+
+impl TryFrom<IdentityRow> for Identity {
+    type Error = StoreError;
+
+    fn try_from(row: IdentityRow) -> Result<Self, StoreError> {
+        Ok(Self {
+            provider: ProviderName::new(row.provider).map_err(StoreError::backend)?,
+            subject: Subject::new(row.subject).map_err(StoreError::backend)?,
+            account_id: row.account_id.into(),
+            created_at: instant(row.created_at),
+        })
+    }
 }
 
 #[derive(sqlx::FromRow)]

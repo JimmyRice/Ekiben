@@ -146,6 +146,11 @@ pub struct AuthConfig {
     pub queue_ticket_ttl_seconds: u32,
     /// How long an admission pass lets its holder submit purchase requests.
     pub admission_pass_ttl_seconds: u32,
+    /// Link an external sign-in to the existing account with the same email, when the
+    /// provider verified that email. Off by default: Kippu does not verify the emails people
+    /// register with, so whoever registered an address first would gain the provider's
+    /// sign-in for it. Turn on only if every account's email is known to be verified.
+    pub link_by_verified_email: bool,
 }
 
 impl Default for AuthConfig {
@@ -155,6 +160,7 @@ impl Default for AuthConfig {
             refresh_token_ttl_seconds: 30 * 24 * 60 * 60,
             queue_ticket_ttl_seconds: 6 * 60 * 60,
             admission_pass_ttl_seconds: 10 * 60,
+            link_by_verified_email: false,
         }
     }
 }

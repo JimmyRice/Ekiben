@@ -118,6 +118,35 @@ validated_string!(
     }
 );
 
+validated_string!(
+    /// The name of an external sign-in provider: 1–32 characters of `a-z`, `0-9`, `-` and `_`.
+    ProviderName,
+    |value| {
+        let valid = (1..=32).contains(&value.len())
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-' || byte == b'_');
+        if valid {
+            Ok(value)
+        } else {
+            Err(ValidationError::new("provider", "must be 1-32 characters of a-z, 0-9, - and _"))
+        }
+    }
+);
+
+validated_string!(
+    /// A provider's identifier for a person: 1–255 bytes without control characters.
+    Subject,
+    |value| {
+        let valid = (1..=255).contains(&value.len()) && !value.chars().any(char::is_control);
+        if valid {
+            Ok(value)
+        } else {
+            Err(ValidationError::new("subject", "must be 1-255 bytes without control characters"))
+        }
+    }
+);
+
 /// Validates a required, human-readable text field.
 pub fn non_empty(field: &'static str, value: &str, max_len: usize) -> Result<(), ValidationError> {
     if value.trim().is_empty() {

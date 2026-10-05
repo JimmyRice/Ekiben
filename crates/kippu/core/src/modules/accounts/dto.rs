@@ -3,7 +3,7 @@ use kippu_domain::{OrganizationId, Timestamp};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::auth::tokens::IssuedToken;
+pub use crate::auth::sessions::SessionResponse;
 
 /// Sign up as a user.
 #[derive(Debug, Deserialize, ToSchema)]
@@ -32,17 +32,21 @@ pub struct RefreshRequest {
     pub refresh_token: String,
 }
 
-/// A signed-in session.
-#[derive(Debug, Serialize, ToSchema)]
-pub struct SessionResponse {
-    /// Short-lived bearer token for API calls.
-    pub access_token: IssuedToken,
-    /// Long-lived, single-use token to obtain the next access token.
-    pub refresh_token: String,
-    /// When the refresh token lapses.
-    pub refresh_expires_at: Timestamp,
-    /// The signed-in account.
-    pub account: Account,
+/// Set your email address.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SetEmailRequest {
+    /// The new sign-in address.
+    pub email: String,
+}
+
+/// Set or change your password.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SetPasswordRequest {
+    /// Your current password. Leave it out only if the account has none yet (it was
+    /// created through an external sign-in).
+    pub current_password: Option<String>,
+    /// 10 to 256 characters.
+    pub new_password: String,
 }
 
 /// Who the caller is.

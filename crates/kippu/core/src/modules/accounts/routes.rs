@@ -4,19 +4,20 @@
 use crate::http::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use kippu_domain::account::{Account, Organization, Role};
-use kippu_domain::validation::{Email, Slug, non_empty};
+use kippu_domain::account::{Account, Identity, Organization, Role};
+use kippu_domain::validation::{Email, ProviderName, Slug, Subject, non_empty};
 use kippu_domain::{AccountId, OrganizationId};
+use kippu_store::Unlink;
 
 use super::dto::{
     AuditEntryResponse, CreateAccountRequest, CreateOrganizationRequest, LoginRequest, Me,
-    RefreshRequest, RegisterRequest, SessionResponse,
+    RefreshRequest, RegisterRequest, SessionResponse, SetEmailRequest, SetPasswordRequest,
 };
-use super::permissions::{ACCOUNTS_MANAGE, AUDIT_READ, ORGANIZATIONS_MANAGE};
-use super::service::{hash_token, refresh_session, start_session, validate_display_name};
+use super::permissions::{ACCOUNTS_MANAGE, AUDIT_READ, ORGANIZATIONS_MANAGE, PROFILE_MANAGE};
+use super::service::{set_password, validate_display_name};
 use crate::app::AppState;
 use crate::auth::password::{DUMMY_HASH, hash_password, validate_password, verify_password};
-use crate::auth::{Principal, Scope};
+use crate::auth::{Principal, Scope, sessions};
 use crate::error::{ApiError, ApiResult, Problem};
 use crate::http::PageQuery;
 
@@ -34,7 +35,7 @@ async fn insert_account(
     validate_display_name(&display_name)?;
     let account = Account {
         id: AccountId::generate(),
-        email,
+        email: Some(email),
         display_name,
         role,
         created_at: state.now(),
@@ -42,7 +43,7 @@ async fn insert_account(
     let password_hash = hash_password(password).await?;
     state
         .store()
-        .insert_account(&account, &password_hash)
+        .insert_account(&account, Some(&password_hash))
         .await?;
     Ok(account)
 }
@@ -87,14 +88,15 @@ pub(crate) async fn login(
         Ok(email) => state.store().account_credentials(&email).await?,
         Err(_) => None,
     };
-    // Verify against a dummy hash when there is no account, so timing reveals nothing.
+    // Verify against a dummy hash when there is no account or it has no password (it signs
+    // in through an external provider), so timing reveals nothing.
     let (account, hash) = match credentials {
-        Some((account, hash)) => (Some(account), hash),
-        None => (None, DUMMY_HASH.clone()),
+        Some((account, Some(hash))) => (Some(account), hash),
+        _ => (None, DUMMY_HASH.clone()),
     };
     let password_matches = verify_password(request.password, hash).await?;
     match account {
-        Some(account) if password_matches => Ok(Json(start_session(&state, account).await?)),
+        Some(account) if password_matches => Ok(Json(sessions::issue(&state, account).await?)),
         _ => Err(invalid()),
     }
 }
@@ -109,7 +111,9 @@ pub(crate) async fn refresh(
     State(state): State<AppState>,
     Json(request): Json<RefreshRequest>,
 ) -> ApiResult<Json<SessionResponse>> {
-    Ok(Json(refresh_session(&state, &request.refresh_token).await?))
+    Ok(Json(
+        sessions::refresh(&state, &request.refresh_token).await?,
+    ))
 }
 
 /// Sign out: the refresh token stops working. Access tokens lapse on their own.
@@ -122,10 +126,7 @@ pub(crate) async fn logout(
     State(state): State<AppState>,
     Json(request): Json<RefreshRequest>,
 ) -> ApiResult<StatusCode> {
-    state
-        .store()
-        .revoke_session(&hash_token(&request.refresh_token))
-        .await?;
+    sessions::revoke(&state, &request.refresh_token).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -150,6 +151,123 @@ pub(crate) async fn me(State(state): State<AppState>, principal: Principal) -> A
                 organizations,
             }))
         }
+    }
+}
+
+/// The caller's own account, after checking they may manage it.
+fn own_account(state: &AppState, principal: &Principal) -> ApiResult<AccountId> {
+    let account = principal.require_account()?;
+    state.authorize(principal, PROFILE_MANAGE, Scope::Account(account))?;
+    Ok(account)
+}
+
+/// Set your email address, e.g. after signing up through a provider that shared none.
+#[utoipa::path(
+    put, path = "/v1/me/email", tag = TAG,
+    security(("bearer" = [])),
+    request_body = SetEmailRequest,
+    responses((status = 200, body = Account), (status = 409, description = "Email already registered", body = Problem))
+)]
+pub(crate) async fn set_email(
+    State(state): State<AppState>,
+    principal: Principal,
+    Json(request): Json<SetEmailRequest>,
+) -> ApiResult<Json<Account>> {
+    let account = own_account(&state, &principal)?;
+    let email = Email::new(request.email)?;
+    if !state.store().set_email(account, &email).await? {
+        return Err(ApiError::not_found("account"));
+    }
+    let account = state
+        .store()
+        .account(account)
+        .await?
+        .ok_or_else(|| ApiError::not_found("account"))?;
+    Ok(Json(account))
+}
+
+/// Set or change your password.
+#[utoipa::path(
+    put, path = "/v1/me/password", tag = TAG,
+    security(("bearer" = [])),
+    request_body = SetPasswordRequest,
+    responses((status = 204), (status = 403, description = "Current password missing or wrong", body = Problem), (status = 422, body = Problem))
+)]
+pub(crate) async fn change_password(
+    State(state): State<AppState>,
+    principal: Principal,
+    Json(request): Json<SetPasswordRequest>,
+) -> ApiResult<StatusCode> {
+    let account = own_account(&state, &principal)?;
+    set_password(
+        &state,
+        account,
+        request.current_password,
+        request.new_password,
+    )
+    .await?;
+    state
+        .audit(&principal, "account.password.set", account)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// The external sign-ins (Sign in with Apple, WeChat, …) linked to your account.
+#[utoipa::path(
+    get, path = "/v1/me/identities", tag = TAG,
+    security(("bearer" = [])),
+    responses((status = 200, body = Vec<Identity>))
+)]
+pub(crate) async fn list_identities(
+    State(state): State<AppState>,
+    principal: Principal,
+) -> ApiResult<Json<Vec<Identity>>> {
+    let account = own_account(&state, &principal)?;
+    Ok(Json(state.store().identities(account).await?))
+}
+
+/// Unlink an external sign-in. An account always keeps a way to sign in: the last one cannot
+/// be unlinked until a password is set.
+#[utoipa::path(
+    delete, path = "/v1/me/identities/{provider}/{subject}", tag = TAG,
+    security(("bearer" = [])),
+    params(("provider" = String, Path), ("subject" = String, Path)),
+    responses(
+        (status = 204),
+        (status = 404, body = Problem),
+        (status = 409, description = "The account's only way to sign in", body = Problem)
+    )
+)]
+pub(crate) async fn unlink_identity(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((provider, subject)): Path<(String, String)>,
+) -> ApiResult<StatusCode> {
+    let account = own_account(&state, &principal)?;
+    let not_found = || ApiError::not_found("identity");
+    let provider = ProviderName::new(provider).map_err(|_| not_found())?;
+    let subject = Subject::new(subject).map_err(|_| not_found())?;
+    match state
+        .store()
+        .unlink_identity(account, &provider, &subject)
+        .await?
+    {
+        Unlink::Unlinked => {
+            state
+                .audit(
+                    &principal,
+                    "identity.unlink",
+                    format!("{account}/{provider}"),
+                )
+                .await?;
+            Ok(StatusCode::NO_CONTENT)
+        }
+        Unlink::NotLinked => Err(not_found()),
+        Unlink::LastSignInMethod => Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "last-sign-in-method",
+            "this is the account's only way to sign in; set a password first",
+        )),
     }
 }
 

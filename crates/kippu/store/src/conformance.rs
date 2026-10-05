@@ -23,20 +23,20 @@ use std::any::Any;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
-use kippu_domain::account::{Account, Organization, Role};
+use kippu_domain::account::{Account, Identity, Organization, Role};
 use kippu_domain::admission::AdmissionPolicy;
 use kippu_domain::catalog::{Event, EventStatus, Sale, TicketType};
 use kippu_domain::outbox::IntegrationEvent;
 use kippu_domain::payment::{Environment, PaymentAttestation, PaymentDisposition};
 use kippu_domain::purchase::{Basket, LineItem, PurchaseRequest, PurchaseStatus};
 use kippu_domain::reservation::{Reservation, ReservationStatus, ReservedItem};
-use kippu_domain::validation::{Email, IdempotencyKey, Slug};
+use kippu_domain::validation::{Email, IdempotencyKey, ProviderName, Slug, Subject};
 use kippu_domain::{
     AccountId, AttestorId, Currency, Duration, EventId, Money, OrganizationId, PurchaseRequestId,
     ReservationId, SaleId, SessionId, TicketTypeId, Timestamp,
 };
 
-use crate::{Hold, Insertion, Lease, Session, SessionRenewal, Store, StoreError};
+use crate::{Hold, Insertion, Lease, Session, SessionRenewal, Store, StoreError, Unlink};
 
 /// A store under test, plus whatever must outlive it (e.g. a temporary directory).
 pub struct Harness {
@@ -76,6 +76,10 @@ macro_rules! conformance_tests {
             sessions_rotate_once,
             only_holding_reservations_are_overdue,
             capacity_cannot_drop_below_stock_in_use,
+            accounts_may_lack_email_and_password,
+            first_external_sign_ins_create_one_account,
+            identities_link_to_one_account,
+            the_last_sign_in_method_is_kept,
         );
     };
     (@cases $connect:expr; $($case:ident),* $(,)?) => {
@@ -102,12 +106,12 @@ fn unique_suffix() -> String {
 async fn account(store: &dyn Store) -> AccountId {
     let account = Account {
         id: AccountId::generate(),
-        email: Email::new(format!("{}@example.org", unique_suffix())).unwrap(),
+        email: Some(Email::new(format!("{}@example.org", unique_suffix())).unwrap()),
         display_name: "Buyer".to_owned(),
         role: Role::User,
         created_at: now(),
     };
-    store.insert_account(&account, "hash").await.unwrap();
+    store.insert_account(&account, Some("hash")).await.unwrap();
     account.id
 }
 
@@ -261,18 +265,18 @@ pub async fn migrations_are_idempotent(store: Arc<dyn Store>) {
 pub async fn unique_keys_report_conflicts(store: Arc<dyn Store>) {
     let account = Account {
         id: AccountId::generate(),
-        email: Email::new(format!("{}@example.org", unique_suffix())).unwrap(),
+        email: Some(Email::new(format!("{}@example.org", unique_suffix())).unwrap()),
         display_name: "Twin".to_owned(),
         role: Role::User,
         created_at: now(),
     };
-    store.insert_account(&account, "hash").await.unwrap();
+    store.insert_account(&account, Some("hash")).await.unwrap();
     let twin = Account {
         id: AccountId::generate(),
         ..account
     };
     assert!(matches!(
-        store.insert_account(&twin, "hash").await,
+        store.insert_account(&twin, Some("hash")).await,
         Err(StoreError::Conflict("email"))
     ));
 
@@ -771,5 +775,237 @@ pub async fn capacity_cannot_drop_below_stock_in_use(store: Arc<dyn Store>) {
             .unwrap()
             .available(),
         0
+    );
+}
+
+fn passwordless(email: Option<Email>) -> Account {
+    Account {
+        id: AccountId::generate(),
+        email,
+        display_name: "Social".to_owned(),
+        role: Role::User,
+        created_at: now(),
+    }
+}
+
+fn identity(provider: &str, account_id: AccountId) -> Identity {
+    Identity {
+        provider: ProviderName::new(provider).unwrap(),
+        subject: Subject::new(format!("subject-{}", unique_suffix())).unwrap(),
+        account_id,
+        created_at: now(),
+    }
+}
+
+pub async fn accounts_may_lack_email_and_password(store: Arc<dyn Store>) {
+    for _ in 0..2 {
+        let account = passwordless(None);
+        store.insert_account(&account, None).await.unwrap();
+        assert_eq!(
+            store.account(account.id).await.unwrap(),
+            Some(account.clone())
+        );
+        assert_eq!(store.password_hash(account.id).await.unwrap(), None);
+    }
+
+    let email = Email::new(format!("{}@example.org", unique_suffix())).unwrap();
+    let account = passwordless(Some(email.clone()));
+    store.insert_account(&account, None).await.unwrap();
+    let (found, hash) = store.account_credentials(&email).await.unwrap().unwrap();
+    assert_eq!((found.id, hash), (account.id, None));
+
+    assert!(
+        store
+            .set_password_hash(account.id, "new-hash")
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        store.password_hash(account.id).await.unwrap().as_deref(),
+        Some("new-hash")
+    );
+    assert!(
+        !store
+            .set_password_hash(AccountId::generate(), "x")
+            .await
+            .unwrap()
+    );
+
+    let other = passwordless(None);
+    store.insert_account(&other, None).await.unwrap();
+    assert!(matches!(
+        store.set_email(other.id, &email).await,
+        Err(StoreError::Conflict("email"))
+    ));
+    let fresh = Email::new(format!("{}@example.org", unique_suffix())).unwrap();
+    assert!(store.set_email(other.id, &fresh).await.unwrap());
+    assert_eq!(
+        store.account(other.id).await.unwrap().unwrap().email,
+        Some(fresh)
+    );
+}
+
+pub async fn first_external_sign_ins_create_one_account(store: Arc<dyn Store>) {
+    let first = passwordless(None);
+    let link = identity("apple", first.id);
+    let attempts = (0..8).map(|_| {
+        let store = store.clone();
+        let account = Account {
+            id: AccountId::generate(),
+            ..first.clone()
+        };
+        let link = Identity {
+            account_id: account.id,
+            ..link.clone()
+        };
+        tokio::spawn(async move {
+            let outcome = store
+                .create_account_with_identity(&account, &link)
+                .await
+                .unwrap();
+            (account.id, outcome)
+        })
+    });
+    let mut winners = Vec::new();
+    let mut linked_to = HashSet::new();
+    for attempt in attempts.collect::<Vec<_>>() {
+        let (id, outcome) = attempt.await.unwrap();
+        match outcome {
+            Insertion::Inserted => {
+                winners.push(id);
+                linked_to.insert(id);
+            }
+            Insertion::Existing(existing) => {
+                linked_to.insert(existing);
+                assert_eq!(
+                    store.account(id).await.unwrap(),
+                    None,
+                    "a loser left an account"
+                );
+            }
+        }
+    }
+    assert_eq!(winners.len(), 1);
+    assert_eq!(linked_to.len(), 1, "everyone ends up on the same account");
+    assert_eq!(
+        store
+            .identity_account(&link.provider, &link.subject)
+            .await
+            .unwrap(),
+        Some(winners[0])
+    );
+
+    // An email conflict creates nothing.
+    let email = Email::new(format!("{}@example.org", unique_suffix())).unwrap();
+    store
+        .insert_account(&passwordless(Some(email.clone())), None)
+        .await
+        .unwrap();
+    let clash = passwordless(Some(email));
+    let clash_link = identity("apple", clash.id);
+    assert!(matches!(
+        store
+            .create_account_with_identity(&clash, &clash_link)
+            .await,
+        Err(StoreError::Conflict("email"))
+    ));
+    assert_eq!(store.account(clash.id).await.unwrap(), None);
+    assert_eq!(
+        store
+            .identity_account(&clash_link.provider, &clash_link.subject)
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+pub async fn identities_link_to_one_account(store: Arc<dyn Store>) {
+    let owner = account(store.as_ref()).await;
+    let other = account(store.as_ref()).await;
+    let wechat = identity("wechat", owner);
+    assert_eq!(
+        store.insert_identity(&wechat).await.unwrap(),
+        Insertion::Inserted
+    );
+    assert_eq!(
+        store.insert_identity(&wechat).await.unwrap(),
+        Insertion::Existing(owner)
+    );
+    let stolen = Identity {
+        account_id: other,
+        ..wechat.clone()
+    };
+    assert_eq!(
+        store.insert_identity(&stolen).await.unwrap(),
+        Insertion::Existing(owner)
+    );
+    // The same subject at another provider is another identity.
+    let qq = Identity {
+        provider: ProviderName::new("qq").unwrap(),
+        ..stolen
+    };
+    assert_eq!(
+        store.insert_identity(&qq).await.unwrap(),
+        Insertion::Inserted
+    );
+
+    let listed = store.identities(owner).await.unwrap();
+    assert_eq!(listed, vec![wechat.clone()]);
+    assert!(store.delete_account(owner).await.unwrap());
+    assert_eq!(
+        store
+            .identity_account(&wechat.provider, &wechat.subject)
+            .await
+            .unwrap(),
+        None,
+        "identities go with their account"
+    );
+}
+
+pub async fn the_last_sign_in_method_is_kept(store: Arc<dyn Store>) {
+    let social = passwordless(None);
+    let apple = identity("apple", social.id);
+    assert_eq!(
+        store
+            .create_account_with_identity(&social, &apple)
+            .await
+            .unwrap(),
+        Insertion::Inserted
+    );
+    let wechat = identity("wechat", social.id);
+    store.insert_identity(&wechat).await.unwrap();
+
+    // Two concurrent unlinks: one may succeed, the other must keep the last identity.
+    let unlink = |identity: Identity| {
+        let store = store.clone();
+        tokio::spawn(async move {
+            store
+                .unlink_identity(identity.account_id, &identity.provider, &identity.subject)
+                .await
+                .unwrap()
+        })
+    };
+    let (first, second) = (unlink(apple.clone()), unlink(wechat.clone()));
+    let mut outcomes = vec![first.await.unwrap(), second.await.unwrap()];
+    outcomes.sort_by_key(|outcome| *outcome == Unlink::Unlinked);
+    assert_eq!(outcomes, vec![Unlink::LastSignInMethod, Unlink::Unlinked]);
+    assert_eq!(store.identities(social.id).await.unwrap().len(), 1);
+    assert_eq!(
+        store
+            .unlink_identity(social.id, &apple.provider, &Subject::new("nobody").unwrap())
+            .await
+            .unwrap(),
+        Unlink::NotLinked
+    );
+
+    // With a password, the last identity can go.
+    store.set_password_hash(social.id, "hash").await.unwrap();
+    let remaining = store.identities(social.id).await.unwrap().remove(0);
+    assert_eq!(
+        store
+            .unlink_identity(social.id, &remaining.provider, &remaining.subject)
+            .await
+            .unwrap(),
+        Unlink::Unlinked
     );
 }

@@ -37,6 +37,8 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
 [dev-dependencies]
 kaisatsu = { workspace = true, features = ["issuer"] }
+sha2.workspace = true
+utoipa-axum.workspace = true
 tempfile.workspace = true
 tower = { workspace = true, features = ["util"] }
 

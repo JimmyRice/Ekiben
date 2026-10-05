@@ -19,7 +19,7 @@ use kippu_core::config::{
     AuthConfig, Config, DatabaseConfig, IssuerConfig, KeysConfig, RootConfig, RootKey,
     ServerConfig, WorkersConfig,
 };
-use kippu_core::{App, Kippu, ManualClock};
+use kippu_core::{App, Kippu, ManualClock, Module};
 use kippu_domain::{Duration, Timestamp};
 use kippu_store::Store;
 use kippu_store_sqlite::SqliteStore;
@@ -45,13 +45,22 @@ pub struct Reply {
 
 impl TestApp {
     pub async fn start() -> Self {
+        Self::start_with(Vec::new(), |_| {}).await
+    }
+
+    /// An instance with `extra` modules besides the defaults, and `configure` applied to the
+    /// test configuration.
+    pub async fn start_with(
+        extra: Vec<Arc<dyn Module>>,
+        configure: impl FnOnce(&mut Config),
+    ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let url = format!("sqlite://{}", dir.path().join("kippu.db").display());
         let store = SqliteStore::connect(&url).await.unwrap();
         store.migrate().await.unwrap();
 
         let root_key = SigningKey::from_bytes(&[42; 32]);
-        let config = Config {
+        let mut config = Config {
             server: ServerConfig::default(),
             database: DatabaseConfig {
                 url: url.into(),
@@ -78,8 +87,10 @@ impl TestApp {
         let clock = Arc::new(ManualClock::new(Timestamp::from_unix_seconds(
             1_798_761_600,
         ))); // 2027-01-01
+        configure(&mut config);
         let app = Kippu::new()
             .modules(kippu_core::default_modules())
+            .modules(extra)
             .build(config, Arc::new(store), clock.clone())
             .unwrap();
         Self {

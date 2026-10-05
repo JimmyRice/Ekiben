@@ -10,7 +10,7 @@ Code, rustdoc, READMEs and `spec/` are written in English.
 ```text
 src/main.rs                    the `kippu` binary: ~10 lines of wiring, nothing else
 spec/                          normative protocols (KP1 tickets, attestors) + shared test vectors
-docs/                          walkthrough.md (raw HTTP) + walkthrough.http (RustRover HTTP client)
+docs/                          walkthrough.md/.http, external-login.md (writing a sign-in module)
 crates/kippu/domain            pure domain: ids, money, timestamps, state machines — no I/O, no clock
 crates/kippu/store             storage ports, consistency contract, `conformance` test suite
 crates/kippu/core              Module system, auth/RBAC, HTTP, background tasks, built-in modules
@@ -28,7 +28,7 @@ Keep the repository root uncluttered and do not add speculative `.gitignore` ent
 ## Commands
 
 ```bash
-cargo test --workspace --all-features                                   # 103 tests incl. e2e over TCP
+cargo test --workspace --all-features                                   # 111 tests incl. e2e over TCP
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets           # default features too
 cargo fmt --all
@@ -99,6 +99,9 @@ as `shop`, `attestor`, `reserve`, `drain`); the full journey over real TCP is
   `sqlx::AssertSqlSafe(format!(…))` for composed SQL built from constants. `sqlx::migrate!`
   needs the `macros` feature. SQLite writes go through a single-connection writer pool opened
   with `BEGIN IMMEDIATE`; reads use a separate WAL reader pool.
+- **SQLite cannot relax a column in place:** rebuild the table in a migration that starts
+  with `-- no-transaction` (foreign keys off, one `BEGIN IMMEDIATE` … `COMMIT`), as
+  `0002_identities.sql` does.
 - **ed25519-dalek 3:** no `std` feature (use `fast`, `zeroize`, `pkcs8`, `pem`, `rand_core`);
   `verify_strict` needs one contiguous message. **sha2 0.11**, **argon2 0.6**
   (`PasswordHasher::hash_password(bytes)`), **getrandom 0.4** (`getrandom::fill`).

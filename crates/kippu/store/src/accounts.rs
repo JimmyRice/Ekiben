@@ -1,9 +1,20 @@
 use async_trait::async_trait;
-use kippu_domain::account::{Account, Organization};
-use kippu_domain::validation::Email;
+use kippu_domain::account::{Account, Identity, Organization};
+use kippu_domain::validation::{Email, ProviderName, Subject};
 use kippu_domain::{AccountId, OrganizationId, SessionId, Timestamp};
 
-use crate::{PageRequest, StoreResult};
+use crate::{Insertion, PageRequest, StoreResult};
+
+/// What [`AccountStore::unlink_identity`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unlink {
+    /// The identity was removed.
+    Unlinked,
+    /// The account has no such identity.
+    NotLinked,
+    /// The identity is the account's only way to sign in, so it was kept.
+    LastSignInMethod,
+}
 
 /// A signed-in device: the hash of its refresh token and when it lapses.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,14 +48,71 @@ pub struct SessionRenewal {
 /// Accounts, credentials, sessions and organizations.
 #[async_trait]
 pub trait AccountStore {
-    /// Creates an account. Fails with `Conflict("email")` if the email is taken.
-    async fn insert_account(&self, account: &Account, password_hash: &str) -> StoreResult<()>;
+    /// Creates an account, with a password unless `password_hash` is `None`. Fails with
+    /// `Conflict("email")` if the email is taken; any number of accounts may have none.
+    async fn insert_account(
+        &self,
+        account: &Account,
+        password_hash: Option<&str>,
+    ) -> StoreResult<()>;
+
+    /// Creates an account signed in through `identity` (whose `account_id` is `account.id`),
+    /// without a password.
+    ///
+    /// **Contract:** atomic. If `(provider, subject)` is already linked, nothing is created
+    /// and the linked account is returned as `Existing`, so concurrent first sign-ins of one
+    /// person yield one account. Fails with `Conflict("email")`, creating nothing, if the
+    /// email is taken.
+    async fn create_account_with_identity(
+        &self,
+        account: &Account,
+        identity: &Identity,
+    ) -> StoreResult<Insertion<AccountId>>;
 
     /// Looks an account up by id.
     async fn account(&self, id: AccountId) -> StoreResult<Option<Account>>;
 
-    /// Looks an account and its password hash up by email, for sign-in.
-    async fn account_credentials(&self, email: &Email) -> StoreResult<Option<(Account, String)>>;
+    /// Looks an account and its password hash (if it has a password) up by email, for sign-in.
+    async fn account_credentials(
+        &self,
+        email: &Email,
+    ) -> StoreResult<Option<(Account, Option<String>)>>;
+
+    /// The account's password hash, if the account exists and has a password.
+    async fn password_hash(&self, id: AccountId) -> StoreResult<Option<String>>;
+
+    /// Sets an account's password. Returns whether the account exists.
+    async fn set_password_hash(&self, id: AccountId, password_hash: &str) -> StoreResult<bool>;
+
+    /// Sets an account's email. Returns whether the account exists; fails with
+    /// `Conflict("email")` if another account has it.
+    async fn set_email(&self, id: AccountId, email: &Email) -> StoreResult<bool>;
+
+    /// Links an identity to an existing account. If `(provider, subject)` is already linked —
+    /// to this account or another — returns that account as `Existing` and changes nothing.
+    async fn insert_identity(&self, identity: &Identity) -> StoreResult<Insertion<AccountId>>;
+
+    /// The account linked to `(provider, subject)`, if any.
+    async fn identity_account(
+        &self,
+        provider: &ProviderName,
+        subject: &Subject,
+    ) -> StoreResult<Option<AccountId>>;
+
+    /// An account's identities, oldest first.
+    async fn identities(&self, account: AccountId) -> StoreResult<Vec<Identity>>;
+
+    /// Removes one of an account's identities.
+    ///
+    /// **Contract:** an account always keeps a way to sign in. The identity is kept, and
+    /// `LastSignInMethod` returned, when the account has no password and no other identity;
+    /// concurrent unlinks of the same account must not both succeed in removing the last two.
+    async fn unlink_identity(
+        &self,
+        account: AccountId,
+        provider: &ProviderName,
+        subject: &Subject,
+    ) -> StoreResult<Unlink>;
 
     /// Lists accounts in id order.
     async fn list_accounts(&self, page: PageRequest) -> StoreResult<Vec<Account>>;
