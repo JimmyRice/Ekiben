@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 /// Kippu (切符): ticketing infrastructure for conventions.
 #[derive(Debug, Parser)]
-#[command(version, propagate_version = true)]
+#[command(name = "kippu", version, propagate_version = true)]
 pub struct Cli {
     /// Configuration file (TOML). Environment variables `KIPPU_<SECTION>__<KEY>` override it.
     #[arg(long, short, global = true, env = "KIPPU_CONFIG")]
@@ -46,11 +46,7 @@ pub enum Command {
     /// Apply database migrations and exit.
     Migrate(DatabaseArgs),
     /// Generate an Ed25519 key pair for the configuration.
-    Keygen {
-        /// Print PEM (PKCS#8 / SPKI) instead of base64.
-        #[arg(long)]
-        pem: bool,
-    },
+    Keygen(KeygenArgs),
     /// Mint a short-lived root token with a root private key.
     RootToken(RootTokenArgs),
     /// Inspect configuration.
@@ -78,6 +74,18 @@ pub struct ServeArgs {
     /// Where the database is.
     #[command(flatten)]
     pub database: DatabaseArgs,
+}
+
+/// Arguments of `keygen`.
+#[derive(Debug, Clone, clap::Args)]
+pub struct KeygenArgs {
+    /// Use PEM (PKCS#8 private key, SPKI public key) instead of base64.
+    #[arg(long)]
+    pub pem: bool,
+    /// Write `<PREFIX>.key` (private, mode 0600) and `<PREFIX>.pub` instead of printing.
+    /// Existing files are never overwritten.
+    #[arg(long, value_name = "PREFIX")]
+    pub out: Option<PathBuf>,
 }
 
 /// Arguments of `root-token`.

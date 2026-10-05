@@ -1,12 +1,14 @@
 //! What each subcommand does.
 
-use std::io::Read;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use ed25519_dalek::SigningKey;
 use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
+use ed25519_dalek::pkcs8::spki::der::zeroize::Zeroizing;
 use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
 use kippu_core::auth::tokens::mint_root_token;
 use kippu_core::keys::parse_signing_key;
@@ -17,7 +19,7 @@ use secrecy::{ExposeSecret, SecretString};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
-use crate::cli::{Cli, DatabaseArgs, RootTokenArgs, ServeArgs};
+use crate::cli::{Cli, DatabaseArgs, KeygenArgs, RootTokenArgs, ServeArgs};
 use crate::{adapters, assemble, config, serve_app};
 
 fn load(
@@ -101,21 +103,61 @@ pub(crate) async fn migrate(cli: &Cli, args: &DatabaseArgs) -> Result<(), BoxErr
     clippy::print_stdout,
     reason = "printing the key pair is the command's output"
 )]
-pub(crate) fn keygen(pem: bool) -> Result<(), BoxError> {
+pub(crate) fn keygen(args: &KeygenArgs) -> Result<(), BoxError> {
     let mut seed = [0; 32];
     getrandom::fill(&mut seed).map_err(|error| error.to_string())?;
     let key = SigningKey::from_bytes(&seed);
-    if pem {
-        print!("{}", key.to_pkcs8_pem(LineEnding::LF)?.as_str());
-        print!("{}", key.verifying_key().to_public_key_pem(LineEnding::LF)?);
+    let (private, public) = if args.pem {
+        (
+            key.to_pkcs8_pem(LineEnding::LF)?,
+            key.verifying_key().to_public_key_pem(LineEnding::LF)?,
+        )
     } else {
-        println!("private key: {}", STANDARD.encode(key.to_bytes()));
-        println!(
-            "public key:  {}",
-            STANDARD.encode(key.verifying_key().as_bytes())
-        );
+        (
+            Zeroizing::new(format!("{}\n", STANDARD.encode(key.to_bytes()))),
+            format!("{}\n", STANDARD.encode(key.verifying_key().as_bytes())),
+        )
+    };
+    let Some(prefix) = &args.out else {
+        if args.pem {
+            print!("{}{public}", private.as_str());
+        } else {
+            print!("private key: {}public key:  {public}", private.as_str());
+        }
+        return Ok(());
+    };
+    let private_path = with_suffix(prefix, "key");
+    let public_path = with_suffix(prefix, "pub");
+    // Check both first so a refusal leaves nothing half-written.
+    for path in [&private_path, &public_path] {
+        if path.exists() {
+            return Err(format!("{} already exists; not overwriting it", path.display()).into());
+        }
     }
+    write_new(&private_path, private.as_bytes(), 0o600)?;
+    write_new(&public_path, public.as_bytes(), 0o644)?;
+    println!("private key: {}", private_path.display());
+    println!("public key:  {}", public_path.display());
     Ok(())
+}
+
+/// `prefix` with `.suffix` appended (not replacing an extension: `keys/root.v2` → `root.v2.key`).
+fn with_suffix(prefix: &Path, suffix: &str) -> PathBuf {
+    let mut path = prefix.as_os_str().to_owned();
+    path.push(".");
+    path.push(suffix);
+    PathBuf::from(path)
+}
+
+/// Creates `path`, failing if it exists. `mode` applies on Unix.
+fn write_new(path: &Path, contents: &[u8], mode: u32) -> std::io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, mode);
+    #[cfg(not(unix))]
+    let _ = mode;
+    options.open(path)?.write_all(contents)
 }
 
 #[expect(
@@ -152,4 +194,45 @@ pub(crate) fn config_check(cli: &Cli, args: &DatabaseArgs) -> Result<(), BoxErro
     let config = load(cli, args, None)?;
     println!("{config:#?}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use kippu_core::keys::parse_verifying_key;
+
+    use super::*;
+
+    fn keygen_into(dir: &Path, pem: bool) -> Result<(SigningKey, String), BoxError> {
+        let prefix = dir.join(if pem { "root.v2" } else { "root" });
+        keygen(&KeygenArgs {
+            pem,
+            out: Some(prefix.clone()),
+        })?;
+        let private = std::fs::read_to_string(with_suffix(&prefix, "key"))?;
+        let public = std::fs::read_to_string(with_suffix(&prefix, "pub"))?;
+        Ok((
+            parse_signing_key("key", &SecretString::from(private))?,
+            public,
+        ))
+    }
+
+    #[test]
+    fn keygen_writes_a_matching_pair_and_never_overwrites() {
+        let dir = tempfile::tempdir().unwrap();
+        for pem in [false, true] {
+            let (private, public) = keygen_into(dir.path(), pem).unwrap();
+            let public = parse_verifying_key("pub", &public).unwrap();
+            assert_eq!(private.verifying_key(), public);
+            assert!(keygen_into(dir.path(), pem).is_err(), "must not overwrite");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.path().join("root.v2.key"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+    }
 }

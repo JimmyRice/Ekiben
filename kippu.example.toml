@@ -36,11 +36,11 @@ retired_ticket_keys = []
 
 [root]
 # Root has no password and no database record. Whoever holds a private key matching one of
-# these public keys can mint a root token: `kippu root-token --key root.pem --name owner`.
+# these public keys can mint a root token: `kippu root-token --key root.key --name owner`.
 max_token_ttl_seconds = 600
 # [[root.keys]]
 # name = "owner"
-# public_key = "<base64 public key from `kippu keygen`>"
+# public_key = "<contents of root.pub from `kippu keygen --out root`>"
 
 [auth]
 access_token_ttl_seconds = 900

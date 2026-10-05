@@ -7,8 +7,8 @@ line, configuration sources and storage adapter wiring.
 kippu serve [--listen 0.0.0.0:8080] [--no-workers]   HTTP API (+ background workers)
 kippu worker                                         background workers only
 kippu migrate                                        apply database migrations
-kippu keygen [--pem]                                 new Ed25519 key pair
-kippu root-token --key root.pem --name <name>        short-lived root token
+kippu keygen [--pem] [--out <prefix>]                new Ed25519 key pair (<prefix>.key/.pub)
+kippu root-token --key root.key --name <name>        short-lived root token
 kippu config check                                   effective configuration, secrets redacted
 ```
 

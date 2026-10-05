@@ -68,7 +68,7 @@ impl Launcher {
                 Command::Serve(args) => commands::serve(&cli, args, self.modules).await,
                 Command::Worker(args) => commands::worker(&cli, args, self.modules).await,
                 Command::Migrate(args) => commands::migrate(&cli, args).await,
-                Command::Keygen { pem } => commands::keygen(*pem),
+                Command::Keygen(args) => commands::keygen(args),
                 Command::RootToken(args) => commands::root_token(&cli, args),
                 Command::Config(ConfigCommand::Check(args)) => commands::config_check(&cli, args),
             }

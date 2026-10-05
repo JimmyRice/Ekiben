@@ -32,23 +32,24 @@ crates/
 ## Quickstart
 
 ```bash
-cargo run -- keygen                      # run twice: one ticket key, one token key
-cargo run -- keygen --pem > root.pem     # the root key pair (keep the private half offline)
+cargo run -- keygen --out ticket         # ticket.key + ticket.pub: signs tickets
+cargo run -- keygen --out token          # token.key + token.pub: signs access tokens
+cargo run -- keygen --out root           # the root key pair (keep root.key offline)
 ```
 
 Put the keys in the environment and start a server on a local SQLite database:
 
 ```bash
-export KIPPU_KEYS__TICKET_SIGNING_KEY=<private key 1>
-export KIPPU_KEYS__TOKEN_SIGNING_KEY=<private key 2>
-export KIPPU_ROOT__KEYS='[{name="owner", public_key="<public half of root.pem>"}]'
+export KIPPU_KEYS__TICKET_SIGNING_KEY=$(cat ticket.key)
+export KIPPU_KEYS__TOKEN_SIGNING_KEY=$(cat token.key)
+export KIPPU_ROOT__KEYS="[{name=\"owner\", public_key=\"$(cat root.pub)\"}]"
 cargo run -- serve --config kippu.example.toml --database-url "sqlite://$TMPDIR/kippu.db?mode=rwc"
 ```
 
 Then sign in as root and explore the API (`/openapi.json` documents every endpoint):
 
 ```bash
-TOKEN=$(cargo run -q -- root-token --config kippu.example.toml --key root.pem --name owner)
+TOKEN=$(cargo run -q -- root-token --config kippu.example.toml --key root.key --name owner)
 curl -H "authorization: Bearer $TOKEN" localhost:8080/v1/me
 ```
 
