@@ -12,6 +12,9 @@ keywords = ["ticket", "ed25519", "verification", "no_std", "qr"]
 default = []
 ## Heap-backed conveniences.
 alloc = []
+## Base45 (RFC 9285) decoding, plus encoding with `alloc`: one way to carry a ticket as QR
+## alphanumeric text. Off by default; verification itself takes the ticket's bytes.
+base45 = []
 ## Ticket encoding and signing, used by the Kippu backend.
 issuer = ["alloc", "ed25519-dalek/zeroize"]
 

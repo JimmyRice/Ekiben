@@ -170,9 +170,10 @@ async fn an_attested_payment_issues_verifiable_tickets_exactly_once() {
         .try_into()
         .unwrap();
     let gate = kaisatsu::Verifier::new(kaisatsu::TrustedKey::from_bytes(&public_key).unwrap());
-    let mut buffer = [0; kaisatsu::wire::MAX_TICKET_LEN];
-    let qr = tickets[0]["qr"].as_str().unwrap();
-    let ticket = gate.verify_base45(qr, &mut buffer).unwrap();
+    let bytes = STANDARD
+        .decode(tickets[0]["ticket"].as_str().unwrap())
+        .unwrap();
+    let ticket = gate.verify(&bytes).unwrap();
     assert_eq!(ticket.issuer(), support::ISSUER);
     assert_eq!(
         ticket.ticket_id().to_string(),

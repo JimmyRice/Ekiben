@@ -6,7 +6,7 @@
 use core::ffi::c_char;
 use core::slice;
 
-use kaisatsu::{Extensions, KeyId, Pinpon, TrustedKey, Verifier, base45};
+use kaisatsu::{Extensions, KeyId, Pinpon, TrustedKey, Verifier};
 
 use crate::types::{KaisatsuKey, KaisatsuStatus, KaisatsuTicket, RawKeys};
 
@@ -109,15 +109,17 @@ pub unsafe extern "C" fn kaisatsu_ticket_extension(
     true
 }
 
-/// Decodes the Base45 text of a QR code into `out`.
+/// Decodes Base45 text, one way to carry a ticket in a QR code, into `out`.
 ///
-/// `KAISATSU_MAX_TICKET_LEN` bytes of output always suffice.
+/// `KAISATSU_MAX_TICKET_LEN` bytes of output always suffice. Only exported with the `base45`
+/// feature; define `KAISATSU_BASE45` to declare it.
 ///
 /// # Safety
 ///
 /// - `text` must point to `text_len` readable bytes.
 /// - `out` must point to `out_capacity` writable bytes.
 /// - `out_len` must be writable.
+#[cfg(feature = "base45")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kaisatsu_base45_decode(
     text: *const c_char,
@@ -133,7 +135,7 @@ pub unsafe extern "C" fn kaisatsu_base45_decode(
     let text = unsafe { slice::from_raw_parts(text.cast::<u8>(), text_len) };
     // SAFETY: non-null; the caller guarantees `out_capacity` writable bytes.
     let out = unsafe { slice::from_raw_parts_mut(out, out_capacity) };
-    match base45::decode_into(text, out) {
+    match kaisatsu::base45::decode_into(text, out) {
         Ok(decoded) => {
             // SAFETY: non-null; the caller guarantees it is writable.
             unsafe { out_len.write(decoded.len()) };

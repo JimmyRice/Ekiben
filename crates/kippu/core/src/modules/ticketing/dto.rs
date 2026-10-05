@@ -1,3 +1,5 @@
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use kippu_domain::ticket::{Ticket, TicketStatus};
 use kippu_domain::{EventId, ReservationId, TicketId, TicketTypeId, Timestamp};
 use serde::Serialize;
@@ -5,7 +7,7 @@ use utoipa::ToSchema;
 
 use crate::keys::PublishedKey;
 
-/// A ticket, ready to show as a QR code.
+/// A ticket and its signed bytes.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct TicketView {
     /// Identity of the ticket.
@@ -24,14 +26,17 @@ pub struct TicketView {
     pub issued_at: Timestamp,
     /// Whether it is honoured.
     pub status: TicketStatus,
-    /// The signed ticket as Base45 text: put this in a QR code (alphanumeric mode).
-    pub qr: String,
+    /// The signed KP1 ticket, standard Base64 (RFC 4648, padded). Decode it and carry the
+    /// bytes to the gate however suits you — a binary QR code, Base45, or this text as is; see
+    /// `spec/ticket-protocol.md`. `GET /v1/tickets/{ticket_id}/raw` returns the bytes directly.
+    #[schema(format = Byte, example = "S1ABAQ…")]
+    pub ticket: String,
 }
 
 impl From<Ticket> for TicketView {
     fn from(ticket: Ticket) -> Self {
         Self {
-            qr: kaisatsu::base45::encode(&ticket.encoded),
+            ticket: STANDARD.encode(&ticket.encoded),
             id: ticket.id,
             reservation_id: ticket.reservation_id,
             event_id: ticket.event_id,

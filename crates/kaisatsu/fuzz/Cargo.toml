@@ -13,7 +13,7 @@ publish = false
 cargo-fuzz = true
 
 [dependencies]
-kaisatsu = { path = "..", features = ["issuer"] }
+kaisatsu = { path = "..", features = ["issuer", "base45"] }
 libfuzzer-sys = "0.4"
 
 [[bin]]

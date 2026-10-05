@@ -18,6 +18,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features
+      # Default features too: optional ones (e.g. `base45`) must not be load-bearing.
+      - run: cargo clippy --workspace --all-targets
       - run: cargo test --workspace --all-features
 
   kaisatsu:

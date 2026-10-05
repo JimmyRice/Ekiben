@@ -1,6 +1,10 @@
 use crate::http::Json;
 use axum::extract::{Path, State};
+use axum::http::HeaderValue;
+use axum::http::header::CONTENT_TYPE;
+use axum::response::IntoResponse;
 use kippu_domain::TicketId;
+use kippu_domain::ticket::Ticket;
 
 use super::dto::{TicketKeys, TicketView};
 use super::permissions::TICKETS_READ;
@@ -50,6 +54,42 @@ pub(crate) async fn get_ticket(
     principal: Principal,
     Path(ticket_id): Path<TicketId>,
 ) -> ApiResult<Json<TicketView>> {
+    Ok(Json(TicketView::from(
+        own_ticket(&state, &principal, ticket_id).await?,
+    )))
+}
+
+/// A ticket's signed KP1 bytes, as they are to reach the gate.
+#[utoipa::path(
+    get, path = "/v1/tickets/{ticket_id}/raw", tag = TAG,
+    security(("bearer" = [])),
+    params(("ticket_id" = TicketId, Path)),
+    responses(
+        (status = 200, description = "The KP1 ticket", content_type = "application/octet-stream", body = Vec<u8>),
+        (status = 404, body = Problem)
+    )
+)]
+pub(crate) async fn get_ticket_raw(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(ticket_id): Path<TicketId>,
+) -> ApiResult<impl IntoResponse> {
+    let ticket = own_ticket(&state, &principal, ticket_id).await?;
+    Ok((
+        [(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/octet-stream"),
+        )],
+        ticket.encoded,
+    ))
+}
+
+/// A ticket of the caller's. Other people's tickets are reported as missing.
+async fn own_ticket(
+    state: &AppState,
+    principal: &Principal,
+    ticket_id: TicketId,
+) -> ApiResult<Ticket> {
     let ticket = state
         .store()
         .ticket(ticket_id)
@@ -57,9 +97,9 @@ pub(crate) async fn get_ticket(
         .ok_or_else(|| ApiError::not_found("ticket"))?;
     if !state
         .policy()
-        .permits(&principal, TICKETS_READ, Scope::Account(ticket.account_id))
+        .permits(principal, TICKETS_READ, Scope::Account(ticket.account_id))
     {
         return Err(ApiError::not_found("ticket"));
     }
-    Ok(Json(TicketView::from(ticket)))
+    Ok(ticket)
 }

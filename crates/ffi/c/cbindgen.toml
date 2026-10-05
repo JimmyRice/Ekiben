@@ -23,3 +23,6 @@ rename_variants = "ScreamingSnakeCase"
 
 [export]
 include = ["KaisatsuStatus"]
+
+[defines]
+"feature = base45" = "KAISATSU_BASE45"

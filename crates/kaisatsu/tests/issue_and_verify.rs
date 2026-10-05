@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use kaisatsu::{Claims, Defect, IssueError, Issuer, Pinpon, Uuid, Verifier, base45};
+use kaisatsu::{Claims, Defect, IssueError, Issuer, Pinpon, Uuid, Verifier};
 use proptest::prelude::*;
 
 const VALID_FROM: u64 = 1_767_225_600; // 2026-01-01T00:00:00Z
@@ -94,10 +94,11 @@ fn a_bad_signature_rings_the_bell() {
 }
 
 #[test]
+#[cfg(feature = "base45")]
 fn base45_text_verifies_like_the_bytes() {
     let issuer = issuer();
     let bytes = issuer.issue(&claims()).unwrap();
-    let text = base45::encode(&bytes);
+    let text = kaisatsu::base45::encode(&bytes);
     assert!(
         text.bytes()
             .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || b" $%*+-./:".contains(&c))

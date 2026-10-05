@@ -39,6 +39,8 @@ pub struct Reply {
     pub status: StatusCode,
     pub headers: axum::http::HeaderMap,
     pub body: Value,
+    /// The body as received, for responses that are not JSON.
+    pub bytes: Vec<u8>,
 }
 
 impl TestApp {
@@ -162,6 +164,7 @@ impl TestApp {
             status,
             headers,
             body,
+            bytes: bytes.to_vec(),
         }
     }
 

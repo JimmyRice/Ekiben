@@ -5,7 +5,7 @@ use std::path::Path;
 
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
-use kaisatsu::wire::{MAGIC, MAX_TICKET_LEN};
+use kaisatsu::wire::MAGIC;
 use kaisatsu::{TrustedKey, VerifiedTicket, Verifier};
 use kippu_core::keys::parse_verifying_key;
 use kippu_core::{Clock, SystemClock};
@@ -81,8 +81,9 @@ fn decode(input: &[u8], encoding: TicketEncoding) -> Result<Vec<u8>, BoxError> {
                 .find_map(|engine| engine.decode(text).ok())
                 .ok_or_else(|| "not valid base64".into())
         }
+        #[cfg(feature = "base45")]
         TicketEncoding::Base45 => {
-            let mut buffer = [0; MAX_TICKET_LEN];
+            let mut buffer = [0; kaisatsu::wire::MAX_TICKET_LEN];
             // Base45 has a space in its alphabet, so only line endings are trimmed.
             let ticket = kaisatsu::base45::decode_into(text()?.as_bytes(), &mut buffer)
                 .map_err(|_| "not valid Base45 (or longer than a ticket can be)")?;
@@ -93,13 +94,14 @@ fn decode(input: &[u8], encoding: TicketEncoding) -> Result<Vec<u8>, BoxError> {
             TicketEncoding::Binary,
             TicketEncoding::Hex,
             TicketEncoding::Base64,
+            #[cfg(feature = "base45")]
             TicketEncoding::Base45,
         ]
         .into_iter()
         .filter_map(|encoding| decode(input, encoding).ok())
         .find(|ticket| ticket.starts_with(&MAGIC))
         .ok_or_else(|| {
-            "not a KP1 ticket in base64, Base45, hex or raw bytes; \
+            "not a KP1 ticket in any supported encoding (see --encoding); \
              pass --encoding to see why decoding fails"
                 .into()
         }),
@@ -165,6 +167,7 @@ mod tests {
             hex::encode(&ticket).into_bytes(),
             format!("{}\n", STANDARD.encode(&ticket)).into_bytes(),
             URL_SAFE_NO_PAD.encode(&ticket).into_bytes(),
+            #[cfg(feature = "base45")]
             kaisatsu::base45::encode(&ticket).into_bytes(),
         ];
         for input in encodings {

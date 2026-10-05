@@ -1,5 +1,6 @@
-//! Builds the C ABI exactly as it ships (no `std`, `release-small`), compiles
-//! `crates/ffi/c/examples/verify.c` against it and runs every test vector through the resulting program.
+//! Builds the C ABI exactly as it ships (no `std`, `release-small`), checks that the optional
+//! Base45 decoder is not in it, compiles `crates/ffi/c/examples/verify.c` against it and runs
+//! every test vector through the resulting program.
 
 use std::process::Command;
 
@@ -18,6 +19,15 @@ pub(crate) fn run() -> Result {
         "release-small",
     ]))?;
 
+    let library = root.join("target/release-small/libkaisatsu.a");
+    let contents = std::fs::read(&library)?;
+    if contents
+        .windows(b"base45".len())
+        .any(|window| window.eq_ignore_ascii_case(b"base45"))
+    {
+        return Err("the default build of kaisatsu-ffi contains Base45 code".into());
+    }
+
     let out_dir = root.join("target/c-example");
     std::fs::create_dir_all(&out_dir)?;
     let program = out_dir.join("verify");
@@ -28,7 +38,7 @@ pub(crate) fn run() -> Result {
         .arg("-I")
         .arg(root.join("crates/ffi/c/include"))
         .arg(root.join("crates/ffi/c/examples/verify.c"))
-        .arg(root.join("target/release-small/libkaisatsu.a"))
+        .arg(&library)
         .arg("-o")
         .arg(&program);
     if cfg!(target_os = "linux") {
@@ -54,7 +64,7 @@ pub(crate) fn run() -> Result {
         let expect = vector["expect"].as_str().unwrap_or("?");
         let output = Command::new(&program)
             .arg(trusted_key)
-            .arg(vector["base45"].as_str().unwrap_or_default())
+            .arg(vector["ticket"].as_str().unwrap_or_default())
             .output()?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let passed = if expect == "Ok" {

@@ -34,8 +34,9 @@ match verifier.verify(scan()) {
 
 | Feature | Enables |
 |---|---|
-| *(none)* | Verification and Base45 decoding into a caller-provided buffer. |
-| `alloc` | `KeyRing` for `Vec<TrustedKey>`, `base45::encode`. |
+| *(none)* | Verification of a ticket's bytes. |
+| `alloc` | `KeyRing` for `Vec<TrustedKey>`. |
+| `base45` | Base45 decoding into a caller-provided buffer and `Verifier::verify_base45`; with `alloc`, `base45::encode`. |
 | `issuer` | `Issuer` and `Claims`: encoding and signing, as used by the Kippu backend. |
 
 The wire format is specified in [`spec/ticket-protocol.md`](../../spec/ticket-protocol.md).

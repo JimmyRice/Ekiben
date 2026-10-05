@@ -17,6 +17,7 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+#[cfg(feature = "base45")]
 pub mod base45;
 #[cfg(feature = "issuer")]
 mod issuer;

@@ -123,7 +123,7 @@ pub struct VerifyArgs {
     /// Also require this `issuer` claim, i.e. the deployment's `issuer.id`.
     #[arg(long)]
     pub issuer: Option<String>,
-    /// How the ticket is encoded. `auto` recognizes all of them by the ticket header.
+    /// How the ticket is encoded. `auto` recognizes each of them by the ticket header.
     #[arg(long, default_value = "auto")]
     pub encoding: TicketEncoding,
     /// Check the validity window at this instant (RFC 3339) instead of now.
@@ -138,7 +138,8 @@ pub enum TicketEncoding {
     Auto,
     /// Standard or URL-safe base64, with or without padding.
     Base64,
-    /// Base45 (RFC 9285), the QR alphanumeric-mode text form.
+    /// Base45 (RFC 9285), the QR alphanumeric-mode text form (`base45` feature).
+    #[cfg(feature = "base45")]
     Base45,
     /// Hexadecimal.
     Hex,

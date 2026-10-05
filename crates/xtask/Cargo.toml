@@ -9,7 +9,7 @@ publish.workspace = true
 [dependencies]
 cbindgen.workspace = true
 hex.workspace = true
-kaisatsu = { workspace = true, features = ["issuer"] }
+kaisatsu = { workspace = true, features = ["issuer", "base45"] }
 serde.workspace = true
 serde_json.workspace = true
 

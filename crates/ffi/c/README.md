@@ -33,3 +33,8 @@ microcontrollers, add `--target thumbv7em-none-eabihf` (or your target) and link
 library; set `CARGO_PROFILE_RELEASE_SMALL_OPT_LEVEL=z` to trade a little speed for size.
 
 The default `std` feature exists only so that debug builds (which unwind on panic) link.
+
+Kaisatsu verifies a ticket's bytes; how they travel from the buyer's screen to the gate (a
+binary QR code, Base64, Base45…) is the integration's choice. If your scanner hands back
+Base45 text, build with `--features base45` and define `KAISATSU_BASE45` before including
+the header to get `kaisatsu_base45_decode`.

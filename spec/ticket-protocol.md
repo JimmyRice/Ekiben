@@ -96,11 +96,25 @@ Kaisatsu reports failures as `Pinpon`: `Malformed`, `UnsupportedVersion`,
 `UnsupportedAlgorithm`, `UnknownKey`, `BadSignature`, and — from the optional time check —
 `NotYetValid` and `Expired`.
 
-## 5. Text encoding
+## 5. Transport encoding
 
-In QR codes and other text channels a ticket is encoded with Base45 (RFC 9285). Base45's
-alphabet is exactly the QR alphanumeric character set, so the code stays almost as dense as a
-binary one, while surviving scanner SDKs that only return strings.
+A ticket is its bytes. How they travel from the buyer's device to the gate is up to the
+integration; KP1 neither requires nor forbids any encoding, and verifiers take the decoded
+bytes. Kippu returns tickets as standard Base64 (RFC 4648, padded) in JSON (`ticket` in
+`TicketView`) and as raw bytes from `GET /v1/tickets/{ticket_id}/raw`
+(`application/octet-stream`).
+
+A minimal ticket is about 180 bytes; extensions add their length. Common choices for a QR
+code:
+
+| Encoding | QR mode | Characters per byte | Notes |
+|---|---|---|---|
+| Raw bytes | byte | 1 | Densest. Some scanner SDKs only return strings and mangle bytes that are not valid text. |
+| Base45 (RFC 9285) | alphanumeric | 1.5 (5.5 bits each) | Almost as dense as raw bytes and survives string-only scanners. Kaisatsu decodes it with the optional `base45` feature. |
+| Base64 | byte | 1.33 | About a third larger, but every platform and text channel handles it; Kippu's JSON already carries it. |
+
+Whichever is chosen, the gate decodes it and passes the bytes to the verifier. Other
+channels — NFC, Bluetooth, wallet passes — carry the bytes the same way.
 
 ## 6. Keys
 
@@ -111,6 +125,6 @@ covers rotation.
 ## 7. Test vectors
 
 [`test-vectors/v1/vectors.json`](test-vectors/v1/vectors.json) lists keys (marked trusted or
-not) and tickets, each with its hex and Base45 form and the expected outcome (`"Ok"` or a
+not) and tickets, each as hex (and, as an example encoding, Base45) with the expected outcome (`"Ok"` or a
 `Pinpon` name). Valid tickets include their decoded claims and time checks. Every
 implementation SHOULD run all of them. Regenerate the file with `cargo xtask vectors`.

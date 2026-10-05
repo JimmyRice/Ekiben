@@ -1,3 +1,4 @@
+#[cfg(feature = "base45")]
 use crate::base45;
 use crate::key::{KeyId, KeyRing};
 use crate::pinpon::{Defect, Pinpon};
@@ -51,9 +52,10 @@ impl<K: KeyRing> Verifier<K> {
         Ok(VerifiedTicket::parse(envelope.key_id, envelope.claims)?)
     }
 
-    /// Verifies a ticket in its QR-code text form (Base45), decoding into `buffer`.
+    /// Verifies a ticket carried as Base45 text, decoding into `buffer`.
     ///
     /// A buffer of [`MAX_TICKET_LEN`] bytes always suffices.
+    #[cfg(feature = "base45")]
     pub fn verify_base45<'b>(
         &self,
         text: &str,

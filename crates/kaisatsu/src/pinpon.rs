@@ -86,9 +86,10 @@ pub enum Defect {
     MissingClaim(u8),
     /// A claim has the wrong length or an invalid value.
     InvalidClaim(u8),
-    /// The text is not valid Base45.
+    /// The text is not valid Base45 (only reported by the `base45` feature).
     InvalidBase45,
-    /// The output buffer is too small for the decoded ticket.
+    /// The output buffer is too small for the decoded ticket (only reported by the `base45`
+    /// feature).
     BufferTooSmall,
 }
 

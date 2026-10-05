@@ -10,6 +10,8 @@ publish.workspace = true
 default = ["sqlite"]
 ## SQLite storage adapter.
 sqlite = ["dep:kippu-store-sqlite"]
+## Let `kippu verify` read tickets carried as Base45 text.
+base45 = ["kaisatsu/base45"]
 
 [dependencies]
 axum.workspace = true

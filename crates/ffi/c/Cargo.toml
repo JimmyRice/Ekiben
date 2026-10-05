@@ -15,6 +15,9 @@ default = ["std"]
 ## Link the standard library. Disable for bare-metal targets, which then get a minimal
 ## panic handler (Kaisatsu itself never panics).
 std = []
+## Export `kaisatsu_base45_decode`. Define `KAISATSU_BASE45` before including the header to
+## declare it.
+base45 = ["kaisatsu/base45"]
 
 [dependencies]
 kaisatsu.workspace = true

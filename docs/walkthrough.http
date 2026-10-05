@@ -157,9 +157,15 @@ Content-Type: application/json
 
 # Now report the payment as the attestor would; see step 17 in docs/walkthrough.md.
 
-### 18. The buyer's tickets, signed
+### 18. The buyer's tickets; `ticket` is the signed ticket in Base64
 GET {{base}}/v1/me/tickets
 Authorization: Bearer {{buyer_token}}
 
-### 19. The keys a gate trusts
+> {% client.global.set("ticket_id", response.body[0].id); %}
+
+### 19. The same ticket's raw bytes
+GET {{base}}/v1/tickets/{{ticket_id}}/raw
+Authorization: Bearer {{buyer_token}}
+
+### 20. The keys a gate trusts
 GET {{base}}/.well-known/kippu/ticket-keys

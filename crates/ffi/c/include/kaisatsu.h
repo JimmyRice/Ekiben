@@ -16,7 +16,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-// The largest ticket Kaisatsu accepts, in bytes. Size Base45 decode buffers with it.
+// The largest ticket Kaisatsu accepts, in bytes. Size ticket buffers with it.
 #define KAISATSU_MAX_TICKET_LEN 2048
 
 // Result of a Kaisatsu call. `KAISATSU_STATUS_OK` is zero; everything else is a rejection.
@@ -135,9 +135,11 @@ bool kaisatsu_ticket_extension(const KaisatsuTicket *ticket,
                                const uint8_t **value,
                                size_t *value_len);
 
-// Decodes the Base45 text of a QR code into `out`.
+#if defined(KAISATSU_BASE45)
+// Decodes Base45 text, one way to carry a ticket in a QR code, into `out`.
 //
-// `KAISATSU_MAX_TICKET_LEN` bytes of output always suffice.
+// `KAISATSU_MAX_TICKET_LEN` bytes of output always suffice. Only exported with the `base45`
+// feature; define `KAISATSU_BASE45` to declare it.
 //
 // # Safety
 //
@@ -149,6 +151,7 @@ KaisatsuStatus kaisatsu_base45_decode(const char *text,
                                       uint8_t *out,
                                       size_t out_capacity,
                                       size_t *out_len);
+#endif
 
 // Checks that a public key is a usable Ed25519 key, and writes its key id to `out_key_id`
 // (if not null). Call it once at startup to catch misconfigured keys early: `kaisatsu_verify`

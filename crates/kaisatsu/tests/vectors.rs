@@ -19,6 +19,10 @@ struct Key {
 struct Vector {
     name: String,
     ticket: String,
+    #[cfg_attr(
+        not(feature = "base45"),
+        expect(dead_code, reason = "only checked with base45")
+    )]
     base45: String,
     expect: String,
     claims: Option<Claims>,
@@ -104,14 +108,17 @@ fn every_vector_has_the_expected_outcome() {
         let result = verifier.verify(&bytes);
         assert_eq!(outcome(result), vector.expect, "{}", vector.name);
 
-        let mut buffer = [0; kaisatsu::wire::MAX_TICKET_LEN];
-        let from_text = verifier.verify_base45(&vector.base45, &mut buffer);
-        assert_eq!(
-            outcome(from_text),
-            vector.expect,
-            "{} (base45)",
-            vector.name
-        );
+        #[cfg(feature = "base45")]
+        {
+            let mut buffer = [0; kaisatsu::wire::MAX_TICKET_LEN];
+            let from_text = verifier.verify_base45(&vector.base45, &mut buffer);
+            assert_eq!(
+                outcome(from_text),
+                vector.expect,
+                "{} (base45)",
+                vector.name
+            );
+        }
 
         if let (Ok(ticket), Some(claims)) = (result, &vector.claims) {
             assert_claims(&vector.name, &ticket, claims);

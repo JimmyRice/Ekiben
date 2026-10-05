@@ -126,6 +126,8 @@ default = ["sqlite", "mimalloc"]
 sqlite = ["kippu-server/sqlite"]
 ## Use mimalloc as the global allocator.
 mimalloc = ["dep:mimalloc"]
+## Let `kippu verify` read tickets carried as Base45 text.
+base45 = ["kippu-server/base45"]
 
 [dependencies]
 kippu-core.workspace = true

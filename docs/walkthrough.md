@@ -261,7 +261,7 @@ cargo run -p kippu-server --example attestor_sim -- \
     --amount 5000 --currency JPY | sh
 ```
 
-## 18–19. Tickets, and a gate
+## 18–20. Tickets, and a gate
 
 ```http
 GET /v1/me/tickets HTTP/1.1
@@ -269,8 +269,18 @@ Host: localhost:8080
 Authorization: Bearer {{buyer_token}}
 ```
 
-Each ticket's `qr` is the signed ticket to put in a QR code. A gate needs nothing from the
-server at the door except, once, the public keys to trust:
+Each ticket's `ticket` is the signed ticket in Base64. The same bytes are available raw,
+`application/octet-stream`, from the ticket's `/raw` endpoint:
+
+```http
+GET /v1/tickets/{{ticket_id}}/raw HTTP/1.1
+Host: localhost:8080
+Authorization: Bearer {{buyer_token}}
+```
+
+How the bytes reach the gate — a binary QR code, Base45 text, the Base64 as is — is up to
+the app; see [section 5 of the ticket protocol](../spec/ticket-protocol.md#5-transport-encoding).
+A gate needs nothing from the server at the door except, once, the public keys to trust:
 
 ```http
 GET /.well-known/kippu/ticket-keys HTTP/1.1
@@ -281,7 +291,7 @@ Host: localhost:8080
 `public_key` above or a file holding it, and `--at` pretends it is the day of the event:
 
 ```bash
-kippu verify --key ticket.pub --issuer kippu.local --at 2027-08-16T10:00:00+09:00 '<qr>'
+kippu verify --key ticket.pub --issuer kippu.local --at 2027-08-16T10:00:00+09:00 '<ticket>'
 ```
 
 ```text

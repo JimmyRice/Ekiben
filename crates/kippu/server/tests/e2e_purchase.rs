@@ -489,10 +489,11 @@ async fn a_ticket_bought_through_the_whole_pipeline_passes_the_gate() {
         .collect();
     let gate = kaisatsu::Verifier::new(trusted.as_slice());
 
-    let mut buffer = [0; kaisatsu::wire::MAX_TICKET_LEN];
-    let qr = tickets[0]["qr"].as_str().unwrap();
+    let bytes = STANDARD
+        .decode(tickets[0]["ticket"].as_str().unwrap())
+        .unwrap();
     let ticket = gate
-        .verify_base45(qr, &mut buffer)
+        .verify(&bytes)
         .expect("an issued ticket passes the gate");
     assert_eq!(ticket.issuer(), ISSUER);
     assert_eq!(ticket.event_id().to_string(), event_id);
@@ -509,9 +510,7 @@ async fn a_ticket_bought_through_the_whole_pipeline_passes_the_gate() {
     );
 
     // A forged ticket: one byte changed.
-    let mut forged = kaisatsu::base45::decode_into(qr.as_bytes(), &mut buffer)
-        .unwrap()
-        .to_vec();
+    let mut forged = bytes.clone();
     forged[20] ^= 0x01;
     let pinpon = gate.verify(&forged).unwrap_err();
     assert_eq!(pinpon, kaisatsu::Pinpon::BadSignature);

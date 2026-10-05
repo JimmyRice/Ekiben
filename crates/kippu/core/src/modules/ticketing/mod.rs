@@ -40,5 +40,6 @@ impl Module for Ticketing {
             .routes(routes!(routes::ticket_keys))
             .routes(routes!(routes::my_tickets))
             .routes(routes!(routes::get_ticket))
+            .routes(routes!(routes::get_ticket_raw))
     }
 }
