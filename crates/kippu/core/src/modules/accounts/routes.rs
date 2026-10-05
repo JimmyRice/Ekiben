@@ -1,7 +1,7 @@
 //! HTTP handlers. Each one authenticates, authorizes, validates, then calls the store or a
 //! service function — nothing more.
 
-use axum::Json;
+use crate::http::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use kippu_domain::account::{Account, Organization, Role};

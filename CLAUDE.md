@@ -28,7 +28,7 @@ Keep the repository root uncluttered and do not add speculative `.gitignore` ent
 ## Commands
 
 ```bash
-cargo test --workspace --all-features                                   # 96 tests incl. e2e over TCP
+cargo test --workspace --all-features                                   # 100 tests incl. e2e over TCP
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
 cargo fmt --all
 cargo xtask vectors --check && cargo xtask header --check               # generated files up to date
@@ -58,7 +58,9 @@ as `shop`, `attestor`, `reserve`, `drain`); the full journey over real TCP is
   upward; organizers are confined to their organizations, users to their own records. Hide
   other people's records as 404, not 403.
 - **Errors:** `ApiError::new(status, "kebab-kind", detail)` → `urn:kippu:problem:<kind>`. Kinds
-  are API: never rename them.
+  are API: never rename them. Take bodies with `crate::http::Json`, never `axum::Json`, so
+  unreadable bodies are problems too (`invalid-json`, `unsupported-media-type`,
+  `payload-too-large`).
 - **Idempotency:** anything that may be retried must be safe to repeat (derived ids, unique
   keys returning `Insertion::Existing`, status checks before transitions). Handlers that are
   idempotent by design insert `IdempotentByDesign` into the response extensions.

@@ -122,7 +122,13 @@ impl FromRequest<AppState> for Attested {
             .to_owned();
         let body = Bytes::from_request(request, state)
             .await
-            .map_err(|_| rejected())?;
+            .map_err(|rejection| {
+                if rejection.status() == axum::http::StatusCode::PAYLOAD_TOO_LARGE {
+                    ApiError::payload_too_large()
+                } else {
+                    rejected()
+                }
+            })?;
 
         if (state.now().unix_seconds() - header.timestamp).abs() > MAX_CLOCK_SKEW_SECONDS {
             return Err(ApiError::unauthenticated(

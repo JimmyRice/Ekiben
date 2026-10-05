@@ -74,7 +74,14 @@ async fn patch_validates_the_merged_record() {
             Some(json!({ "version": event["version"], "titel": "Oops" })),
         )
         .await;
-    assert!(typo.status.is_client_error(), "unknown fields are rejected");
+    assert_eq!(typo.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(typo.headers["content-type"], "application/problem+json");
+    assert_eq!(typo.body["type"], "urn:kippu:problem:invalid-json");
+    assert!(
+        typo.body["detail"].as_str().unwrap().contains("titel"),
+        "{:?}",
+        typo.body
+    );
 
     let stranger = app.buyer().await;
     let forbidden = app

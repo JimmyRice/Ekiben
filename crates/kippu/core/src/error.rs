@@ -73,6 +73,15 @@ impl ApiError {
         )
     }
 
+    /// 413: the request body is larger than `server.max_body_bytes`.
+    pub fn payload_too_large() -> Self {
+        Self::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "payload-too-large",
+            "request body too large",
+        )
+    }
+
     /// 412: the record changed since the caller read it.
     pub fn stale_version() -> Self {
         Self::new(

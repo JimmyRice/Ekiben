@@ -134,6 +134,25 @@ impl TestApp {
             None => request.body(Body::empty()),
         }
         .unwrap();
+        self.send(request).await
+    }
+
+    /// Sends `body` as is, with exactly the given headers.
+    pub async fn call_raw(
+        &self,
+        method: Method,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: impl Into<Body>,
+    ) -> Reply {
+        let mut request = Request::builder().method(method).uri(path);
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        self.send(request.body(body.into()).unwrap()).await
+    }
+
+    async fn send(&self, request: Request<Body>) -> Reply {
         let response = self.app.router().oneshot(request).await.unwrap();
         let status = response.status();
         let headers = response.headers().clone();

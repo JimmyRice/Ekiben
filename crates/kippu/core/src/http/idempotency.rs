@@ -72,13 +72,7 @@ async fn handle(
     let (parts, body) = request.into_parts();
     let body = to_bytes(body, state.config().server.max_body_bytes)
         .await
-        .map_err(|_| {
-            ApiError::new(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "payload-too-large",
-                "request body too large",
-            )
-        })?;
+        .map_err(|_| ApiError::payload_too_large())?;
     let fingerprint = hex::encode(
         Sha256::new()
             .chain_update(parts.method.as_str())

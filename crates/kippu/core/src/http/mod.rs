@@ -1,7 +1,10 @@
 //! HTTP assembly: module routes, health checks, OpenAPI and cross-cutting middleware.
 
 pub mod idempotency;
+mod json;
 pub mod trace;
+
+pub use json::Json;
 
 use serde::Deserialize;
 use utoipa::IntoParams;
@@ -9,9 +12,12 @@ use utoipa::IntoParams;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::http::{HeaderValue, StatusCode};
+use axum::extract::{Request, State};
+use axum::http::{HeaderValue, StatusCode, header};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::{Json, Router, middleware};
+use axum::{Router, middleware};
 use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::cors::CorsLayer;
@@ -88,7 +94,7 @@ async fn healthz() -> &'static str {
     tag = "health",
     responses((status = 200, description = "Ready"), (status = 503, body = Problem))
 )]
-async fn readyz(state: axum::extract::State<AppState>) -> Result<&'static str, ApiError> {
+async fn readyz(state: State<AppState>) -> Result<&'static str, ApiError> {
     state.store().ping().await?;
     Ok("ready")
 }
@@ -122,6 +128,10 @@ pub(crate) fn router(state: &AppState, modules: &[Arc<dyn Module>]) -> Router {
             StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(server.request_timeout_seconds),
         ))
+        .layer(middleware::from_fn_with_state(
+            server.max_body_bytes,
+            reject_declared_oversize,
+        ))
         .layer(RequestBodyLimitLayer::new(server.max_body_bytes))
         .layer(cors(&server.cors_allowed_origins));
 
@@ -136,6 +146,25 @@ pub(crate) fn router(state: &AppState, modules: &[Arc<dyn Module>]) -> Router {
         ))
         .layer(cross_cutting)
         .with_state(state.clone())
+}
+
+/// Answers 413 with a problem when `Content-Length` already exceeds the body limit.
+///
+/// [`RequestBodyLimitLayer`] enforces the limit while bodies are read, but answers a declared
+/// oversize length itself, in plain text; this runs in front of it so clients get a problem.
+async fn reject_declared_oversize(
+    State(limit): State<usize>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let declared = request
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok()?.parse::<usize>().ok());
+    if declared.is_some_and(|length| length > limit) {
+        return ApiError::payload_too_large().into_response();
+    }
+    next.run(request).await
 }
 
 fn cors(origins: &[String]) -> CorsLayer {

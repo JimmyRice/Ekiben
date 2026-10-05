@@ -1,4 +1,4 @@
-use axum::Json;
+use crate::http::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use kippu_domain::SaleId;
