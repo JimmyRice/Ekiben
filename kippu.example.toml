@@ -58,5 +58,8 @@ enabled = true
 purchase_batch_size = 50
 purchase_interval_ms = 200
 purchase_lease_seconds = 30
+# Sales processed at once per batch, when the database allows concurrent writers (PostgreSQL,
+# MySQL). Requests of one sale are always processed in the order they were accepted.
+purchase_concurrency = 8
 expiry_interval_ms = 1000
 admission_interval_ms = 1000

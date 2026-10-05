@@ -613,3 +613,37 @@ async fn drafts_are_invisible_to_the_public() {
         .await;
     assert_eq!(own.status, StatusCode::OK);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn each_sale_is_first_come_first_served_even_when_sales_run_in_parallel() {
+    let app = TestApp::start().await;
+    let shops = [
+        app.shop(1, 1_000, json!({})).await,
+        app.shop(1, 1_000, json!({})).await,
+    ];
+    let buyer = app.buyer().await;
+    // Interleaved arrivals: first, first, second, second.
+    let mut submitted = Vec::new();
+    for round in 0..2 {
+        for shop in &shops {
+            app.clock.advance(Duration::milliseconds(1));
+            let reply = app.purchase(&buyer, shop, 1, &uuid_suffix()).await;
+            assert_eq!(reply.status, StatusCode::ACCEPTED, "{:?}", reply.body);
+            submitted.push((round, reply.body["id"].as_str().unwrap().to_owned()));
+        }
+    }
+    app.drain("purchases").await;
+
+    for (round, id) in submitted {
+        let request = app
+            .call(
+                Method::GET,
+                &format!("/v1/purchase-requests/{id}"),
+                Some(&buyer),
+                None,
+            )
+            .await;
+        let expected = if round == 0 { "reserved" } else { "rejected" };
+        assert_eq!(request.body["status"], expected, "{:?}", request.body);
+    }
+}

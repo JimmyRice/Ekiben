@@ -177,6 +177,9 @@ pub struct WorkersConfig {
     pub purchase_interval_ms: u64,
     /// How long a claimed purchase request is reserved for the claiming worker.
     pub purchase_lease_seconds: u32,
+    /// How many sales one batch processes at once, when the database allows concurrent
+    /// writers (PostgreSQL, MySQL). Requests of the same sale are always processed in order.
+    pub purchase_concurrency: u32,
     /// How often overdue reservations are expired.
     pub expiry_interval_ms: u64,
     /// How often waiting rooms admit a batch.
@@ -190,6 +193,7 @@ impl Default for WorkersConfig {
             purchase_batch_size: 50,
             purchase_interval_ms: 200,
             purchase_lease_seconds: 30,
+            purchase_concurrency: 8,
             expiry_interval_ms: 1_000,
             admission_interval_ms: 1_000,
         }

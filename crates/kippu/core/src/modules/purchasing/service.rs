@@ -16,6 +16,7 @@ use kippu_domain::reservation::{Reservation, ReservationStatus, ReservedItem};
 use kippu_domain::validation::IdempotencyKey;
 use kippu_domain::{AccountId, AttestorId, Duration, Money, PurchaseRequestId, ReservationId};
 use kippu_store::{BoxError, Hold, Insertion, Lease, StoreTx};
+use tracing::Instrument;
 
 use crate::app::AppState;
 use crate::error::{ApiError, ApiResult};
@@ -209,7 +210,37 @@ pub(crate) async fn process(state: &AppState, request: &PurchaseRequest) -> ApiR
     Ok(())
 }
 
-/// Background task: claims a batch of queued requests and processes them in order.
+/// Processes requests one after another, in the order given.
+async fn process_in_order(state: &AppState, requests: &[PurchaseRequest]) {
+    for request in requests {
+        if let Err(error) = process(state, request).await {
+            // The lease lapses and another attempt picks the request up.
+            tracing::warn!(request = %request.id, %error, "purchase request not processed");
+        }
+    }
+}
+
+/// Splits a batch (oldest first) by sale, keeping each sale's requests in order.
+fn by_sale(requests: Vec<PurchaseRequest>) -> Vec<Vec<PurchaseRequest>> {
+    let mut groups: Vec<Vec<PurchaseRequest>> = Vec::new();
+    for request in requests {
+        match groups.iter_mut().find(|group| {
+            group
+                .first()
+                .is_some_and(|first| first.sale_id == request.sale_id)
+        }) {
+            Some(group) => group.push(request),
+            None => groups.push(vec![request]),
+        }
+    }
+    groups
+}
+
+/// Background task: claims a batch of queued requests and processes them.
+///
+/// Requests of one sale compete for the same stock, so they are always processed in the order
+/// they were accepted. When the store allows concurrent writers, up to
+/// `workers.purchase_concurrency` sales are processed at once.
 pub(crate) async fn process_batch(state: AppState) -> Result<Progress, BoxError> {
     let workers = &state.config().workers;
     let now = state.now();
@@ -222,13 +253,30 @@ pub(crate) async fn process_batch(state: AppState) -> Result<Progress, BoxError>
         .store()
         .claim_purchase_requests(lease, batch_size)
         .await?;
-    for request in &claimed {
-        if let Err(error) = process(&state, request).await {
-            // The lease lapses and another attempt picks the request up.
-            tracing::warn!(request = %request.id, %error, "purchase request not processed");
+    let full = claimed.len() >= batch_size as usize;
+    let concurrency = if state.store().capabilities().concurrent_writers {
+        workers.purchase_concurrency.max(1) as usize
+    } else {
+        1
+    };
+
+    if concurrency == 1 {
+        process_in_order(&state, &claimed).await;
+    } else {
+        let mut running = tokio::task::JoinSet::new();
+        for group in by_sale(claimed) {
+            if running.len() >= concurrency {
+                running.join_next().await;
+            }
+            let state = state.clone();
+            running.spawn(
+                async move { process_in_order(&state, &group).await }
+                    .instrument(tracing::Span::current()),
+            );
         }
+        while running.join_next().await.is_some() {}
     }
-    Ok(if claimed.len() >= batch_size as usize {
+    Ok(if full {
         Progress::MoreWork
     } else {
         Progress::Idle
@@ -380,4 +428,42 @@ pub(crate) async fn checkout(
     tx.outbox().append_event(&event, now).await?;
     tx.commit().await?;
     Ok(current)
+}
+
+#[cfg(test)]
+mod tests {
+    use kippu_domain::purchase::LineItem;
+    use kippu_domain::{SaleId, TicketTypeId, Timestamp};
+
+    use super::*;
+
+    fn request(sale: SaleId, second: i64) -> PurchaseRequest {
+        let at = Timestamp::from_unix_seconds(second);
+        PurchaseRequest {
+            id: PurchaseRequestId::generate(),
+            account_id: AccountId::generate(),
+            sale_id: sale,
+            basket: Basket::new(vec![LineItem {
+                ticket_type_id: TicketTypeId::generate(),
+                quantity: 1,
+            }])
+            .unwrap(),
+            status: PurchaseStatus::Queued,
+            created_at: at,
+            updated_at: at,
+        }
+    }
+
+    #[test]
+    fn batches_split_by_sale_keep_arrival_order() {
+        let (a, b) = (SaleId::generate(), SaleId::generate());
+        let batch = vec![request(a, 1), request(b, 2), request(a, 3), request(b, 4)];
+        let ids: Vec<_> = batch.iter().map(|request| request.id).collect();
+        let groups = by_sale(batch);
+        let grouped: Vec<Vec<_>> = groups
+            .iter()
+            .map(|group| group.iter().map(|request| request.id).collect())
+            .collect();
+        assert_eq!(grouped, vec![vec![ids[0], ids[2]], vec![ids[1], ids[3]]]);
+    }
 }
