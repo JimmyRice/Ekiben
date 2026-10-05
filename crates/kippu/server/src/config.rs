@@ -5,6 +5,7 @@ use std::path::Path;
 use figment::Figment;
 use figment::providers::{Env, Format, Serialized, Toml};
 use kippu_core::Config;
+use kippu_core::config::DatabaseConfig;
 
 /// Configuration could not be loaded.
 #[derive(Debug, thiserror::Error)]
@@ -41,4 +42,31 @@ pub fn extract(figment: &Figment) -> Result<Config, ConfigError> {
     figment
         .extract()
         .map_err(|error| ConfigError(Box::new(error)))
+}
+
+/// Extracts only the `database` section, for commands such as `kippu migrate` that need
+/// nothing else (in particular, no signing keys).
+pub fn extract_database(figment: &Figment) -> Result<DatabaseConfig, ConfigError> {
+    figment
+        .extract_inner("database")
+        .map_err(|error| ConfigError(Box::new(error)))
+}
+
+#[cfg(test)]
+mod tests {
+    use secrecy::ExposeSecret;
+
+    use super::*;
+
+    #[test]
+    fn the_database_section_alone_is_enough_to_migrate() {
+        let figment = with_override(Figment::new(), "database.url", Some("sqlite://kippu.db"));
+        assert!(
+            extract(&figment).is_err(),
+            "the full configuration needs keys"
+        );
+        let database = extract_database(&figment).unwrap();
+        assert_eq!(database.url.expose_secret(), "sqlite://kippu.db");
+        assert!(extract_database(&Figment::new()).is_err());
+    }
 }

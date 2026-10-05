@@ -22,15 +22,22 @@ use tokio_util::sync::CancellationToken;
 use crate::cli::{Cli, DatabaseArgs, KeygenArgs, RootTokenArgs, ServeArgs};
 use crate::{adapters, assemble, config, serve_app};
 
+fn sources(
+    cli: &Cli,
+    database: &DatabaseArgs,
+    listen: Option<std::net::SocketAddr>,
+) -> figment::Figment {
+    let figment = config::sources(cli.config.as_deref());
+    let figment = config::with_override(figment, "database.url", database.database_url.clone());
+    config::with_override(figment, "server.listen", listen)
+}
+
 fn load(
     cli: &Cli,
     database: &DatabaseArgs,
     listen: Option<std::net::SocketAddr>,
 ) -> Result<Config, BoxError> {
-    let figment = config::sources(cli.config.as_deref());
-    let figment = config::with_override(figment, "database.url", database.database_url.clone());
-    let figment = config::with_override(figment, "server.listen", listen);
-    Ok(config::extract(&figment)?)
+    Ok(config::extract(&sources(cli, database, listen))?)
 }
 
 /// Resolves when the process is asked to stop (Ctrl-C, or SIGTERM on Unix).
@@ -92,8 +99,8 @@ pub(crate) async fn worker(
 }
 
 pub(crate) async fn migrate(cli: &Cli, args: &DatabaseArgs) -> Result<(), BoxError> {
-    let config = load(cli, args, None)?;
-    let store = adapters::connect(config.database.url.expose_secret()).await?;
+    let database = config::extract_database(&sources(cli, args, None))?;
+    let store = adapters::connect(database.url.expose_secret()).await?;
     store.migrate().await?;
     tracing::info!(backend = store.capabilities().backend, "migrations applied");
     Ok(())
