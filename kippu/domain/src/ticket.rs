@@ -6,6 +6,7 @@ use crate::{AccountId, EventId, ReservationId, TicketId, TicketTypeId, Timestamp
 
 /// Whether a ticket is still honoured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum TicketStatus {
     /// Honoured.

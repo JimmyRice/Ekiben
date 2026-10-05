@@ -10,6 +10,7 @@ use crate::{AccountId, AttestorId, Money, ReservationId, TicketId, Timestamp};
 
 /// Something that happened, for consumers outside Kippu.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "topic")]
 pub enum IntegrationEvent {
     /// A buyer chose an attestor to pay a reservation with.

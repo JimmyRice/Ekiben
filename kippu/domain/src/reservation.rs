@@ -24,6 +24,7 @@ use crate::{
 
 /// Where a reservation stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ReservationStatus {
     /// Inventory is held for the buyer.
@@ -189,6 +190,7 @@ impl std::str::FromStr for ReservationStatus {
 
 /// Tickets of one type held by a reservation, at the price when they were reserved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ReservedItem {
     /// The ticket type.
     pub ticket_type_id: TicketTypeId,
@@ -200,6 +202,7 @@ pub struct ReservedItem {
 
 /// A temporary hold on inventory for one buyer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Reservation {
     /// Identity of the reservation.
     pub id: ReservationId,

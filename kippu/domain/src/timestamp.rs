@@ -12,6 +12,11 @@ pub use time::Duration;
 /// Microseconds are what every supported database stores losslessly, so a timestamp always
 /// reads back exactly as it was written. Serialized as RFC 3339.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(
+    feature = "openapi",
+    derive(utoipa::ToSchema),
+    schema(value_type = String, format = DateTime, example = "2026-12-30T10:00:00+09:00")
+)]
 pub struct Timestamp(OffsetDateTime);
 
 impl Timestamp {

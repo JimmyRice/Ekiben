@@ -20,6 +20,20 @@ pub struct Session {
     pub expires_at: Timestamp,
 }
 
+/// The replacement for a session whose refresh token is being rotated. The account carries
+/// over from the old session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionRenewal {
+    /// Identity of the new session.
+    pub id: SessionId,
+    /// SHA-256 of the new refresh token, hex-encoded.
+    pub refresh_token_hash: String,
+    /// When the rotation happens. The old session must not have expired by then.
+    pub created_at: Timestamp,
+    /// When the new refresh token stops working.
+    pub expires_at: Timestamp,
+}
+
 /// Accounts, credentials, sessions and organizations.
 #[async_trait]
 pub trait AccountStore {
@@ -41,14 +55,15 @@ pub trait AccountStore {
     /// Stores a new session.
     async fn insert_session(&self, session: &Session) -> StoreResult<()>;
 
-    /// Atomically replaces the unexpired session holding `refresh_token_hash` with `next`.
+    /// Atomically replaces the unexpired session holding `refresh_token_hash` with `next`,
+    /// returning the session's account.
     ///
     /// **Contract:** a refresh token can be rotated at most once; a second attempt (a replay)
     /// returns `None`.
     async fn rotate_session(
         &self,
         refresh_token_hash: &str,
-        next: &Session,
+        next: &SessionRenewal,
     ) -> StoreResult<Option<AccountId>>;
 
     /// Ends the session holding `refresh_token_hash`, if any.

@@ -26,6 +26,7 @@ macro_rules! validated_string {
         $(#[$meta])*
         #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
         #[serde(try_from = "String", into = "String")]
+        #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema), schema(value_type = String))]
         pub struct $name(String);
 
         impl $name {

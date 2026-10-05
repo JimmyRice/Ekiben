@@ -18,6 +18,7 @@ use crate::{AttestorId, EventId, Money, OrganizationId, SaleId, TicketTypeId, Ti
 
 /// Whether an event is visible to the public.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum EventStatus {
     /// Visible only to its organizers.
@@ -30,6 +31,7 @@ pub enum EventStatus {
 
 /// A convention or other event.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Event {
     /// Identity of the event.
     pub id: EventId,
@@ -79,6 +81,7 @@ impl Event {
 
 /// A window in which some of an event's ticket types are sold.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Sale {
     /// Identity of the sale.
     pub id: SaleId,
@@ -141,6 +144,7 @@ impl Sale {
 
 /// A kind of ticket within a sale, with its own price, capacity and validity window.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct TicketType {
     /// Identity of the ticket type.
     pub id: TicketTypeId,
@@ -208,6 +212,7 @@ impl TicketType {
 
 /// Stock of one ticket type. `held + sold` never exceeds `capacity`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Inventory {
     /// The ticket type this stock is for.
     pub ticket_type_id: TicketTypeId,

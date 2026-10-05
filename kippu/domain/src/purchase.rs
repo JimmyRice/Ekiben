@@ -35,6 +35,7 @@ impl PurchaseRequestId {
 
 /// One line of a basket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct LineItem {
     /// What to buy.
     pub ticket_type_id: TicketTypeId,
@@ -46,6 +47,7 @@ pub struct LineItem {
 /// per type, every quantity positive.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "Vec<LineItem>", into = "Vec<LineItem>")]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema), schema(value_type = Vec<LineItem>))]
 pub struct Basket(Vec<LineItem>);
 
 impl Basket {
@@ -114,6 +116,7 @@ impl From<Basket> for Vec<LineItem> {
 
 /// Where a purchase request stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum PurchaseStatus {
     /// Waiting for a worker.
@@ -132,6 +135,7 @@ pub enum PurchaseStatus {
 
 /// Why a purchase request was rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum RejectionReason {
     /// Not enough tickets left.
@@ -177,6 +181,7 @@ impl std::str::FromStr for RejectionReason {
 
 /// A buyer's request to purchase a basket of tickets from a sale.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct PurchaseRequest {
     /// Derived from account, sale and idempotency key.
     pub id: PurchaseRequestId,

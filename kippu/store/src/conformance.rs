@@ -36,7 +36,7 @@ use kippu_domain::{
     ReservationId, SaleId, SessionId, TicketTypeId, Timestamp,
 };
 
-use crate::{Hold, Insertion, Lease, Session, Store, StoreError};
+use crate::{Hold, Insertion, Lease, Session, SessionRenewal, Store, StoreError};
 
 /// A store under test, plus whatever must outlive it (e.g. a temporary directory).
 pub struct Harness {
@@ -684,13 +684,27 @@ pub async fn sessions_rotate_once(store: Arc<dyn Store>) {
     let first = format!("first-{}", unique_suffix());
     store.insert_session(&session(&first)).await.unwrap();
 
-    let next = session(&format!("next-{}", unique_suffix()));
+    let renewal = |hash: String| SessionRenewal {
+        id: SessionId::generate(),
+        refresh_token_hash: hash,
+        created_at: now(),
+        expires_at: now() + Duration::days(30),
+    };
+    let next = renewal(format!("next-{}", unique_suffix()));
     assert_eq!(
         store.rotate_session(&first, &next).await.unwrap(),
         Some(buyer)
     );
-    let replay = session(&format!("replay-{}", unique_suffix()));
+    let replay = renewal(format!("replay-{}", unique_suffix()));
     assert_eq!(store.rotate_session(&first, &replay).await.unwrap(), None);
+    assert_eq!(
+        store
+            .rotate_session(&next.refresh_token_hash, &replay)
+            .await
+            .unwrap(),
+        Some(buyer),
+        "the rotated session carries on"
+    );
 }
 
 pub async fn only_holding_reservations_are_overdue(store: Arc<dyn Store>) {

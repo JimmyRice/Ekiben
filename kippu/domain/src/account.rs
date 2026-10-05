@@ -10,6 +10,7 @@ use crate::{AccountId, OrganizationId, Timestamp};
 /// Anonymous visitors have no role at all. `Root` is never stored: it is proven per request
 /// with a key from the deployment's configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     /// Signed up to favourite events and buy tickets.
@@ -63,6 +64,7 @@ impl std::str::FromStr for Role {
 
 /// A person who can sign in. Credentials are stored separately.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Account {
     /// Identity of the account.
     pub id: AccountId,
@@ -78,6 +80,7 @@ pub struct Account {
 
 /// A convention organizer (主办方). Organizer accounts act only within their organizations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Organization {
     /// Identity of the organization.
     pub id: OrganizationId,

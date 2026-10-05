@@ -25,6 +25,7 @@ impl AttestorId {
 
 /// Whether real money is involved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum Environment {
     /// Real payments.
@@ -60,6 +61,7 @@ impl std::str::FromStr for Environment {
 
 /// A party trusted to attest payments.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Attestor {
     /// Identity of the attestor.
     pub id: AttestorId,
@@ -90,6 +92,7 @@ pub struct AttestorKey {
 
 /// What became of the money an attestation reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum PaymentDisposition {
     /// The payment paid for issued tickets.
@@ -132,6 +135,7 @@ impl std::str::FromStr for PaymentDisposition {
 /// `(attestor_id, attestation_id)` is unique: an attestor may deliver the same attestation any
 /// number of times and it is recorded — and acted on — once.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct PaymentAttestation {
     /// Who attests.
     pub attestor_id: AttestorId,

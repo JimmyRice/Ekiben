@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use kippu_domain::account::{Account, Organization};
 use kippu_domain::validation::Email;
 use kippu_domain::{AccountId, OrganizationId};
-use kippu_store::{AccountStore, PageRequest, Session, StoreResult};
+use kippu_store::{AccountStore, PageRequest, Session, SessionRenewal, StoreResult};
 use uuid::Uuid;
 
 use crate::convert::{AccountRow, CredentialsRow, OrganizationRow, all, micros, optional};
@@ -92,7 +92,7 @@ impl AccountStore for SqliteStore {
     async fn rotate_session(
         &self,
         refresh_token_hash: &str,
-        next: &Session,
+        next: &SessionRenewal,
     ) -> StoreResult<Option<AccountId>> {
         let mut tx = self
             .writer

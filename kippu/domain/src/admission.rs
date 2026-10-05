@@ -11,6 +11,7 @@ use crate::validation::ValidationError;
 
 /// How buyers are let into a sale.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum AdmissionPolicy {
     /// Anyone may submit purchase requests while the sale is open.
@@ -53,6 +54,7 @@ impl AdmissionPolicy {
 
 /// Progress of a sale's waiting room.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct WaitingRoom {
     /// Highest queue position handed out so far (positions start at 1).
     pub last_position: u64,

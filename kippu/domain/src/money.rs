@@ -10,6 +10,7 @@ use crate::ValidationError;
 /// An ISO 4217 currency code, such as `JPY` or `CNY`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema), schema(value_type = String, example = "JPY"))]
 pub struct Currency([u8; 3]);
 
 impl Currency {
@@ -68,6 +69,7 @@ impl fmt::Debug for Currency {
 
 /// An amount of money in the currency's minor unit (yen, fen, cents).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Money {
     /// Amount in minor units. Never negative.
     pub amount_minor: i64,

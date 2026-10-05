@@ -1,5 +1,8 @@
 //! Runs the `kippu-store` conformance suite against SQLite, each case on a fresh database file.
-#![allow(clippy::unwrap_used, reason = "test setup: failing to set up is a test failure")]
+#![allow(
+    clippy::unwrap_used,
+    reason = "test setup: failing to set up is a test failure"
+)]
 
 use kippu_store::Store;
 use kippu_store::conformance::Harness;
