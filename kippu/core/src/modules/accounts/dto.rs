@@ -1,8 +1,7 @@
 use kippu_domain::account::{Account, Role};
 use kippu_domain::{OrganizationId, Timestamp};
 use serde::{Deserialize, Serialize};
-use utoipa::{IntoParams, ToSchema};
-use uuid::Uuid;
+use utoipa::ToSchema;
 
 use crate::auth::tokens::IssuedToken;
 
@@ -84,24 +83,6 @@ pub struct CreateOrganizationRequest {
     pub slug: String,
     /// Display name.
     pub name: String,
-}
-
-/// Keyset pagination.
-#[derive(Debug, Deserialize, IntoParams)]
-pub struct PageQuery {
-    /// At most this many items (default 50, at most 200).
-    pub limit: Option<u32>,
-    /// Return items after this id.
-    pub after: Option<Uuid>,
-}
-
-impl PageQuery {
-    pub(crate) fn page(&self) -> kippu_store::PageRequest {
-        kippu_store::PageRequest {
-            limit: self.limit.unwrap_or(50).clamp(1, 200),
-            after: self.after,
-        }
-    }
 }
 
 /// One audit log entry.

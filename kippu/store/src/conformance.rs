@@ -638,6 +638,16 @@ pub async fn waiting_room_advances_once(store: Arc<dyn Store>) {
             .admitted_through,
         5
     );
+    let pending = store.pending_waiting_rooms().await.unwrap();
+    assert!(pending.contains(&catalog.sale), "people are still waiting");
+    assert!(
+        store
+            .advance_waiting_room(catalog.sale, 5, 10)
+            .await
+            .unwrap()
+    );
+    let pending = store.pending_waiting_rooms().await.unwrap();
+    assert!(!pending.contains(&catalog.sale), "everyone was admitted");
 }
 
 pub async fn outbox_is_transactional_and_ordered(store: Arc<dyn Store>) {

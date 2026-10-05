@@ -15,7 +15,7 @@ use crate::auth::{Permission, Policy, Principal, Scope};
 use crate::clock::Clock;
 use crate::config::Config;
 use crate::error::{ApiError, ApiResult};
-use crate::keys::{KeyError, TicketKeys, parse_signing_key, parse_verifying_key};
+use crate::keys::{ConfigError, TicketKeys, parse_signing_key, parse_verifying_key};
 use crate::module::{BackgroundTask, Module};
 use crate::{http, workers};
 
@@ -125,13 +125,13 @@ impl Kippu {
         self
     }
 
-    /// Builds the instance. Fails if a configured key cannot be parsed.
+    /// Builds the instance. Fails if a configuration value (such as a key) is unusable.
     pub fn build(
         self,
         config: Config,
         store: Arc<dyn Store>,
         clock: Arc<dyn Clock>,
-    ) -> Result<App, KeyError> {
+    ) -> Result<App, ConfigError> {
         let mut policy = Policy::default();
         for module in &self.modules {
             for (role, permission) in module.grants() {

@@ -73,6 +73,8 @@ pub trait CatalogStore {
     async fn join_waiting_room(&self, sale: SaleId) -> StoreResult<u64>;
     /// The waiting room's progress (all zeros if nobody joined yet).
     async fn waiting_room(&self, sale: SaleId) -> StoreResult<WaitingRoom>;
+    /// Sales whose waiting room still has people waiting (`admitted_through < last_position`).
+    async fn pending_waiting_rooms(&self) -> StoreResult<Vec<SaleId>>;
     /// Moves `admitted_through` from `from` to `to`.
     ///
     /// **Contract:** a compare-and-set: returns `false` without changes if another instance

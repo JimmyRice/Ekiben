@@ -191,7 +191,8 @@ pub struct PurchaseRequest {
     pub sale_id: SaleId,
     /// What is requested.
     pub basket: Basket,
-    /// Where the request stands.
+    /// Where the request stands. Flattened: `{"status": "rejected", "reason": "sold_out"}`.
+    #[serde(flatten)]
     pub status: PurchaseStatus,
     /// When the request was first accepted.
     pub created_at: Timestamp,

@@ -10,7 +10,7 @@ use kippu_domain::{AccountId, OrganizationId};
 
 use super::dto::{
     AuditEntryResponse, CreateAccountRequest, CreateOrganizationRequest, LoginRequest, Me,
-    PageQuery, RefreshRequest, RegisterRequest, SessionResponse,
+    RefreshRequest, RegisterRequest, SessionResponse,
 };
 use super::permissions::{ACCOUNTS_MANAGE, AUDIT_READ, ORGANIZATIONS_MANAGE};
 use super::service::{hash_token, refresh_session, start_session, validate_display_name};
@@ -18,6 +18,7 @@ use crate::app::AppState;
 use crate::auth::password::{DUMMY_HASH, hash_password, validate_password, verify_password};
 use crate::auth::{Principal, Scope};
 use crate::error::{ApiError, ApiResult, Problem};
+use crate::http::PageQuery;
 
 const TAG: &str = "accounts";
 

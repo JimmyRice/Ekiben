@@ -8,10 +8,10 @@ use kaisatsu::{Issuer, KeyId};
 use secrecy::{ExposeSecret, SecretString};
 use serde::Serialize;
 
-/// A key in the configuration could not be used.
+/// A configuration value could not be used.
 #[derive(Debug, thiserror::Error)]
 #[error("{name}: {reason}")]
-pub struct KeyError {
+pub struct ConfigError {
     /// Which configuration value.
     pub name: String,
     /// What is wrong with it.
@@ -27,9 +27,9 @@ fn decode_base64(text: &str) -> Option<Vec<u8>> {
 
 /// Parses an Ed25519 secret key: a base64 32-byte seed, or PKCS#8 PEM (as written by
 /// `openssl genpkey -algorithm ed25519`).
-pub fn parse_signing_key(name: &str, value: &SecretString) -> Result<SigningKey, KeyError> {
+pub fn parse_signing_key(name: &str, value: &SecretString) -> Result<SigningKey, ConfigError> {
     let text = value.expose_secret().trim();
-    let error = |reason| KeyError {
+    let error = |reason| ConfigError {
         name: name.to_owned(),
         reason,
     };
@@ -45,9 +45,9 @@ pub fn parse_signing_key(name: &str, value: &SecretString) -> Result<SigningKey,
 }
 
 /// Parses an Ed25519 public key: 32 bytes in base64, or SPKI PEM.
-pub fn parse_verifying_key(name: &str, text: &str) -> Result<VerifyingKey, KeyError> {
+pub fn parse_verifying_key(name: &str, text: &str) -> Result<VerifyingKey, ConfigError> {
     let text = text.trim();
-    let error = |reason| KeyError {
+    let error = |reason| ConfigError {
         name: name.to_owned(),
         reason,
     };

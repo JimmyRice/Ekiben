@@ -1,10 +1,11 @@
 //! `Idempotency-Key` for every mutating request.
 //!
-//! When a client sends `Idempotency-Key` with a POST, PUT, PATCH or DELETE, the first response
-//! (unless it is a 5xx, which is worth retrying) is stored. Repeating the request with the same
-//! key returns the stored response without running the handler again; reusing the key for a
-//! *different* request is rejected. Keys are scoped to the caller, so two accounts never
-//! collide.
+//! When a client sends `Idempotency-Key` with a POST, PUT, PATCH or DELETE, the first
+//! *successful* response is stored. Repeating the request with the same key returns the stored
+//! response without running the handler again; reusing the key for a *different* request is
+//! rejected. A request that failed changed nothing, so retrying it runs it again — the client
+//! may have fixed the cause (e.g. obtained an admission pass) in between. Keys are scoped to the
+//! caller, so two accounts never collide.
 //!
 //! Handlers that are idempotent by design — purchase requests derive their id from the key,
 //! payment attestations are unique per attestor — mark their responses with
@@ -95,7 +96,7 @@ async fn handle(
 
     let response = next.run(Request::from_parts(parts, Body::from(body))).await;
     if response.extensions().get::<IdempotentByDesign>().is_some()
-        || response.status().is_server_error()
+        || !response.status().is_success()
     {
         return Ok(response);
     }

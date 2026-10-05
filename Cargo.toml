@@ -135,6 +135,15 @@ workspace = true
 
 # ── Build profiles ──────────────────────────────────────────────────────────────
 
+# Debug builds compile the crypto crates optimized: unoptimized Argon2 and Ed25519 make tests
+# crawl, and these crates are not what anyone steps through in a debugger.
+[profile.dev.package]
+argon2.opt-level = 3
+blake2.opt-level = 3
+curve25519-dalek.opt-level = 3
+ed25519-dalek.opt-level = 3
+sha2.opt-level = 3
+
 # Server builds: favour throughput.
 [profile.release]
 opt-level = 3

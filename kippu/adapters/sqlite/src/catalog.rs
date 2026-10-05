@@ -368,6 +368,16 @@ impl CatalogStore for SqliteStore {
         })
     }
 
+    async fn pending_waiting_rooms(&self) -> StoreResult<Vec<SaleId>> {
+        let ids = sqlx::query_scalar::<_, Uuid>(
+            "SELECT sale_id FROM waiting_rooms WHERE admitted_through < last_position ORDER BY sale_id",
+        )
+        .fetch_all(&self.reader)
+        .await
+        .map_err(error)?;
+        Ok(ids.into_iter().map(Into::into).collect())
+    }
+
     async fn advance_waiting_room(&self, sale: SaleId, from: u64, to: u64) -> StoreResult<bool> {
         let (from, to) = (
             i64::try_from(from).map_err(StoreError::backend)?,

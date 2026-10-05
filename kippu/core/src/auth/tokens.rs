@@ -19,7 +19,7 @@ use super::Principal;
 use super::jwt::{self, JwtError};
 use crate::config::Config;
 use crate::error::{ApiError, ApiResult};
-use crate::keys::{KeyError, parse_signing_key, parse_verifying_key};
+use crate::keys::{ConfigError, parse_signing_key, parse_verifying_key};
 
 /// Key id of tokens Kippu signs itself.
 const INSTANCE_KID: &str = "kippu";
@@ -111,7 +111,7 @@ pub struct Tokens {
 
 impl Tokens {
     /// Loads keys and lifetimes from configuration.
-    pub fn from_config(config: &Config) -> Result<Self, KeyError> {
+    pub fn from_config(config: &Config) -> Result<Self, ConfigError> {
         let signing_key =
             parse_signing_key("keys.token_signing_key", &config.keys.token_signing_key)?;
         let root_keys = config
@@ -125,7 +125,7 @@ impl Tokens {
                     parse_verifying_key(&name, &key.public_key)?,
                 ))
             })
-            .collect::<Result<_, KeyError>>()?;
+            .collect::<Result<_, ConfigError>>()?;
         Ok(Self {
             verifying_key: signing_key.verifying_key(),
             signing_key,
