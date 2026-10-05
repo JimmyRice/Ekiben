@@ -1156,6 +1156,7 @@ dependencies = [
  "ed25519-dalek",
  "figment",
  "getrandom 0.4.3",
+ "hex",
  "kaisatsu",
  "kippu-core",
  "kippu-domain",

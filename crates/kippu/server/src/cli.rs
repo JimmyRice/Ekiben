@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use kippu_domain::Timestamp;
 
 /// Kippu (切符): ticketing infrastructure for conventions.
 #[derive(Debug, Parser)]
@@ -49,6 +50,8 @@ pub enum Command {
     Keygen(KeygenArgs),
     /// Mint a short-lived root token with a root private key.
     RootToken(RootTokenArgs),
+    /// Check a ticket offline, the way a gate does.
+    Verify(VerifyArgs),
     /// Inspect configuration.
     #[command(subcommand)]
     Config(ConfigCommand),
@@ -103,6 +106,42 @@ pub struct RootTokenArgs {
     /// Lifetime in seconds (at most the server's `root.max_token_ttl_seconds`).
     #[arg(long, default_value_t = 600)]
     pub ttl: u32,
+}
+
+/// Arguments of `verify`.
+#[derive(Debug, Clone, clap::Args)]
+pub struct VerifyArgs {
+    /// The ticket: text in `--encoding`, a file holding it (text or raw bytes, e.g. saved from
+    /// the API), or `-` for stdin.
+    pub ticket: String,
+    /// A trusted ticket public key: base64 (as listed by `/.well-known/kippu/ticket-keys`),
+    /// PEM, or a file holding one (such as `ticket.pub`). Repeat for retired keys.
+    #[arg(long = "key", required = true, value_name = "KEY")]
+    pub keys: Vec<String>,
+    /// Also require this `issuer` claim, i.e. the deployment's `issuer.id`.
+    #[arg(long)]
+    pub issuer: Option<String>,
+    /// How the ticket is encoded. `auto` recognizes all of them by the ticket header.
+    #[arg(long, default_value = "auto")]
+    pub encoding: TicketEncoding,
+    /// Check the validity window at this instant (RFC 3339) instead of now.
+    #[arg(long, value_name = "TIME")]
+    pub at: Option<Timestamp>,
+}
+
+/// How a ticket handed to `verify` is encoded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum TicketEncoding {
+    /// Whichever of the others yields a ticket header.
+    Auto,
+    /// Standard or URL-safe base64, with or without padding.
+    Base64,
+    /// Base45 (RFC 9285), the QR alphanumeric-mode text form.
+    Base45,
+    /// Hexadecimal.
+    Hex,
+    /// The raw bytes.
+    Binary,
 }
 
 /// `config` subcommands.

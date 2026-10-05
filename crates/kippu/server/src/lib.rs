@@ -6,6 +6,7 @@ pub mod cli;
 mod commands;
 pub mod config;
 mod telemetry;
+mod verify;
 
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -70,6 +71,7 @@ impl Launcher {
                 Command::Migrate(args) => commands::migrate(&cli, args).await,
                 Command::Keygen(args) => commands::keygen(args),
                 Command::RootToken(args) => commands::root_token(&cli, args),
+                Command::Verify(args) => verify::run(args),
                 Command::Config(ConfigCommand::Check(args)) => commands::config_check(&cli, args),
             }
         });

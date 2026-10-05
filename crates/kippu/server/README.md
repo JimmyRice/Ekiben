@@ -9,6 +9,7 @@ kippu worker                                         background workers only
 kippu migrate                                        apply database migrations
 kippu keygen [--pem] [--out <prefix>]                new Ed25519 key pair (<prefix>.key/.pub)
 kippu root-token --key root.key --name <name>        short-lived root token
+kippu verify --key <public key> <ticket>             check a ticket offline, like a gate
 kippu config check                                   effective configuration, secrets redacted
 ```
 

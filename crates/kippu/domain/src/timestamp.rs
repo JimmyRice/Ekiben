@@ -1,5 +1,6 @@
 use std::fmt;
 use std::ops::{Add, Sub};
+use std::str::FromStr;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use time::OffsetDateTime;
@@ -105,6 +106,22 @@ impl fmt::Debug for Timestamp {
     }
 }
 
+/// Text that is not an RFC 3339 timestamp.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("not an RFC 3339 timestamp such as 2026-12-30T10:00:00+09:00")]
+pub struct ParseTimestampError;
+
+impl FromStr for Timestamp {
+    type Err = ParseTimestampError;
+
+    /// Parses RFC 3339, e.g. `2026-12-30T10:00:00+09:00`.
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        OffsetDateTime::parse(text, &Rfc3339)
+            .map(Self::from_offset_date_time)
+            .map_err(|_| ParseTimestampError)
+    }
+}
+
 impl Serialize for Timestamp {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let text = self.0.format(&Rfc3339).map_err(serde::ser::Error::custom)?;
@@ -115,8 +132,7 @@ impl Serialize for Timestamp {
 impl<'de> Deserialize<'de> for Timestamp {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let text = <std::borrow::Cow<'de, str>>::deserialize(deserializer)?;
-        let instant = OffsetDateTime::parse(&text, &Rfc3339).map_err(serde::de::Error::custom)?;
-        Ok(Self::from_offset_date_time(instant))
+        text.parse().map_err(serde::de::Error::custom)
     }
 }
 

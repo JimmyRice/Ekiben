@@ -18,6 +18,8 @@ clap.workspace = true
 ed25519-dalek = { workspace = true, features = ["pem", "zeroize"] }
 figment = { workspace = true, features = ["toml", "env"] }
 getrandom.workspace = true
+hex.workspace = true
+kaisatsu.workspace = true
 kippu-core.workspace = true
 kippu-domain.workspace = true
 kippu-store.workspace = true
@@ -31,7 +33,7 @@ tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 
 [dev-dependencies]
-kaisatsu.workspace = true
+kaisatsu = { workspace = true, features = ["issuer"] }
 serde_json.workspace = true
 tempfile.workspace = true
 tower = { workspace = true, features = ["util"] }

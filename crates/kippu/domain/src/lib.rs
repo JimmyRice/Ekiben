@@ -16,5 +16,5 @@ pub mod validation;
 
 pub use id::*;
 pub use money::{Currency, Money};
-pub use timestamp::{Duration, Timestamp};
+pub use timestamp::{Duration, ParseTimestampError, Timestamp};
 pub use validation::ValidationError;
