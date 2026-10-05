@@ -19,6 +19,10 @@ pub struct OutboxRecord {
 #[async_trait]
 pub trait OutboxStore {
     /// Up to `limit` events with a sequence number above `after`, in order.
+    ///
+    /// **Contract:** sequence numbers follow commit order. Once a reader has seen sequence
+    /// `n`, no event below `n` can still appear, so remembering the last sequence seen never
+    /// skips an event — even while many transactions append concurrently.
     async fn outbox_after(&self, after: i64, limit: u32) -> StoreResult<Vec<OutboxRecord>>;
 }
 

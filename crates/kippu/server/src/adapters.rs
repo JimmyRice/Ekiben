@@ -8,6 +8,8 @@ use kippu_store::{BoxError, Store};
 pub const COMPILED_ADAPTERS: &[&str] = &[
     #[cfg(feature = "sqlite")]
     "sqlite",
+    #[cfg(feature = "postgres")]
+    "postgres",
 ];
 
 /// Connects to the database named by `url`, choosing the adapter by the URL's scheme.
@@ -17,6 +19,10 @@ pub async fn connect(url: &str) -> Result<Arc<dyn Store>, BoxError> {
         #[cfg(feature = "sqlite")]
         "sqlite" => Ok(Arc::new(
             kippu_store_sqlite::SqliteStore::connect(url).await?,
+        )),
+        #[cfg(feature = "postgres")]
+        "postgres" | "postgresql" => Ok(Arc::new(
+            kippu_store_postgres::PostgresStore::connect(url).await?,
         )),
         _ => Err(format!(
             "no adapter for `{scheme}:` URLs; this binary supports: {}",

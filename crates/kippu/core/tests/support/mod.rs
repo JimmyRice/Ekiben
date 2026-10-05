@@ -1,8 +1,10 @@
-//! An in-process Kippu instance on a temporary SQLite database, driven through its router.
+//! An in-process Kippu instance on a temporary SQLite database (or, with
+//! `KIPPU_TEST_BACKEND=postgres`, a fresh PostgreSQL schema), driven through its router.
 #![allow(
     dead_code,
     unreachable_pub,
     clippy::unwrap_used,
+    clippy::expect_used,
     clippy::missing_panics_doc,
     reason = "shared test support; not every test uses every helper"
 )]
@@ -22,8 +24,11 @@ use kippu_core::config::{
 use kippu_core::{App, Kippu, ManualClock, Module};
 use kippu_domain::{Duration, Timestamp};
 use kippu_store::Store;
+use kippu_store_postgres::PostgresStore;
 use kippu_store_sqlite::SqliteStore;
 use serde_json::{Value, json};
+use sqlx::postgres::PgConnectOptions;
+use std::str::FromStr;
 use tower::ServiceExt;
 
 pub const ISSUER: &str = "kippu.test";
@@ -43,6 +48,31 @@ pub struct Reply {
     pub bytes: Vec<u8>,
 }
 
+/// The database the tests run on: SQLite in `dir`, unless `KIPPU_TEST_BACKEND=postgres`
+/// selects a fresh schema on the server at `KIPPU_TEST_POSTGRES_URL`.
+async fn test_store(dir: &tempfile::TempDir) -> (Arc<dyn Store>, String) {
+    if std::env::var("KIPPU_TEST_BACKEND").as_deref() == Ok("postgres") {
+        let url = std::env::var("KIPPU_TEST_POSTGRES_URL")
+            .expect("KIPPU_TEST_BACKEND=postgres needs KIPPU_TEST_POSTGRES_URL");
+        let schema = format!("core_{}", uuid_suffix());
+        let admin = PostgresStore::connect(&url).await.unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+            .execute(admin.pool())
+            .await
+            .unwrap();
+        let options = PgConnectOptions::from_str(&url)
+            .unwrap()
+            .options([("search_path", schema.as_str())]);
+        let store = PostgresStore::connect_with(options, 16).await.unwrap();
+        store.migrate().await.unwrap();
+        return (Arc::new(store), url);
+    }
+    let url = format!("sqlite://{}", dir.path().join("kippu.db").display());
+    let store = SqliteStore::connect(&url).await.unwrap();
+    store.migrate().await.unwrap();
+    (Arc::new(store), url)
+}
+
 impl TestApp {
     pub async fn start() -> Self {
         Self::start_with(Vec::new(), |_| {}).await
@@ -55,9 +85,7 @@ impl TestApp {
         configure: impl FnOnce(&mut Config),
     ) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let url = format!("sqlite://{}", dir.path().join("kippu.db").display());
-        let store = SqliteStore::connect(&url).await.unwrap();
-        store.migrate().await.unwrap();
+        let (store, url) = test_store(&dir).await;
 
         let root_key = SigningKey::from_bytes(&[42; 32]);
         let mut config = Config {
@@ -91,7 +119,7 @@ impl TestApp {
         let app = Kippu::new()
             .modules(kippu_core::default_modules())
             .modules(extra)
-            .build(config, Arc::new(store), clock.clone())
+            .build(config, store, clock.clone())
             .unwrap();
         Self {
             app,

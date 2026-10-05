@@ -12,6 +12,19 @@ jobs:
   test:
     name: fmt · clippy · test
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: kippu
+          POSTGRES_PASSWORD: kippu
+          POSTGRES_DB: kippu
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U kippu" --health-interval 2s --health-timeout 5s
+          --health-retries 30
+    env:
+      KIPPU_TEST_POSTGRES_URL: postgres://kippu:kippu@localhost:5432/kippu
     steps:
       - uses: actions/checkout@v4
       - run: rustup show active-toolchain
@@ -21,6 +34,10 @@ jobs:
       # Default features too: optional ones (e.g. `base45`) must not be load-bearing.
       - run: cargo clippy --workspace --all-targets
       - run: cargo test --workspace --all-features
+      # The HTTP tests again, on a database with concurrent writers.
+      - run: cargo test --package kippu-core
+        env:
+          KIPPU_TEST_BACKEND: postgres
 
   kaisatsu:
     name: kaisatsu · no_std · C ABI

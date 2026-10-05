@@ -14,7 +14,7 @@ conformance = ["dep:tokio"]
 async-trait.workspace = true
 kippu-domain.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, optional = true, features = ["macros", "rt-multi-thread", "sync"] }
+tokio = { workspace = true, optional = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 uuid = { workspace = true, features = ["v7"] }
 
 [lints]

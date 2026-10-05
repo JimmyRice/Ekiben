@@ -17,6 +17,7 @@ members = [
     "crates/kippu/core",
     "crates/kippu/server",
     "crates/kippu/adapters/sqlite",
+    "crates/kippu/adapters/postgres",
     # Ticket verification core
     "crates/kaisatsu",
     # Bindings
@@ -38,6 +39,7 @@ kaisatsu = { path = "crates/kaisatsu", version = "0.1.0", default-features = fal
 kippu-domain = { path = "crates/kippu/domain" }
 kippu-store = { path = "crates/kippu/store" }
 kippu-store-sqlite = { path = "crates/kippu/adapters/sqlite" }
+kippu-store-postgres = { path = "crates/kippu/adapters/postgres" }
 kippu-core = { path = "crates/kippu/core" }
 kippu-server = { path = "crates/kippu/server", default-features = false }
 
@@ -121,9 +123,10 @@ name = "kippu"
 path = "src/main.rs"
 
 [features]
-default = ["sqlite", "mimalloc"]
+default = ["sqlite", "postgres", "mimalloc"]
 ## Storage adapters compiled into the binary.
 sqlite = ["kippu-server/sqlite"]
+postgres = ["kippu-server/postgres"]
 ## Use mimalloc as the global allocator.
 mimalloc = ["dep:mimalloc"]
 ## Let `kippu verify` read tickets carried as Base45 text.

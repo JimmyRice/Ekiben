@@ -15,7 +15,8 @@ crates/kippu/domain            pure domain: ids, money, timestamps, state machin
 crates/kippu/store             storage ports, consistency contract, `conformance` test suite
 crates/kippu/core              Module system, auth/RBAC, HTTP, background tasks, built-in modules
 crates/kippu/server            launcher: CLI (`kippu …`), config sources, adapter wiring
-crates/kippu/adapters/sqlite   SQLite adapter (more adapters go next to it)
+crates/kippu/adapters/sqlite   SQLite adapter (single writer)
+crates/kippu/adapters/postgres PostgreSQL adapter (concurrent writers, SKIP LOCKED, advisory-locked outbox)
 crates/kaisatsu                KP1 encode/verify, no_std; `issuer` feature for signing; fuzz/
 crates/ffi/c                   C ABI (the only crate with `unsafe`), generated include/kaisatsu.h
 crates/xtask                   `cargo xtask vectors|header [--check] | c-example | size`
@@ -28,7 +29,7 @@ Keep the repository root uncluttered and do not add speculative `.gitignore` ent
 ## Commands
 
 ```bash
-cargo test --workspace --all-features                                   # 111 tests incl. e2e over TCP
+cargo test --workspace --all-features                                   # 137 tests incl. e2e over TCP
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets           # default features too
 cargo fmt --all
@@ -36,6 +37,16 @@ cargo xtask vectors --check && cargo xtask header --check               # genera
 cargo xtask c-example                                                   # C ABI against all 15 vectors
 cargo build -p kaisatsu --target thumbv7em-none-eabihf                  # proves no_std
 cargo run -- serve --config <file>                                      # see kippu.example.toml
+```
+
+Adapters that need a server run their conformance suite only when a URL is set, and the HTTP
+tests can run on PostgreSQL too; locally:
+
+```bash
+docker run -d --rm --name kippu-test-postgres -e POSTGRES_USER=kippu -e POSTGRES_PASSWORD=kippu -p 55432:5432 postgres:17-alpine
+export KIPPU_TEST_POSTGRES_URL=postgres://kippu:kippu@localhost:55432/kippu
+cargo test -p kippu-store-postgres                                      # conformance on PostgreSQL
+KIPPU_TEST_BACKEND=postgres cargo test -p kippu-core                    # HTTP tests on PostgreSQL
 ```
 
 Run all of the checks before every commit. Tests for HTTP behaviour live in
@@ -99,6 +110,11 @@ as `shop`, `attestor`, `reserve`, `drain`); the full journey over real TCP is
   `sqlx::AssertSqlSafe(format!(…))` for composed SQL built from constants. `sqlx::migrate!`
   needs the `macros` feature. SQLite writes go through a single-connection writer pool opened
   with `BEGIN IMMEDIATE`; reads use a separate WAL reader pool.
+- **Outbox order on concurrent databases:** identity/serial values are assigned at insert,
+  not commit; PostgreSQL appends take `pg_advisory_xact_lock` so a reader never skips a late
+  commit (`outbox_readers_never_skip_late_commits`). Any new adapter needs the same.
+- **sqlx PostgreSQL** has no `u32`/`u16` encoding: store counts as `BIGINT` and convert
+  (`convert::count`/`uncount`).
 - **SQLite cannot relax a column in place:** rebuild the table in a migration that starts
   with `-- no-transaction` (foreign keys off, one `BEGIN IMMEDIATE` … `COMMIT`), as
   `0002_identities.sql` does.

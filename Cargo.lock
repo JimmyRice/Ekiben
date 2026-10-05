@@ -1113,11 +1113,13 @@ dependencies = [
  "kaisatsu",
  "kippu-domain",
  "kippu-store",
+ "kippu-store-postgres",
  "kippu-store-sqlite",
  "secrecy",
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "sqlx",
  "tempfile",
  "thiserror",
  "time",
@@ -1161,6 +1163,7 @@ dependencies = [
  "kippu-core",
  "kippu-domain",
  "kippu-store",
+ "kippu-store-postgres",
  "kippu-store-sqlite",
  "secrecy",
  "serde",
@@ -1183,6 +1186,21 @@ dependencies = [
  "async-trait",
  "kippu-domain",
  "thiserror",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "kippu-store-postgres"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "kippu-domain",
+ "kippu-store",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "time",
  "tokio",
  "uuid",
 ]
@@ -1947,6 +1965,7 @@ dependencies = [
  "sha2 0.10.9",
  "smallvec",
  "thiserror",
+ "time",
  "tokio",
  "tokio-stream",
  "tracing",
@@ -2016,6 +2035,7 @@ dependencies = [
  "sha2 0.11.0",
  "sqlx-core",
  "thiserror",
+ "time",
  "tracing",
  "uuid",
 ]
@@ -2051,6 +2071,7 @@ dependencies = [
  "sqlx-core",
  "stringprep",
  "thiserror",
+ "time",
  "tracing",
  "uuid",
  "whoami",
@@ -2076,6 +2097,7 @@ dependencies = [
  "serde",
  "sqlx-core",
  "thiserror",
+ "time",
  "tracing",
  "url",
  "uuid",

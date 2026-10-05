@@ -55,10 +55,20 @@ impl Harness {
 
 /// Expands to one `#[tokio::test]` per conformance case. `$connect` is an expression that
 /// evaluates to a future of a [`Harness`] with a migrated, empty store.
+///
+/// With `optional`, `$connect` evaluates to a future of an `Option<Harness>`, and each case is
+/// skipped (it passes, saying so on stderr) when it yields `None` — for adapters that need a
+/// database server the environment may not provide.
 #[macro_export]
 macro_rules! conformance_tests {
+    (optional $connect:expr) => {
+        $crate::conformance_tests!(@list (optional $connect));
+    };
     ($connect:expr) => {
-        $crate::conformance_tests!(@cases $connect;
+        $crate::conformance_tests!(@list (required $connect));
+    };
+    (@list $mode:tt) => {
+        $crate::conformance_tests!(@cases $mode;
             migrations_are_idempotent,
             unique_keys_report_conflicts,
             stale_versions_conflict,
@@ -73,6 +83,7 @@ macro_rules! conformance_tests {
             waiting_room_positions_are_distinct,
             waiting_room_advances_once,
             outbox_is_transactional_and_ordered,
+            outbox_readers_never_skip_late_commits,
             sessions_rotate_once,
             only_holding_reservations_are_overdue,
             capacity_cannot_drop_below_stock_in_use,
@@ -82,14 +93,23 @@ macro_rules! conformance_tests {
             the_last_sign_in_method_is_kept,
         );
     };
-    (@cases $connect:expr; $($case:ident),* $(,)?) => {
+    (@cases $mode:tt; $($case:ident),* $(,)?) => {
         $(
             #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
             async fn $case() {
-                let harness: $crate::conformance::Harness = $connect.await;
+                let Some(harness) = $crate::conformance_tests!(@connect $mode) else {
+                    eprintln!("skipped: no database configured for this adapter");
+                    return;
+                };
                 $crate::conformance::$case(harness.store.clone()).await;
             }
         )*
+    };
+    (@connect (required $connect:expr)) => {
+        Some::<$crate::conformance::Harness>($connect.await)
+    };
+    (@connect (optional $connect:expr)) => {
+        $connect.await as Option<$crate::conformance::Harness>
     };
 }
 
@@ -1008,4 +1028,63 @@ pub async fn the_last_sign_in_method_is_kept(store: Arc<dyn Store>) {
             .unwrap(),
         Unlink::Unlinked
     );
+}
+
+pub async fn outbox_readers_never_skip_late_commits(store: Arc<dyn Store>) {
+    const WRITERS: usize = 16;
+    let start = store
+        .outbox_after(0, 10_000)
+        .await
+        .unwrap()
+        .last()
+        .map_or(0, |record| record.sequence);
+
+    // Each writer appends, then dawdles before committing, so commits finish out of order.
+    let writers: Vec<_> = (0..WRITERS)
+        .map(|index| {
+            let store = store.clone();
+            tokio::spawn(async move {
+                let event = IntegrationEvent::ReservationExpired {
+                    reservation_id: ReservationId::generate(),
+                };
+                let mut tx = store.begin().await.unwrap();
+                tx.outbox().append_event(&event, now()).await.unwrap();
+                let pause = u64::try_from((index * 7) % 13).unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(pause)).await;
+                tx.commit().await.unwrap();
+                event
+            })
+        })
+        .collect();
+
+    // A reader that remembers the last sequence it saw, as consumers do.
+    let reader = {
+        let store = store.clone();
+        tokio::spawn(async move {
+            let mut last = start;
+            let mut seen = Vec::new();
+            while seen.len() < WRITERS {
+                for record in store.outbox_after(last, 100).await.unwrap() {
+                    last = record.sequence;
+                    seen.push(record.event);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+            seen
+        })
+    };
+    let mut written = Vec::new();
+    for writer in writers {
+        written.push(writer.await.unwrap());
+    }
+    let seen = tokio::time::timeout(std::time::Duration::from_secs(10), reader)
+        .await
+        .expect("the reader skipped an event")
+        .unwrap();
+    let key = |event: &IntegrationEvent| format!("{event:?}");
+    let mut written: Vec<_> = written.iter().map(key).collect();
+    let mut seen: Vec<_> = seen.iter().map(key).collect();
+    written.sort();
+    seen.sort();
+    assert_eq!(seen, written);
 }
