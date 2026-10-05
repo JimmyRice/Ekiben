@@ -50,11 +50,22 @@ impl Module for Catalog {
                 routes::create_event,
                 routes::list_organization_events
             ))
-            .routes(routes!(routes::get_event, routes::update_event))
+            .routes(routes!(
+                routes::get_event,
+                routes::update_event,
+                routes::patch_event
+            ))
             .routes(routes!(routes::create_sale, routes::list_sales))
-            .routes(routes!(routes::get_sale, routes::update_sale))
+            .routes(routes!(
+                routes::get_sale,
+                routes::update_sale,
+                routes::patch_sale
+            ))
             .routes(routes!(routes::create_ticket_type))
-            .routes(routes!(routes::update_ticket_type))
+            .routes(routes!(
+                routes::update_ticket_type,
+                routes::patch_ticket_type
+            ))
             .routes(routes!(routes::list_favorites))
             .routes(routes!(routes::add_favorite, routes::remove_favorite))
     }

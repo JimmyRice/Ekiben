@@ -114,6 +114,81 @@ pub struct TicketTypeRequest {
     pub ticket_extensions: BTreeMap<u8, String>,
 }
 
+/// Changes to an event: only the fields to change, plus the `version` you last read.
+///
+/// Absent fields keep their value. Unknown fields are rejected, so a typo cannot be silently
+/// ignored.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EventPatch {
+    /// The version you are editing; a mismatch fails with 412.
+    pub version: i64,
+    /// URL-friendly unique name.
+    pub slug: Option<String>,
+    /// Display title.
+    pub title: Option<String>,
+    /// Long description.
+    pub description: Option<String>,
+    /// Where it takes place.
+    pub venue: Option<String>,
+    /// When it opens.
+    pub starts_at: Option<Timestamp>,
+    /// When it closes.
+    pub ends_at: Option<Timestamp>,
+    /// `draft`, `published` or `cancelled`.
+    pub status: Option<EventStatus>,
+}
+
+/// Changes to a sale: only the fields to change, plus the `version` you last read.
+///
+/// Absent fields keep their value; unknown fields are rejected.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SalePatch {
+    /// The version you are editing; a mismatch fails with 412.
+    pub version: i64,
+    /// Display name.
+    pub name: Option<String>,
+    /// When purchase requests start being accepted.
+    pub opens_at: Option<Timestamp>,
+    /// When purchase requests stop being accepted.
+    pub closes_at: Option<Timestamp>,
+    /// The admission policy, replaced as a whole.
+    pub admission: Option<AdmissionPolicy>,
+    /// How long an unpaid reservation holds tickets.
+    pub reservation_ttl_seconds: Option<u32>,
+    /// Most tickets per purchase request.
+    pub max_tickets_per_request: Option<u32>,
+    /// Attestors whose payments settle this sale's reservations, replaced as a whole.
+    pub accepted_attestors: Option<Vec<AttestorId>>,
+    /// `live` or `sandbox`.
+    pub environment: Option<Environment>,
+}
+
+/// Changes to a ticket type: only the fields to change, plus the `version` you last read.
+///
+/// Absent fields keep their value; unknown fields are rejected.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TicketTypePatch {
+    /// The version you are editing; a mismatch fails with 412.
+    pub version: i64,
+    /// Display name.
+    pub name: Option<String>,
+    /// Price of one ticket.
+    pub price: Option<Money>,
+    /// How many tickets exist. Can be raised, or lowered down to what is held and sold.
+    pub capacity: Option<u32>,
+    /// Most tickets of this type one account may hold.
+    pub per_account_limit: Option<u32>,
+    /// Tickets are valid from (inclusive).
+    pub valid_from: Option<Timestamp>,
+    /// Tickets are valid until (exclusive).
+    pub valid_until: Option<Timestamp>,
+    /// Extension claims written into every ticket, replaced as a whole.
+    pub ticket_extensions: Option<BTreeMap<u8, String>>,
+}
+
 /// A sale with its ticket types and current availability.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct SaleDetail {

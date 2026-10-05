@@ -9,7 +9,8 @@ use kippu_domain::{EventId, OrganizationId, SaleId, TicketTypeId, ValidationErro
 use kippu_store::EventFilter;
 
 use super::dto::{
-    CreateEventRequest, SaleDetail, SaleRequest, TicketTypeRequest, UpdateEventRequest,
+    CreateEventRequest, EventPatch, SaleDetail, SalePatch, SaleRequest, TicketTypePatch,
+    TicketTypeRequest, UpdateEventRequest,
 };
 use super::permissions::{EVENTS_WRITE, FAVORITES_MANAGE};
 use super::service::{sale_detail, visible_event, visible_sale, writable_event, writable_sale};
@@ -22,6 +23,16 @@ const TAG: &str = "catalog";
 
 fn version_of(version: Option<i64>) -> ApiResult<i64> {
     version.ok_or_else(|| ValidationError::new("version", "is required when updating").into())
+}
+
+/// Fails with 412 unless the caller edits the version that is stored. A patch is applied on
+/// top of the stored record, so it must not be merged onto a version the caller never saw.
+fn check_version(stored: i64, expected: i64) -> ApiResult<()> {
+    if stored == expected {
+        Ok(())
+    } else {
+        Err(ApiError::stale_version())
+    }
 }
 
 /// Published events, for everyone.
@@ -149,12 +160,51 @@ pub(crate) async fn update_event(
         starts_at: request.starts_at,
         ends_at: request.ends_at,
         status: request.status,
-        updated_at: state.now(),
-        version: request.version + 1,
         ..current
     };
+    save_event(&state, event, request.version).await
+}
+
+/// Change some of an event's fields, including publishing or cancelling it.
+#[utoipa::path(
+    patch, path = "/v1/events/{event_id}", tag = TAG,
+    security(("bearer" = [])),
+    params(("event_id" = EventId, Path)),
+    request_body(content((EventPatch = "application/merge-patch+json"), (EventPatch = "application/json"))),
+    responses((status = 200, body = Event), (status = 412, description = "Edited concurrently", body = Problem))
+)]
+pub(crate) async fn patch_event(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(event_id): Path<EventId>,
+    Json(patch): Json<EventPatch>,
+) -> ApiResult<Json<Event>> {
+    let current = writable_event(&state, &principal, event_id).await?;
+    check_version(current.version, patch.version)?;
+    let event = Event {
+        slug: match patch.slug {
+            Some(slug) => Slug::new(slug)?,
+            None => current.slug,
+        },
+        title: patch.title.unwrap_or(current.title),
+        description: patch.description.unwrap_or(current.description),
+        venue: patch.venue.unwrap_or(current.venue),
+        starts_at: patch.starts_at.unwrap_or(current.starts_at),
+        ends_at: patch.ends_at.unwrap_or(current.ends_at),
+        status: patch.status.unwrap_or(current.status),
+        ..current
+    };
+    save_event(&state, event, patch.version).await
+}
+
+async fn save_event(state: &AppState, event: Event, expected: i64) -> ApiResult<Json<Event>> {
+    let event = Event {
+        updated_at: state.now(),
+        version: expected + 1,
+        ..event
+    };
     event.validate()?;
-    state.store().update_event(&event, request.version).await?;
+    state.store().update_event(&event, expected).await?;
     Ok(Json(event))
 }
 
@@ -260,9 +310,49 @@ pub(crate) async fn update_sale(
 ) -> ApiResult<Json<Sale>> {
     let (current, _) = writable_sale(&state, &principal, sale_id).await?;
     let expected = version_of(request.version)?;
+    save_sale(&state, sale_from(request, &current), expected).await
+}
+
+/// Change some of a sale's settings.
+#[utoipa::path(
+    patch, path = "/v1/sales/{sale_id}", tag = TAG,
+    security(("bearer" = [])),
+    params(("sale_id" = SaleId, Path)),
+    request_body(content((SalePatch = "application/merge-patch+json"), (SalePatch = "application/json"))),
+    responses((status = 200, body = Sale), (status = 412, body = Problem))
+)]
+pub(crate) async fn patch_sale(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(sale_id): Path<SaleId>,
+    Json(patch): Json<SalePatch>,
+) -> ApiResult<Json<Sale>> {
+    let (current, _) = writable_sale(&state, &principal, sale_id).await?;
+    check_version(current.version, patch.version)?;
+    let sale = Sale {
+        name: patch.name.unwrap_or(current.name),
+        opens_at: patch.opens_at.unwrap_or(current.opens_at),
+        closes_at: patch.closes_at.unwrap_or(current.closes_at),
+        admission: patch.admission.unwrap_or(current.admission),
+        reservation_ttl_seconds: patch
+            .reservation_ttl_seconds
+            .unwrap_or(current.reservation_ttl_seconds),
+        max_tickets_per_request: patch
+            .max_tickets_per_request
+            .unwrap_or(current.max_tickets_per_request),
+        accepted_attestors: patch
+            .accepted_attestors
+            .unwrap_or(current.accepted_attestors),
+        environment: patch.environment.unwrap_or(current.environment),
+        ..current
+    };
+    save_sale(&state, sale, patch.version).await
+}
+
+async fn save_sale(state: &AppState, sale: Sale, expected: i64) -> ApiResult<Json<Sale>> {
     let sale = Sale {
         version: expected + 1,
-        ..sale_from(request, &current)
+        ..sale
     };
     sale.validate()?;
     state.store().update_sale(&sale, expected).await?;
@@ -335,16 +425,64 @@ pub(crate) async fn update_ticket_type(
     Path(ticket_type_id): Path<TicketTypeId>,
     Json(request): Json<TicketTypeRequest>,
 ) -> ApiResult<Json<TicketType>> {
-    let current = state
+    let current = writable_ticket_type(&state, &principal, ticket_type_id).await?;
+    let expected = version_of(request.version)?;
+    save_ticket_type(&state, ticket_type_from(request, &current), expected).await
+}
+
+/// Change some of a ticket type's settings. Capacity can drop no lower than what is held and
+/// sold.
+#[utoipa::path(
+    patch, path = "/v1/ticket-types/{ticket_type_id}", tag = TAG,
+    security(("bearer" = [])),
+    params(("ticket_type_id" = TicketTypeId, Path)),
+    request_body(content((TicketTypePatch = "application/merge-patch+json"), (TicketTypePatch = "application/json"))),
+    responses((status = 200, body = TicketType), (status = 409, body = Problem), (status = 412, body = Problem))
+)]
+pub(crate) async fn patch_ticket_type(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(ticket_type_id): Path<TicketTypeId>,
+    Json(patch): Json<TicketTypePatch>,
+) -> ApiResult<Json<TicketType>> {
+    let current = writable_ticket_type(&state, &principal, ticket_type_id).await?;
+    check_version(current.version, patch.version)?;
+    let ticket_type = TicketType {
+        name: patch.name.unwrap_or(current.name),
+        price: patch.price.unwrap_or(current.price),
+        capacity: patch.capacity.unwrap_or(current.capacity),
+        per_account_limit: patch.per_account_limit.unwrap_or(current.per_account_limit),
+        valid_from: patch.valid_from.unwrap_or(current.valid_from),
+        valid_until: patch.valid_until.unwrap_or(current.valid_until),
+        ticket_extensions: patch.ticket_extensions.unwrap_or(current.ticket_extensions),
+        ..current
+    };
+    save_ticket_type(&state, ticket_type, patch.version).await
+}
+
+/// A ticket type the caller may edit.
+async fn writable_ticket_type(
+    state: &AppState,
+    principal: &Principal,
+    id: TicketTypeId,
+) -> ApiResult<TicketType> {
+    let ticket_type = state
         .store()
-        .ticket_type(ticket_type_id)
+        .ticket_type(id)
         .await?
         .ok_or_else(|| ApiError::not_found("ticket type"))?;
-    writable_sale(&state, &principal, current.sale_id).await?;
-    let expected = version_of(request.version)?;
+    writable_sale(state, principal, ticket_type.sale_id).await?;
+    Ok(ticket_type)
+}
+
+async fn save_ticket_type(
+    state: &AppState,
+    ticket_type: TicketType,
+    expected: i64,
+) -> ApiResult<Json<TicketType>> {
     let ticket_type = TicketType {
         version: expected + 1,
-        ..ticket_type_from(request, &current)
+        ..ticket_type
     };
     ticket_type.validate()?;
     state
