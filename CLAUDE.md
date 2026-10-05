@@ -10,6 +10,7 @@ Code, rustdoc, READMEs and `spec/` are written in English.
 ```text
 src/main.rs                    the `kippu` binary: ~10 lines of wiring, nothing else
 spec/                          normative protocols (KP1 tickets, attestors) + shared test vectors
+docs/                          walkthrough.md (raw HTTP) + walkthrough.http (RustRover HTTP client)
 crates/kippu/domain            pure domain: ids, money, timestamps, state machines — no I/O, no clock
 crates/kippu/store             storage ports, consistency contract, `conformance` test suite
 crates/kippu/core              Module system, auth/RBAC, HTTP, background tasks, built-in modules
@@ -27,7 +28,7 @@ Keep the repository root uncluttered and do not add speculative `.gitignore` ent
 ## Commands
 
 ```bash
-cargo test --workspace --all-features                                   # 85 tests incl. e2e over TCP
+cargo test --workspace --all-features                                   # 96 tests incl. e2e over TCP
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
 cargo fmt --all
 cargo xtask vectors --check && cargo xtask header --check               # generated files up to date

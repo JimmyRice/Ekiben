@@ -18,6 +18,7 @@ called `Pinpon`.
 ```text
 src/main.rs                     the `kippu` binary — about ten lines of wiring
 spec/                           language-neutral protocols and test vectors
+docs/                           walkthrough: from an empty database to a verified ticket
 crates/
 ├── kippu/domain                kippu-domain        pure domain model, no I/O
 ├── kippu/store                 kippu-store         storage ports + consistency contract
@@ -52,6 +53,9 @@ Then sign in as root and explore the API (`/openapi.json` documents every endpoi
 TOKEN=$(cargo run -q -- root-token --config kippu.example.toml --key root.key --name owner)
 curl -H "authorization: Bearer $TOKEN" localhost:8080/v1/me
 ```
+
+[`docs/walkthrough.md`](docs/walkthrough.md) goes all the way: an organizer opens a sale, a
+buyer pays through an attestor, and `kippu verify` checks the ticket like a gate.
 
 ## How a purchase works
 
