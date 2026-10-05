@@ -27,10 +27,52 @@ ffi/c                    kaisatsu-ffi        C ABI
 xtask                    xtask               `cargo xtask …` automation
 ```
 
-## Common commands
+## Quickstart
 
 ```bash
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
-cargo run -- --help
+cargo run -- keygen                      # run twice: one ticket key, one token key
+cargo run -- keygen --pem > root.pem     # the root key pair (keep the private half offline)
+```
+
+Put the keys in the environment and start a server on a local SQLite database:
+
+```bash
+export KIPPU_KEYS__TICKET_SIGNING_KEY=<private key 1>
+export KIPPU_KEYS__TOKEN_SIGNING_KEY=<private key 2>
+export KIPPU_ROOT__KEYS='[{name="owner", public_key="<public half of root.pem>"}]'
+cargo run -- serve --config kippu.example.toml --database-url "sqlite://$TMPDIR/kippu.db?mode=rwc"
+```
+
+Then sign in as root and explore the API (`/openapi.json` documents every endpoint):
+
+```bash
+TOKEN=$(cargo run -q -- root-token --config kippu.example.toml --key root.pem --name owner)
+curl -H "authorization: Bearer $TOKEN" localhost:8080/v1/me
+```
+
+## How a purchase works
+
+```text
+buyer ─▶ waiting room ─▶ POST purchase-request (Idempotency-Key) ─▶ 202, poll Location
+                                   │ durable, queued
+                         worker ───┴─▶ reserve stock + quota in one transaction ─▶ Reserved
+buyer ─▶ checkout(attestor) ─▶ payment.requested ─▶ your payment service charges the buyer
+attestor ─▶ signed POST /v1/payment-attestations ─▶ one transaction: record payment, sell
+                                                   stock, sign tickets, emit tickets.issued
+gate ─▶ Kaisatsu verifies the QR offline with keys from /.well-known/kippu/ticket-keys
+```
+
+- No overselling: inventory changes are conditional updates guarded by a database `CHECK`.
+- Everything that may be retried is idempotent: purchases (id derived from the key), payment
+  attestations (unique per attestor), queue redelivery, expiry.
+- Money is never taken without tickets: a payment that cannot be used ends in an explicit
+  `refund_required` that the attestor acts on. See [`spec/attestor-protocol.md`](spec/attestor-protocol.md).
+
+## Development
+
+```bash
+cargo test --workspace --all-features
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo xtask c-example        # build the C ABI and run every test vector through it
+cargo xtask size             # Kaisatsu library sizes
 ```

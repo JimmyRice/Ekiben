@@ -51,7 +51,10 @@ impl TestApp {
         let root_key = SigningKey::from_bytes(&[42; 32]);
         let config = Config {
             server: ServerConfig::default(),
-            database: DatabaseConfig { url: url.into() },
+            database: DatabaseConfig {
+                url: url.into(),
+                auto_migrate: true,
+            },
             issuer: IssuerConfig {
                 id: ISSUER.to_owned(),
             },

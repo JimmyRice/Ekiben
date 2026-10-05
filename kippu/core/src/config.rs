@@ -62,6 +62,14 @@ impl Default for ServerConfig {
 pub struct DatabaseConfig {
     /// Connection URL; its scheme selects the adapter, e.g. `sqlite:///var/lib/kippu.db`.
     pub url: SecretString,
+    /// Apply schema migrations when the server starts (default). Turn off to run
+    /// `kippu migrate` as a separate deployment step instead.
+    #[serde(default = "enabled")]
+    pub auto_migrate: bool,
+}
+
+const fn enabled() -> bool {
+    true
 }
 
 /// This deployment's identity.

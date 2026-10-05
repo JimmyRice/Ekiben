@@ -101,6 +101,7 @@ must_use_candidate = "allow"
 # Restriction lints we opt into. Tests may unwrap (see clippy.toml).
 dbg_macro = "warn"
 expect_used = "warn"
+print_stdout = "warn"
 todo = "warn"
 unwrap_used = "warn"
 

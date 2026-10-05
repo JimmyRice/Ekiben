@@ -1,4 +1,4 @@
-//! The `kippu` binary: Kippu with every built-in module and the adapters selected by features.
+//! The `kippu` binary: every built-in module, plus the storage adapters enabled as features.
 
 use std::process::ExitCode;
 
@@ -7,5 +7,7 @@ use std::process::ExitCode;
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() -> ExitCode {
-    kippu_server::Launcher::new().run()
+    kippu_server::Launcher::new()
+        .modules(kippu_core::default_modules())
+        .run()
 }

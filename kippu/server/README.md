@@ -1,4 +1,29 @@
 # kippu-server
 
-The launcher that turns [`kippu-core`](../core) into a running service: command-line interface,
-configuration sources (file, environment, flags) and storage adapter wiring.
+The launcher that turns [`kippu-core`](../core) into a running service: the `kippu` command
+line, configuration sources and storage adapter wiring.
+
+```text
+kippu serve [--listen 0.0.0.0:8080] [--no-workers]   HTTP API (+ background workers)
+kippu worker                                         background workers only
+kippu migrate                                        apply database migrations
+kippu keygen [--pem]                                 new Ed25519 key pair
+kippu root-token --key root.pem --name <name>        short-lived root token
+kippu config check                                   effective configuration, secrets redacted
+```
+
+Configuration is merged from, in increasing priority: built-in defaults, the TOML file given
+with `--config` (or `KIPPU_CONFIG`), environment variables (`KIPPU_DATABASE__URL`, with `__`
+between section and key) and command-line flags. See `kippu.example.toml` at the repository
+root.
+
+Build your own distribution — with extra modules, or different adapters — without forking:
+
+```rust,ignore
+fn main() -> std::process::ExitCode {
+    kippu_server::Launcher::new()
+        .modules(kippu_core::default_modules())
+        .module(my_community::Community)
+        .run()
+}
+```

@@ -1,0 +1,58 @@
+# Kippu configuration.
+#
+# Sources, from lowest to highest priority: built-in defaults, this file (`--config` or
+# KIPPU_CONFIG), environment variables, command-line flags. Every key below can be set from the
+# environment as KIPPU_<SECTION>__<KEY>, e.g. KIPPU_DATABASE__URL or KIPPU_KEYS__TOKEN_SIGNING_KEY.
+# Keep secrets in the environment or a secrets manager, not in files.
+#
+# Print the effective configuration (secrets redacted) with `kippu config check`.
+
+[server]
+listen = "0.0.0.0:8080"
+request_timeout_seconds = 30
+max_body_bytes = 1048576
+# Browser origins allowed to call the API. Empty disables CORS.
+cors_allowed_origins = []
+
+[database]
+# Required: Kippu keeps no state of its own. The scheme selects the adapter.
+url = "sqlite:///var/lib/kippu/kippu.db"
+# Apply migrations on start. Set to false to run `kippu migrate` as a deployment step instead.
+auto_migrate = true
+
+[issuer]
+# Written into every ticket's `issuer` claim, and the audience root tokens must name.
+id = "kippu.example.org"
+
+[keys]
+# Both keys are required and must be identical on every instance. Generate each with
+# `kippu keygen` and provide them through the environment:
+#   KIPPU_KEYS__TICKET_SIGNING_KEY   signs tickets (public key published for gates)
+#   KIPPU_KEYS__TOKEN_SIGNING_KEY    signs access tokens, queue tickets and admission passes
+#
+# After rotating the ticket key, list the previous public key here so gates keep accepting
+# tickets issued before the rotation:
+retired_ticket_keys = []
+
+[root]
+# Root has no password and no database record. Whoever holds a private key matching one of
+# these public keys can mint a root token: `kippu root-token --key root.pem --name owner`.
+max_token_ttl_seconds = 600
+# [[root.keys]]
+# name = "owner"
+# public_key = "<base64 public key from `kippu keygen`>"
+
+[auth]
+access_token_ttl_seconds = 900
+refresh_token_ttl_seconds = 2592000
+queue_ticket_ttl_seconds = 21600
+admission_pass_ttl_seconds = 600
+
+[workers]
+# Background work runs on every instance; all tasks coordinate through the database.
+enabled = true
+purchase_batch_size = 50
+purchase_interval_ms = 200
+purchase_lease_seconds = 30
+expiry_interval_ms = 1000
+admission_interval_ms = 1000

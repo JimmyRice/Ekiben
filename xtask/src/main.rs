@@ -9,6 +9,8 @@
 //!
 //! `--check` fails instead of writing when the generated file is out of date, for CI.
 
+#![allow(clippy::print_stdout, reason = "a command-line tool reports on stdout")]
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
