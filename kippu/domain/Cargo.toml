@@ -7,6 +7,16 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+hex.workspace = true
+serde.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+time = { workspace = true, features = ["formatting", "parsing"] }
+uuid = { workspace = true, features = ["v7", "v8", "serde"] }
+
+[dev-dependencies]
+proptest.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true
