@@ -69,6 +69,14 @@ impl Add<Duration> for Timestamp {
     }
 }
 
+impl Sub<Duration> for Timestamp {
+    type Output = Self;
+
+    fn sub(self, duration: Duration) -> Self {
+        self.saturating_add(-duration)
+    }
+}
+
 impl Sub for Timestamp {
     type Output = Duration;
 

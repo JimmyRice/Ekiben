@@ -1,0 +1,751 @@
+//! The conformance suite: the consistency contract, as executable tests.
+//!
+//! Every adapter runs it against itself with one line:
+//!
+//! ```ignore
+//! kippu_store::conformance_tests!(async {
+//!     let store = MyStore::connect(...).await.unwrap();
+//!     store.migrate().await.unwrap();
+//!     kippu_store::conformance::Harness::new(store, ())
+//! });
+//! ```
+//!
+//! Each case builds its own records, so cases are independent of each other and of order.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::missing_panics_doc,
+    missing_docs,
+    reason = "test code: a failed expectation is the test failing"
+)]
+
+use std::any::Any;
+use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
+
+use kippu_domain::account::{Account, Organization, Role};
+use kippu_domain::admission::AdmissionPolicy;
+use kippu_domain::catalog::{Event, EventStatus, Sale, TicketType};
+use kippu_domain::outbox::IntegrationEvent;
+use kippu_domain::payment::{Environment, PaymentAttestation, PaymentDisposition};
+use kippu_domain::purchase::{Basket, LineItem, PurchaseRequest, PurchaseStatus};
+use kippu_domain::reservation::{Reservation, ReservationStatus, ReservedItem};
+use kippu_domain::validation::{Email, IdempotencyKey, Slug};
+use kippu_domain::{
+    AccountId, AttestorId, Currency, Duration, EventId, Money, OrganizationId, PurchaseRequestId,
+    ReservationId, SaleId, SessionId, TicketTypeId, Timestamp,
+};
+
+use crate::{Hold, Insertion, Lease, Session, Store, StoreError};
+
+/// A store under test, plus whatever must outlive it (e.g. a temporary directory).
+pub struct Harness {
+    pub store: Arc<dyn Store>,
+    _guard: Box<dyn Any + Send>,
+}
+
+impl Harness {
+    pub fn new(store: impl Store, guard: impl Any + Send) -> Self {
+        Self {
+            store: Arc::new(store),
+            _guard: Box::new(guard),
+        }
+    }
+}
+
+/// Expands to one `#[tokio::test]` per conformance case. `$connect` is an expression that
+/// evaluates to a future of a [`Harness`] with a migrated, empty store.
+#[macro_export]
+macro_rules! conformance_tests {
+    ($connect:expr) => {
+        $crate::conformance_tests!(@cases $connect;
+            migrations_are_idempotent,
+            unique_keys_report_conflicts,
+            stale_versions_conflict,
+            purchase_requests_are_idempotent,
+            inventory_never_oversells,
+            holds_are_all_or_nothing,
+            quotas_are_enforced_and_all_or_nothing,
+            dropped_transactions_roll_back,
+            claims_are_exclusive_until_the_lease_lapses,
+            attestations_are_recorded_once,
+            one_reservation_per_purchase_request,
+            waiting_room_positions_are_distinct,
+            waiting_room_advances_once,
+            outbox_is_transactional_and_ordered,
+            sessions_rotate_once,
+            only_holding_reservations_are_overdue,
+            capacity_cannot_drop_below_stock_in_use,
+        );
+    };
+    (@cases $connect:expr; $($case:ident),* $(,)?) => {
+        $(
+            #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+            async fn $case() {
+                let harness: $crate::conformance::Harness = $connect.await;
+                $crate::conformance::$case(harness.store.clone()).await;
+            }
+        )*
+    };
+}
+
+// ── Fixtures ─────────────────────────────────────────────────────────────────────────────
+
+fn now() -> Timestamp {
+    Timestamp::from_unix_seconds(1_800_000_000)
+}
+
+fn unique_suffix() -> String {
+    uuid::Uuid::now_v7().simple().to_string()
+}
+
+async fn account(store: &dyn Store) -> AccountId {
+    let account = Account {
+        id: AccountId::generate(),
+        email: Email::new(format!("{}@example.org", unique_suffix())).unwrap(),
+        display_name: "Buyer".to_owned(),
+        role: Role::User,
+        created_at: now(),
+    };
+    store.insert_account(&account, "hash").await.unwrap();
+    account.id
+}
+
+async fn organization(store: &dyn Store) -> OrganizationId {
+    let organization = Organization {
+        id: OrganizationId::generate(),
+        slug: Slug::new(format!("org-{}", unique_suffix())).unwrap(),
+        name: "Organizer".to_owned(),
+        created_at: now(),
+    };
+    store.insert_organization(&organization).await.unwrap();
+    organization.id
+}
+
+fn event_record(organization: OrganizationId) -> Event {
+    Event {
+        id: EventId::generate(),
+        organization_id: organization,
+        slug: Slug::new(format!("event-{}", unique_suffix())).unwrap(),
+        title: "Convention".to_owned(),
+        description: String::new(),
+        venue: "Hall".to_owned(),
+        starts_at: now(),
+        ends_at: now() + Duration::days(2),
+        status: EventStatus::Published,
+        created_at: now(),
+        updated_at: now(),
+        version: 1,
+    }
+}
+
+/// A sale with one ticket type per capacity in `capacities`.
+struct Catalog {
+    event: EventId,
+    sale: SaleId,
+    ticket_types: Vec<TicketTypeId>,
+}
+
+async fn catalog(store: &dyn Store, capacities: &[u32]) -> Catalog {
+    let event = event_record(organization(store).await);
+    store.insert_event(&event).await.unwrap();
+    let sale = Sale {
+        id: SaleId::generate(),
+        event_id: event.id,
+        name: "General".to_owned(),
+        opens_at: now(),
+        closes_at: now() + Duration::days(1),
+        admission: AdmissionPolicy::Open,
+        reservation_ttl_seconds: 600,
+        max_tickets_per_request: 10,
+        accepted_attestors: vec![AttestorId::MANUAL],
+        environment: Environment::Live,
+        created_at: now(),
+        version: 1,
+    };
+    store.insert_sale(&sale).await.unwrap();
+    let mut ticket_types = Vec::new();
+    for &capacity in capacities {
+        let ticket_type = TicketType {
+            id: TicketTypeId::generate(),
+            sale_id: sale.id,
+            event_id: event.id,
+            name: "Day pass".to_owned(),
+            price: Money::new(1_000, Currency::JPY).unwrap(),
+            capacity,
+            per_account_limit: 4,
+            valid_from: now(),
+            valid_until: now() + Duration::days(2),
+            ticket_extensions: BTreeMap::new(),
+            created_at: now(),
+            version: 1,
+        };
+        store.insert_ticket_type(&ticket_type).await.unwrap();
+        ticket_types.push(ticket_type.id);
+    }
+    ticket_types.sort();
+    Catalog {
+        event: event.id,
+        sale: sale.id,
+        ticket_types,
+    }
+}
+
+fn line(ticket_type: TicketTypeId, quantity: u32) -> LineItem {
+    LineItem {
+        ticket_type_id: ticket_type,
+        quantity,
+    }
+}
+
+fn purchase_request(account: AccountId, catalog: &Catalog, key: &str) -> PurchaseRequest {
+    let key = IdempotencyKey::new(key).unwrap();
+    PurchaseRequest {
+        id: PurchaseRequestId::derive(account, catalog.sale, &key),
+        account_id: account,
+        sale_id: catalog.sale,
+        basket: Basket::new(vec![line(catalog.ticket_types[0], 1)]).unwrap(),
+        status: PurchaseStatus::Queued,
+        created_at: now(),
+        updated_at: now(),
+    }
+}
+
+/// Records a purchase request and a reservation for it, returning the reservation.
+async fn reservation(
+    store: &dyn Store,
+    catalog: &Catalog,
+    status: ReservationStatus,
+    expires_at: Timestamp,
+) -> Reservation {
+    let buyer = account(store).await;
+    let request = purchase_request(buyer, catalog, &unique_suffix());
+    store.insert_purchase_request(&request).await.unwrap();
+    let price = Money::new(1_000, Currency::JPY).unwrap();
+    let reservation = Reservation {
+        id: ReservationId::generate(),
+        purchase_request_id: request.id,
+        account_id: buyer,
+        sale_id: catalog.sale,
+        event_id: catalog.event,
+        items: vec![ReservedItem {
+            ticket_type_id: catalog.ticket_types[0],
+            quantity: 1,
+            unit_price: price,
+        }],
+        total: price,
+        environment: Environment::Live,
+        status,
+        attestor_id: None,
+        expires_at,
+        created_at: now(),
+        updated_at: now(),
+    };
+    let mut tx = store.begin().await.unwrap();
+    tx.reservations()
+        .insert_reservation(&reservation)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    reservation
+}
+
+// ── Cases ────────────────────────────────────────────────────────────────────────────────
+
+pub async fn migrations_are_idempotent(store: Arc<dyn Store>) {
+    store.migrate().await.unwrap();
+    store.migrate().await.unwrap();
+    store.ping().await.unwrap();
+}
+
+pub async fn unique_keys_report_conflicts(store: Arc<dyn Store>) {
+    let account = Account {
+        id: AccountId::generate(),
+        email: Email::new(format!("{}@example.org", unique_suffix())).unwrap(),
+        display_name: "Twin".to_owned(),
+        role: Role::User,
+        created_at: now(),
+    };
+    store.insert_account(&account, "hash").await.unwrap();
+    let twin = Account {
+        id: AccountId::generate(),
+        ..account
+    };
+    assert!(matches!(
+        store.insert_account(&twin, "hash").await,
+        Err(StoreError::Conflict("email"))
+    ));
+
+    let organization = organization(store.as_ref()).await;
+    let event = event_record(organization);
+    store.insert_event(&event).await.unwrap();
+    let same_slug = Event {
+        id: EventId::generate(),
+        ..event
+    };
+    assert!(matches!(
+        store.insert_event(&same_slug).await,
+        Err(StoreError::Conflict("slug"))
+    ));
+}
+
+pub async fn stale_versions_conflict(store: Arc<dyn Store>) {
+    let event = event_record(organization(store.as_ref()).await);
+    store.insert_event(&event).await.unwrap();
+
+    let renamed = Event {
+        title: "Renamed".to_owned(),
+        version: 2,
+        ..event.clone()
+    };
+    store.update_event(&renamed, 1).await.unwrap();
+    let stale = Event {
+        title: "Stale".to_owned(),
+        version: 2,
+        ..event
+    };
+    assert!(matches!(
+        store.update_event(&stale, 1).await,
+        Err(StoreError::Conflict("version"))
+    ));
+    assert_eq!(
+        store.event(renamed.id).await.unwrap().unwrap().title,
+        "Renamed"
+    );
+}
+
+pub async fn purchase_requests_are_idempotent(store: Arc<dyn Store>) {
+    let catalog = catalog(store.as_ref(), &[10]).await;
+    let buyer = account(store.as_ref()).await;
+    let request = purchase_request(buyer, &catalog, "retry-me");
+
+    assert_eq!(
+        store.insert_purchase_request(&request).await.unwrap(),
+        Insertion::Inserted
+    );
+    for _ in 0..9 {
+        assert_eq!(
+            store.insert_purchase_request(&request).await.unwrap(),
+            Insertion::Existing(request.clone())
+        );
+    }
+    assert_eq!(store.queued_purchase_count(catalog.sale).await.unwrap(), 1);
+}
+
+pub async fn inventory_never_oversells(store: Arc<dyn Store>) {
+    let catalog = catalog(store.as_ref(), &[100]).await;
+    let ticket_type = catalog.ticket_types[0];
+
+    let attempts = (0..300).map(|_| {
+        let store = store.clone();
+        tokio::spawn(async move {
+            let mut tx = store.begin().await.unwrap();
+            let held = tx
+                .inventory()
+                .try_hold(&[line(ticket_type, 1)])
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+            held
+        })
+    });
+    let mut granted = 0;
+    for attempt in attempts.collect::<Vec<_>>() {
+        if attempt.await.unwrap() {
+            granted += 1;
+        }
+    }
+
+    assert_eq!(granted, 100);
+    let inventory = store.inventory(ticket_type).await.unwrap().unwrap();
+    assert_eq!(
+        (inventory.held, inventory.sold, inventory.available()),
+        (100, 0, 0)
+    );
+}
+
+pub async fn holds_are_all_or_nothing(store: Arc<dyn Store>) {
+    let catalog = catalog(store.as_ref(), &[5, 1]).await;
+    let (first, second) = (catalog.ticket_types[0], catalog.ticket_types[1]);
+
+    let mut tx = store.begin().await.unwrap();
+    let held = tx
+        .inventory()
+        .try_hold(&[line(first, 2), line(second, 2)])
+        .await
+        .unwrap();
+    assert!(!held, "the second ticket type has only one ticket");
+    tx.commit().await.unwrap();
+    assert_eq!(store.inventory(first).await.unwrap().unwrap().held, 0);
+
+    let mut tx = store.begin().await.unwrap();
+    assert!(
+        !tx.inventory()
+            .try_sell(&[line(first, 1), line(second, 2)])
+            .await
+            .unwrap()
+    );
+    assert!(
+        tx.inventory()
+            .try_sell(&[line(first, 1), line(second, 1)])
+            .await
+            .unwrap()
+    );
+    tx.commit().await.unwrap();
+    assert_eq!(store.inventory(first).await.unwrap().unwrap().sold, 1);
+    assert_eq!(
+        store.inventory(second).await.unwrap().unwrap().available(),
+        0
+    );
+}
+
+pub async fn quotas_are_enforced_and_all_or_nothing(store: Arc<dyn Store>) {
+    let catalog = catalog(store.as_ref(), &[100, 100]).await;
+    let (first, second) = (catalog.ticket_types[0], catalog.ticket_types[1]);
+    let buyer = account(store.as_ref()).await;
+    let hold = |ticket_type, quantity| Hold {
+        ticket_type_id: ticket_type,
+        quantity,
+        per_account_limit: 4,
+    };
+
+    let mut tx = store.begin().await.unwrap();
+    assert!(
+        tx.inventory()
+            .try_take_quota(buyer, &[hold(first, 3)])
+            .await
+            .unwrap()
+    );
+    // 3 + 2 > 4 on the first type: nothing may be taken on the second either.
+    assert!(
+        !tx.inventory()
+            .try_take_quota(buyer, &[hold(first, 2), hold(second, 4)])
+            .await
+            .unwrap()
+    );
+    assert!(
+        tx.inventory()
+            .try_take_quota(buyer, &[hold(second, 4)])
+            .await
+            .unwrap()
+    );
+    tx.inventory()
+        .return_quota(buyer, &[line(first, 3)])
+        .await
+        .unwrap();
+    assert!(
+        tx.inventory()
+            .try_take_quota(buyer, &[hold(first, 4)])
+            .await
+            .unwrap()
+    );
+    tx.commit().await.unwrap();
+}
+
+pub async fn dropped_transactions_roll_back(store: Arc<dyn Store>) {
+    let catalog = catalog(store.as_ref(), &[10]).await;
+    let ticket_type = catalog.ticket_types[0];
+    {
+        let mut tx = store.begin().await.unwrap();
+        assert!(
+            tx.inventory()
+                .try_hold(&[line(ticket_type, 3)])
+                .await
+                .unwrap()
+        );
+        let event = IntegrationEvent::ReservationExpired {
+            reservation_id: ReservationId::generate(),
+        };
+        tx.outbox().append_event(&event, now()).await.unwrap();
+        // Dropped without commit.
+    }
+    assert_eq!(store.inventory(ticket_type).await.unwrap().unwrap().held, 0);
+}
+
+pub async fn claims_are_exclusive_until_the_lease_lapses(store: Arc<dyn Store>) {
+    let catalog = catalog(store.as_ref(), &[10]).await;
+    let buyer = account(store.as_ref()).await;
+    let mut expected = HashSet::new();
+    for index in 0..40 {
+        let request = purchase_request(buyer, &catalog, &format!("claim-{index}"));
+        store.insert_purchase_request(&request).await.unwrap();
+        expected.insert(request.id);
+    }
+    let lease = Lease {
+        now: now(),
+        until: now() + Duration::seconds(30),
+    };
+
+    let claimers = (0..8).map(|_| {
+        let store = store.clone();
+        tokio::spawn(async move { store.claim_purchase_requests(lease, 10).await.unwrap() })
+    });
+    let mut claimed = Vec::new();
+    for claimer in claimers.collect::<Vec<_>>() {
+        claimed.extend(claimer.await.unwrap().into_iter().map(|request| request.id));
+    }
+    let distinct: HashSet<_> = claimed.iter().copied().collect();
+    assert_eq!(distinct.len(), claimed.len(), "a request was claimed twice");
+    assert!(expected.is_subset(&distinct), "every request was claimed");
+
+    let early = Lease {
+        now: now() + Duration::seconds(29),
+        until: now() + Duration::seconds(59),
+    };
+    let reclaimed = store.claim_purchase_requests(early, 100).await.unwrap();
+    assert!(
+        reclaimed
+            .iter()
+            .all(|request| !expected.contains(&request.id))
+    );
+
+    let late = Lease {
+        now: now() + Duration::seconds(30),
+        until: now() + Duration::seconds(60),
+    };
+    let reclaimed: HashSet<_> = store
+        .claim_purchase_requests(late, 100)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|request| request.id)
+        .collect();
+    assert!(
+        expected.is_subset(&reclaimed),
+        "lapsed leases can be claimed again"
+    );
+}
+
+pub async fn attestations_are_recorded_once(store: Arc<dyn Store>) {
+    let catalog = catalog(store.as_ref(), &[10]).await;
+    let reservation = reservation(
+        store.as_ref(),
+        &catalog,
+        ReservationStatus::PaymentPending,
+        now(),
+    )
+    .await;
+    let attestation = PaymentAttestation {
+        attestor_id: AttestorId::MANUAL,
+        attestation_id: format!("pay-{}", unique_suffix()),
+        reservation_id: reservation.id,
+        amount: reservation.total,
+        occurred_at: now(),
+        received_at: now(),
+        disposition: PaymentDisposition::Applied,
+    };
+
+    let mut tx = store.begin().await.unwrap();
+    assert_eq!(
+        tx.payments()
+            .insert_attestation(&attestation)
+            .await
+            .unwrap(),
+        Insertion::Inserted
+    );
+    tx.commit().await.unwrap();
+
+    for _ in 0..9 {
+        let retry = PaymentAttestation {
+            received_at: now() + Duration::seconds(5),
+            ..attestation.clone()
+        };
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.payments().insert_attestation(&retry).await.unwrap(),
+            Insertion::Existing(attestation.clone())
+        );
+        tx.commit().await.unwrap();
+    }
+    assert_eq!(
+        store
+            .attestations_for_reservation(reservation.id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+pub async fn one_reservation_per_purchase_request(store: Arc<dyn Store>) {
+    let catalog = catalog(store.as_ref(), &[10]).await;
+    let first = reservation(store.as_ref(), &catalog, ReservationStatus::Reserved, now()).await;
+    let second = Reservation {
+        id: ReservationId::generate(),
+        ..first
+    };
+    let mut tx = store.begin().await.unwrap();
+    let result = tx.reservations().insert_reservation(&second).await;
+    assert!(matches!(
+        result,
+        Err(StoreError::Conflict("purchase_request_id"))
+    ));
+}
+
+pub async fn waiting_room_positions_are_distinct(store: Arc<dyn Store>) {
+    let catalog = catalog(store.as_ref(), &[10]).await;
+    let joins = (0..100).map(|_| {
+        let store = store.clone();
+        let sale = catalog.sale;
+        tokio::spawn(async move { store.join_waiting_room(sale).await.unwrap() })
+    });
+    let mut positions = Vec::new();
+    for join in joins.collect::<Vec<_>>() {
+        positions.push(join.await.unwrap());
+    }
+    positions.sort_unstable();
+    assert_eq!(positions, (1..=100).collect::<Vec<_>>());
+    assert_eq!(
+        store
+            .waiting_room(catalog.sale)
+            .await
+            .unwrap()
+            .last_position,
+        100
+    );
+}
+
+pub async fn waiting_room_advances_once(store: Arc<dyn Store>) {
+    let catalog = catalog(store.as_ref(), &[10]).await;
+    for _ in 0..10 {
+        store.join_waiting_room(catalog.sale).await.unwrap();
+    }
+    assert!(
+        store
+            .advance_waiting_room(catalog.sale, 0, 5)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .advance_waiting_room(catalog.sale, 0, 5)
+            .await
+            .unwrap(),
+        "stale compare-and-set"
+    );
+    assert!(
+        !store
+            .advance_waiting_room(catalog.sale, 5, 11)
+            .await
+            .unwrap(),
+        "beyond last position"
+    );
+    assert_eq!(
+        store
+            .waiting_room(catalog.sale)
+            .await
+            .unwrap()
+            .admitted_through,
+        5
+    );
+}
+
+pub async fn outbox_is_transactional_and_ordered(store: Arc<dyn Store>) {
+    let start = store
+        .outbox_after(0, 10_000)
+        .await
+        .unwrap()
+        .last()
+        .map_or(0, |record| record.sequence);
+    let expired = |_: usize| IntegrationEvent::ReservationExpired {
+        reservation_id: ReservationId::generate(),
+    };
+
+    let committed: Vec<_> = (0..3).map(expired).collect();
+    let mut tx = store.begin().await.unwrap();
+    for event in &committed {
+        tx.outbox().append_event(event, now()).await.unwrap();
+    }
+    tx.commit().await.unwrap();
+
+    let mut tx = store.begin().await.unwrap();
+    tx.outbox().append_event(&expired(0), now()).await.unwrap();
+    drop(tx);
+
+    let records = store.outbox_after(start, 100).await.unwrap();
+    let events: Vec<_> = records.iter().map(|record| record.event.clone()).collect();
+    assert_eq!(events, committed);
+    assert!(
+        records
+            .windows(2)
+            .all(|pair| pair[0].sequence < pair[1].sequence)
+    );
+}
+
+pub async fn sessions_rotate_once(store: Arc<dyn Store>) {
+    let buyer = account(store.as_ref()).await;
+    let session = |hash: &str| Session {
+        id: SessionId::generate(),
+        account_id: buyer,
+        refresh_token_hash: hash.to_owned(),
+        created_at: now(),
+        expires_at: now() + Duration::days(30),
+    };
+    let first = format!("first-{}", unique_suffix());
+    store.insert_session(&session(&first)).await.unwrap();
+
+    let next = session(&format!("next-{}", unique_suffix()));
+    assert_eq!(
+        store.rotate_session(&first, &next).await.unwrap(),
+        Some(buyer)
+    );
+    let replay = session(&format!("replay-{}", unique_suffix()));
+    assert_eq!(store.rotate_session(&first, &replay).await.unwrap(), None);
+}
+
+pub async fn only_holding_reservations_are_overdue(store: Arc<dyn Store>) {
+    let catalog = catalog(store.as_ref(), &[10]).await;
+    let past = now() - Duration::minutes(1);
+    let overdue = reservation(
+        store.as_ref(),
+        &catalog,
+        ReservationStatus::PaymentPending,
+        past,
+    )
+    .await;
+    let issued = reservation(store.as_ref(), &catalog, ReservationStatus::Issued, past).await;
+    let future = reservation(
+        store.as_ref(),
+        &catalog,
+        ReservationStatus::Reserved,
+        now() + Duration::hours(1),
+    )
+    .await;
+
+    let found = store.overdue_reservations(now(), 1_000).await.unwrap();
+    assert!(found.contains(&overdue.id));
+    assert!(!found.contains(&issued.id));
+    assert!(!found.contains(&future.id));
+}
+
+pub async fn capacity_cannot_drop_below_stock_in_use(store: Arc<dyn Store>) {
+    let catalog = catalog(store.as_ref(), &[10]).await;
+    let ticket_type = catalog.ticket_types[0];
+    let mut tx = store.begin().await.unwrap();
+    assert!(
+        tx.inventory()
+            .try_hold(&[line(ticket_type, 6)])
+            .await
+            .unwrap()
+    );
+    tx.commit().await.unwrap();
+
+    let mut record = store.ticket_type(ticket_type).await.unwrap().unwrap();
+    record.capacity = 5;
+    record.version = 2;
+    assert!(matches!(
+        store.update_ticket_type(&record, 1).await,
+        Err(StoreError::Conflict("capacity"))
+    ));
+    record.capacity = 6;
+    store.update_ticket_type(&record, 1).await.unwrap();
+    assert_eq!(
+        store
+            .inventory(ticket_type)
+            .await
+            .unwrap()
+            .unwrap()
+            .available(),
+        0
+    );
+}
