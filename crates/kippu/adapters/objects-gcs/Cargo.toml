@@ -1,0 +1,20 @@
+[package]
+name = "kippu-objects-gcs"
+description = "Google Cloud Storage as Kippu's object storage (event images)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+kippu-objects-common.workspace = true
+kippu-store.workspace = true
+object_store = { workspace = true, features = ["gcp-base"] }
+
+[dev-dependencies]
+kippu-store = { workspace = true, features = ["conformance"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+uuid = { workspace = true, features = ["v7"] }
+
+[lints]
+workspace = true

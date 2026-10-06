@@ -33,6 +33,15 @@ pub async fn assemble(config: Config, modules: Vec<Arc<dyn Module>>) -> Result<A
             kippu = kippu.event_bus(queue.bus);
         }
     }
+    if let Some(url) = &config.images.url {
+        let options: Vec<(String, String)> = config
+            .images
+            .options
+            .iter()
+            .map(|(name, value)| (name.clone(), value.expose_secret().to_owned()))
+            .collect();
+        kippu = kippu.object_storage(adapters::connect_objects(url, &options)?);
+    }
     Ok(kippu.build(config, store, Arc::new(SystemClock))?)
 }
 

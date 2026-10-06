@@ -20,7 +20,6 @@ kaisatsu = { workspace = true, features = ["issuer"] }
 kippu-domain = { workspace = true, features = ["openapi"] }
 kippu-store.workspace = true
 kippu-telemetry.workspace = true
-object_store.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
 rustls-native-certs.workspace = true
@@ -41,9 +40,11 @@ uuid.workspace = true
 
 
 [dev-dependencies]
+kippu-objects-common.workspace = true
 kippu-store-mysql.workspace = true
 kippu-store-postgres.workspace = true
 kippu-store-sqlite.workspace = true
+object_store.workspace = true
 sqlx = { workspace = true, features = ["postgres", "mysql"] }
 tempfile.workspace = true
 tower = { workspace = true, features = ["util"] }

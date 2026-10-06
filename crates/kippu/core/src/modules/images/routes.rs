@@ -130,7 +130,7 @@ pub(crate) async fn get_image(
                     (CONTENT_TYPE, HeaderValue::from_static(format.media_type())),
                     (CACHE_CONTROL, HeaderValue::from_static(cache)),
                 ],
-                Body::from_stream(object.into_stream()),
+                Body::from_stream(object.body),
             )
                 .into_response())
         }

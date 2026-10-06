@@ -16,6 +16,10 @@ postgres = ["dep:kippu-store-postgres"]
 mysql = ["dep:kippu-store-mysql"]
 ## NATS JetStream as purchase inbox and event bus.
 nats = ["dep:kippu-nats"]
+## Object storage adapters for event images.
+s3 = ["dep:kippu-objects-s3"]
+gcs = ["dep:kippu-objects-gcs"]
+azure = ["dep:kippu-objects-azure"]
 ## Let `kippu verify` read tickets carried as Base45 text.
 base45 = ["kaisatsu/base45"]
 
@@ -33,6 +37,9 @@ kippu-domain.workspace = true
 kippu-store.workspace = true
 kippu-telemetry = { workspace = true, features = ["layer"] }
 kippu-nats = { workspace = true, optional = true }
+kippu-objects-azure = { workspace = true, optional = true }
+kippu-objects-gcs = { workspace = true, optional = true }
+kippu-objects-s3 = { workspace = true, optional = true }
 kippu-store-mysql = { workspace = true, optional = true }
 kippu-store-postgres = { workspace = true, optional = true }
 kippu-store-sqlite = { workspace = true, optional = true }

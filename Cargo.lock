@@ -1428,6 +1428,7 @@ dependencies = [
  "http-body-util",
  "kaisatsu",
  "kippu-domain",
+ "kippu-objects-common",
  "kippu-store",
  "kippu-store-mysql",
  "kippu-store-postgres",
@@ -1486,6 +1487,54 @@ dependencies = [
 ]
 
 [[package]]
+name = "kippu-objects-azure"
+version = "0.1.0"
+dependencies = [
+ "kippu-objects-common",
+ "kippu-store",
+ "object_store",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "kippu-objects-common"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures-util",
+ "kippu-store",
+ "object_store",
+ "reqwest",
+ "rustls",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "kippu-objects-gcs"
+version = "0.1.0"
+dependencies = [
+ "kippu-objects-common",
+ "kippu-store",
+ "object_store",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "kippu-objects-s3"
+version = "0.1.0"
+dependencies = [
+ "kippu-objects-common",
+ "kippu-store",
+ "object_store",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "kippu-server"
 version = "0.1.0"
 dependencies = [
@@ -1500,6 +1549,9 @@ dependencies = [
  "kippu-core",
  "kippu-domain",
  "kippu-nats",
+ "kippu-objects-azure",
+ "kippu-objects-gcs",
+ "kippu-objects-s3",
  "kippu-store",
  "kippu-store-mysql",
  "kippu-store-postgres",
@@ -1524,6 +1576,8 @@ name = "kippu-store"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytes",
+ "futures-util",
  "kippu-domain",
  "thiserror",
  "tokio",

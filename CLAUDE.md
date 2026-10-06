@@ -20,6 +20,8 @@ crates/kippu/adapters/sqlite   SQLite adapter (single writer)
 crates/kippu/adapters/postgres PostgreSQL adapter (concurrent writers, SKIP LOCKED, advisory-locked outbox)
 crates/kippu/adapters/mysql    MySQL 8 adapter (READ COMMITTED, no RETURNING/ON CONFLICT, row-locked outbox)
 crates/kippu/adapters/nats     NATS JetStream: purchase inbox + event bus (messaging ports in kippu-store)
+crates/kippu/adapters/objects-* object storage for event images: `-common` (object_store bridge),
+                               `-s3`, `-gcs`, `-azure`, one crate per provider (port in kippu-store)
 crates/kaisatsu                KP1 encode/verify, no_std; `issuer` feature for signing; fuzz/
 crates/ffi/c                   C ABI (the only crate with `unsafe`), generated include/kaisatsu.h
 crates/xtask                   `cargo xtask vectors|header [--check] | c-example | size`
@@ -32,7 +34,7 @@ Keep the repository root uncluttered and do not add speculative `.gitignore` ent
 ## Commands
 
 ```bash
-cargo test --workspace --all-features                                   # 201 tests incl. e2e over TCP
+cargo test --workspace --all-features                                   # 222 tests incl. e2e over TCP
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets           # default features too
 cargo fmt --all
@@ -43,7 +45,7 @@ cargo xtask c-example                                                   # C ABI 
 cargo build -p kaisatsu --target thumbv7em-none-eabihf                  # proves no_std
 cargo run -- serve --config <file>                                      # see kippu.example.toml
 cargo build --profile dist                                              # server distribution build (~13 MB vs ~21 MB)
-cargo build --profile dist --no-default-features --features sqlite,mimalloc   # only what you use
+cargo build --profile dist --no-default-features --features sqlite,mimalloc   # only what you use (~8.6 MB)
 ```
 
 Adapters that need a server run their conformance suite only when a URL is set, and the HTTP
@@ -123,9 +125,14 @@ as `shop`, `attestor`, `reserve`, `drain`); the full journey over real TCP is
 - **Messaging is optional:** `PurchaseInbox`/`EventBus` (kippu-store) are injected with
   `Kippu::inbox`/`Kippu::event_bus`; without them the database is the queue. With an inbox,
   the database may not have a submitted request yet — poll with the receipt in `Location`.
-- **Object storage** (event images): `object_store` with the `*-base` features and `ring`
-  (no `fs`, no aws-lc). Deployments configure `images.url`; tests inject `InMemory` through
-  `Kippu::object_store` (`TestApp::start_custom`). Never add a local-disk backend.
+- **Object storage** (event images) is an adapter like the databases: the `ObjectStorage` port
+  lives in `kippu-store` (three methods; its contract is checked by
+  `kippu_store::object_conformance_tests!`), `kippu-core` never sees a provider, and the launcher
+  (`kippu-server/src/adapters.rs`, `connect_objects`) picks the adapter by the scheme of
+  `images.url`. One crate per provider under `adapters/objects-*`, on `object_store` with `ring`
+  (no `fs`, no aws-lc) through `kippu-objects-common`; each turns on its own `*-base` feature.
+  Tests inject an in-memory `object_store` wrapped in `ObjectStoreAdapter` through
+  `Kippu::object_storage` (`TestApp::start_custom`). Never add a local-disk backend.
 - **Body limits:** `server.max_body_bytes` everywhere, except routes a module raises with
   `Module::body_limits`; code that buffers bodies reads the `RequestBodyLimit` extension.
 - **Outbound HTTP** (webhooks) goes through `modules/webhooks/delivery.rs`: rustls + ring,

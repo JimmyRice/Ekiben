@@ -211,16 +211,19 @@ impl Default for QueueConfig {
     }
 }
 
-/// Event images. They are kept in an object store — never on an instance's own disk, since
-/// instances are stateless and interchangeable; without one, image uploads are unavailable.
+/// Event images. They are kept in object storage — never on an instance's own disk, since
+/// instances are stateless and interchangeable; without it, image uploads are unavailable.
+/// The launcher connects the object storage adapter the `url` names; code embedding Kippu
+/// passes one to `Kippu::object_storage` instead.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ImagesConfig {
-    /// Where images go: `s3://bucket/prefix` (S3 and compatible services such as MinIO, R2 or
-    /// OSS), `gs://bucket/prefix` or `az://container/prefix`. Credentials come from the
-    /// provider's usual environment variables (`AWS_ACCESS_KEY_ID`, …) or `options`.
+    /// Where images go; the scheme picks the adapter: `s3://bucket/prefix` (S3 and compatible
+    /// services such as MinIO, R2 or OSS), `gs://bucket/prefix` or `az://container/prefix`.
+    /// Credentials come from the provider's usual environment variables
+    /// (`AWS_ACCESS_KEY_ID`, …) or `options`.
     pub url: Option<String>,
-    /// Settings for the store, named as the provider's environment variables in lower case,
+    /// Settings for the adapter, named as the provider's environment variables in lower case,
     /// e.g. `aws_endpoint`, `aws_region`, `aws_virtual_hosted_style_request`.
     pub options: std::collections::BTreeMap<String, SecretString>,
     /// Serve images from here (a CDN or public bucket URL) by redirecting to
@@ -238,7 +241,7 @@ impl Default for ImagesConfig {
             url: None,
             options: std::collections::BTreeMap::new(),
             public_base_url: None,
-            max_bytes: 5 * 1024 * 1024,
+            max_bytes: 10 * 1024 * 1024,
             max_per_event: 20,
         }
     }

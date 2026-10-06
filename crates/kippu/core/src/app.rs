@@ -7,8 +7,7 @@ use std::sync::Arc;
 use axum::Router;
 use ed25519_dalek::SigningKey;
 use kippu_domain::Timestamp;
-use kippu_store::{AuditEntry, EventBus, PurchaseInbox, Store};
-use object_store::ObjectStore;
+use kippu_store::{AuditEntry, EventBus, ObjectStorage, PurchaseInbox, Store};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -131,7 +130,7 @@ impl AppState {
 #[derive(Default)]
 pub struct Kippu {
     modules: Vec<Arc<dyn Module>>,
-    object_store: Option<Arc<dyn ObjectStore>>,
+    objects: Option<Arc<dyn ObjectStorage>>,
     inbox: Option<Arc<dyn PurchaseInbox>>,
     event_bus: Option<Arc<dyn EventBus>>,
 }
@@ -156,11 +155,12 @@ impl Kippu {
         self
     }
 
-    /// Keeps event images in `store` instead of the one `images.url` names — for stores
-    /// configured in code, and for tests (an in-memory store; deployments need a real one).
+    /// Keeps event images in `objects` (see [`kippu_store::ObjectStorage`]). Deployments
+    /// connect the adapter `images.url` names; tests pass an in-memory one. Without it, image
+    /// uploads are unavailable.
     #[must_use]
-    pub fn object_store(mut self, store: Arc<dyn ObjectStore>) -> Self {
-        self.object_store = Some(store);
+    pub fn object_storage(mut self, objects: Arc<dyn ObjectStorage>) -> Self {
+        self.objects = Some(objects);
         self
     }
 
@@ -210,23 +210,20 @@ impl Kippu {
             .as_ref()
             .map(|key| parse_signing_key("keys.webhook_signing_key", key))
             .transpose()?;
-        let images = match self.object_store {
-            Some(store) => Some(ImageStorage {
-                store,
-                public_base_url: config
-                    .images
-                    .public_base_url
-                    .as_ref()
-                    .map(|base| base.trim_end_matches('/').to_owned()),
-            }),
-            None => crate::modules::images::storage::connect(&config.images).map_err(|reason| {
-                tracing::error!(%reason, "images.url is unusable");
-                ConfigError {
-                    name: "images.url".to_owned(),
-                    reason: "is not a usable object store (see the log)",
-                }
-            })?,
-        };
+        if config.images.url.is_some() && self.objects.is_none() {
+            return Err(ConfigError {
+                name: "images.url".to_owned(),
+                reason: "is set, but no object storage was given to `Kippu::object_storage`",
+            });
+        }
+        let images = self.objects.map(|objects| ImageStorage {
+            objects,
+            public_base_url: config
+                .images
+                .public_base_url
+                .as_ref()
+                .map(|base| base.trim_end_matches('/').to_owned()),
+        });
         let mut tasks: Vec<BackgroundTask> = self
             .modules
             .iter()

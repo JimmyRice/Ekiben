@@ -4,11 +4,7 @@
 use bytes::Bytes;
 use kippu_domain::image::{EventImage, ImageFormat};
 use kippu_domain::{EventId, ImageId, ValidationError};
-use object_store::path::Path as ObjectPath;
-use object_store::{
-    Attribute, Attributes, GetOptions, GetResult, ObjectStore, ObjectStoreExt, PutOptions,
-    PutPayload,
-};
+use kippu_store::{ObjectError, StoredObject};
 
 use super::storage::ImageStorage;
 use crate::app::AppState;
@@ -41,7 +37,7 @@ pub enum ImageContent {
         /// Whether shared caches may keep it: not for an unpublished event's images.
         public: bool,
         /// The object.
-        object: GetResult,
+        object: StoredObject,
     },
 }
 
@@ -56,10 +52,6 @@ pub fn storage(state: &AppState) -> ApiResult<&ImageStorage> {
     })
 }
 
-fn object_path(image: &EventImage) -> ObjectPath {
-    ObjectPath::from(image.object_key())
-}
-
 fn published(storage: &ImageStorage, image: EventImage) -> PublishedImage {
     let url = match &storage.public_base_url {
         Some(base) => format!("{base}/{}", image.object_key()),
@@ -68,7 +60,7 @@ fn published(storage: &ImageStorage, image: EventImage) -> PublishedImage {
     PublishedImage { image, url }
 }
 
-fn storage_failed(error: object_store::Error) -> ApiError {
+fn storage_failed(error: ObjectError) -> ApiError {
     ApiError::unavailable(error)
 }
 
@@ -138,19 +130,12 @@ pub async fn upload_image(
 
     // Bytes first: a recorded image always has its object; a failed insert leaves an orphan
     // object at worst, which is removed right away when possible.
-    let mut attributes = Attributes::new();
-    attributes.insert(Attribute::ContentType, declared.media_type().into());
-    attributes.insert(Attribute::CacheControl, IMMUTABLE.into());
-    let options = PutOptions {
-        attributes,
-        ..PutOptions::default()
-    };
     kippu_telemetry::call(
         "object storage",
         "put",
         storage
-            .store
-            .put_opts(&object_path(&image), PutPayload::from_bytes(bytes), options),
+            .objects
+            .put(&image.object_key(), bytes, declared.media_type(), IMMUTABLE),
     )
     .await
     .map_err(storage_failed)?;
@@ -158,7 +143,7 @@ pub async fn upload_image(
         if let Err(cleanup) = kippu_telemetry::call(
             "object storage",
             "delete",
-            storage.store.delete(&object_path(&image)),
+            storage.objects.delete(&image.object_key()),
         )
         .await
         {
@@ -206,14 +191,12 @@ pub async fn image_content(
     let object = kippu_telemetry::call(
         "object storage",
         "get",
-        storage
-            .store
-            .get_opts(&object_path(&image), GetOptions::default()),
+        storage.objects.get(&image.object_key()),
     )
     .await
     .map_err(|error| match error {
-        object_store::Error::NotFound { .. } => ApiError::not_found("image"),
-        other => storage_failed(other),
+        ObjectError::NotFound => ApiError::not_found("image"),
+        other @ ObjectError::Failed(_) => storage_failed(other),
     })?;
     Ok(ImageContent::Stored {
         format: image.format,
@@ -238,7 +221,7 @@ pub async fn delete_image(
     if let Err(error) = kippu_telemetry::call(
         "object storage",
         "delete",
-        storage.store.delete(&object_path(&image)),
+        storage.objects.delete(&image.object_key()),
     )
     .await
     {

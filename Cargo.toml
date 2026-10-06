@@ -21,6 +21,10 @@ members = [
     "crates/kippu/adapters/postgres",
     "crates/kippu/adapters/mysql",
     "crates/kippu/adapters/nats",
+    "crates/kippu/adapters/objects-common",
+    "crates/kippu/adapters/objects-s3",
+    "crates/kippu/adapters/objects-gcs",
+    "crates/kippu/adapters/objects-azure",
     # Ticket verification core
     "crates/kaisatsu",
     # Bindings
@@ -46,6 +50,10 @@ kippu-store-sqlite = { path = "crates/kippu/adapters/sqlite" }
 kippu-store-postgres = { path = "crates/kippu/adapters/postgres" }
 kippu-store-mysql = { path = "crates/kippu/adapters/mysql" }
 kippu-nats = { path = "crates/kippu/adapters/nats" }
+kippu-objects-common = { path = "crates/kippu/adapters/objects-common" }
+kippu-objects-s3 = { path = "crates/kippu/adapters/objects-s3" }
+kippu-objects-gcs = { path = "crates/kippu/adapters/objects-gcs" }
+kippu-objects-azure = { path = "crates/kippu/adapters/objects-azure" }
 kippu-core = { path = "crates/kippu/core" }
 kippu-server = { path = "crates/kippu/server", default-features = false }
 
@@ -93,8 +101,9 @@ async-nats = { version = "0.50", default-features = false }
 futures-util = "0.3"
 
 # ── Object storage (event images) ───────────────────────────────────────────────
-# Real object stores only (no `fs`): Kippu keeps no state on its own disks.
-object_store = { version = "0.14", default-features = false, features = ["aws-base", "gcp-base", "azure-base", "reqwest", "ring"] }
+# Real object stores only (no `fs`): Kippu keeps no state on its own disks. Each provider's
+# adapter crate turns on its own `*-base` feature.
+object_store = { version = "0.14", default-features = false, features = ["reqwest", "ring"] }
 
 # ── Observability & API documentation ───────────────────────────────────────────
 tracing = "0.1.44"
@@ -146,12 +155,17 @@ name = "kippu"
 path = "src/main.rs"
 
 [features]
-default = ["sqlite", "postgres", "mysql", "nats", "mimalloc"]
+default = ["sqlite", "postgres", "mysql", "nats", "s3", "gcs", "azure", "mimalloc"]
 ## Storage adapters compiled into the binary.
 sqlite = ["kippu-server/sqlite"]
 postgres = ["kippu-server/postgres"]
 mysql = ["kippu-server/mysql"]
 nats = ["kippu-server/nats"]
+## Object storage for event images: Amazon S3 and compatible services, Google Cloud Storage,
+## Azure Blob Storage.
+s3 = ["kippu-server/s3"]
+gcs = ["kippu-server/gcs"]
+azure = ["kippu-server/azure"]
 ## Use mimalloc as the global allocator.
 mimalloc = ["dep:mimalloc"]
 ## Let `kippu verify` read tickets carried as Base45 text.

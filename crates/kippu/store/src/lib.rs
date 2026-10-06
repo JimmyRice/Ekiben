@@ -8,6 +8,9 @@ pub mod conformance;
 mod error;
 mod housekeeping;
 mod images;
+#[cfg(feature = "conformance")]
+pub mod object_conformance;
+mod objects;
 mod outbox;
 mod payments;
 mod primitives;
@@ -22,6 +25,7 @@ pub use catalog::{CatalogStore, EventFilter};
 pub use error::{BoxError, StoreError, StoreResult};
 pub use housekeeping::{AuditEntry, HousekeepingStore, IdempotencyRecord};
 pub use images::ImageStore;
+pub use objects::{ObjectError, ObjectStorage, StoredObject};
 pub use outbox::{OutboxRecord, OutboxStore, OutboxTx};
 pub use payments::{PaymentStore, PaymentsTx};
 pub use primitives::{Insertion, Lease, PageRequest};

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use kippu_store::{BoxError, EventBus, PurchaseInbox, Store};
+use kippu_store::{BoxError, EventBus, ObjectStorage, PurchaseInbox, Store};
 
 /// The adapters compiled into this binary, for error messages.
 pub const COMPILED_ADAPTERS: &[&str] = &[
@@ -51,6 +51,10 @@ pub struct Queue {
 }
 
 /// Connects to the queue named by `url`, choosing the adapter by the URL's scheme.
+#[cfg_attr(
+    not(feature = "nats"),
+    expect(clippy::unused_async, reason = "only the NATS adapter awaits")
+)]
 pub async fn connect_queue(url: &str) -> Result<Queue, BoxError> {
     let scheme = url.split_once(':').map_or(url, |(scheme, _)| scheme);
     match scheme {
@@ -69,5 +73,45 @@ pub async fn connect_queue(url: &str) -> Result<Queue, BoxError> {
             COMPILED_QUEUES.join(", ")
         )
         .into()),
+    }
+}
+
+/// The object storage adapters compiled into this binary, for error messages.
+pub const COMPILED_OBJECT_STORAGE: &[&str] = &[
+    #[cfg(feature = "s3")]
+    "s3",
+    #[cfg(feature = "gcs")]
+    "gs",
+    #[cfg(feature = "azure")]
+    "az",
+];
+
+/// Connects to the object storage named by `url`, choosing the adapter by the URL's scheme.
+/// `options` are the provider's settings (`images.options`).
+pub fn connect_objects(
+    url: &str,
+    options: &[(String, String)],
+) -> Result<Arc<dyn ObjectStorage>, BoxError> {
+    let scheme = url.split_once(':').map_or(url, |(scheme, _)| scheme);
+    match scheme {
+        #[cfg(feature = "s3")]
+        "s3" | "s3a" => Ok(Arc::new(kippu_objects_s3::connect(url, options)?)),
+        #[cfg(feature = "gcs")]
+        "gs" => Ok(Arc::new(kippu_objects_gcs::connect(url, options)?)),
+        #[cfg(feature = "azure")]
+        "az" | "azure" | "abfs" | "abfss" => {
+            Ok(Arc::new(kippu_objects_azure::connect(url, options)?))
+        }
+        "file" | "memory" => Err("images.url must be an object store (s3://, gs://, az://): \
+             instances are stateless, so images cannot live on one of them"
+            .into()),
+        _ => {
+            let _ = options;
+            Err(format!(
+                "no object storage adapter for `{scheme}:` URLs; this binary supports: {}",
+                COMPILED_OBJECT_STORAGE.join(", ")
+            )
+            .into())
+        }
     }
 }

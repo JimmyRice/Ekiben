@@ -1,9 +1,10 @@
 //! Event images, kept in object storage.
 //!
 //! Organizers upload images for their events; anyone who can see an event can list and load
-//! them. The bytes go to the deployment's object store (S3 and compatible services, GCS or
-//! Azure) — never to an instance's disk, since instances are stateless — and the database
-//! keeps the gallery order. Without an object store the endpoints answer
+//! them. The bytes go to the deployment's object storage, an adapter behind
+//! [`kippu_store::ObjectStorage`] (S3 and compatible services, GCS, Azure, …) — never to an
+//! instance's disk, since instances are stateless — and the database keeps the gallery order.
+//! Without object storage the endpoints answer
 //! `501 images-not-configured`. With `images.public_base_url` (a CDN in front of the bucket)
 //! clients are sent there instead of loading images through Kippu.
 

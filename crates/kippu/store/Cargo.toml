@@ -12,6 +12,8 @@ conformance = ["dep:tokio"]
 
 [dependencies]
 async-trait.workspace = true
+bytes.workspace = true
+futures-util.workspace = true
 kippu-domain.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, optional = true, features = ["macros", "rt-multi-thread", "sync", "time"] }

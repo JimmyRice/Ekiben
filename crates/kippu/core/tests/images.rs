@@ -10,6 +10,7 @@ mod support;
 use std::sync::Arc;
 
 use axum::http::{Method, StatusCode};
+use kippu_objects_common::ObjectStoreAdapter;
 use object_store::ObjectStoreExt;
 use object_store::memory::InMemory;
 use object_store::path::Path;
@@ -25,7 +26,7 @@ async fn app_with(
     configure: impl FnOnce(&mut kippu_core::Config),
 ) -> TestApp {
     TestApp::start_custom(Vec::new(), configure, move |kippu| {
-        kippu.object_store(store)
+        kippu.object_storage(Arc::new(ObjectStoreAdapter::new(store)))
     })
     .await
 }
