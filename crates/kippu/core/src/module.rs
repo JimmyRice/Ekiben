@@ -41,10 +41,46 @@ pub trait Module: Send + Sync + 'static {
     /// HTTP routes, with their OpenAPI documentation. Paths are absolute (`/v1/...`).
     fn routes(&self) -> OpenApiRouter<AppState>;
 
+    /// Routes that accept bodies larger than `server.max_body_bytes`, such as uploads.
+    fn body_limits(&self, config: &Config) -> Vec<BodyLimit> {
+        let _ = config;
+        Vec::new()
+    }
+
     /// Periodic background work.
     fn tasks(&self, config: &Config) -> Vec<BackgroundTask> {
         let _ = config;
         Vec::new()
+    }
+}
+
+/// A larger request body limit for the routes matching `path`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BodyLimit {
+    /// The route's path as declared, e.g. `/v1/events/{event_id}/images`; `{…}` segments
+    /// match any one segment.
+    pub path: &'static str,
+    /// The largest body accepted, in bytes.
+    pub max_bytes: usize,
+}
+
+impl BodyLimit {
+    /// Whether a request path falls under this limit.
+    pub fn matches(&self, path: &str) -> bool {
+        let mut pattern = self.path.split('/');
+        let mut segments = path.split('/');
+        loop {
+            match (pattern.next(), segments.next()) {
+                (None, None) => return true,
+                (Some(expected), Some(actual)) => {
+                    let wildcard = expected.starts_with('{') && expected.ends_with('}');
+                    if !wildcard && expected != actual {
+                        return false;
+                    }
+                }
+                _ => return false,
+            }
+        }
     }
 }
 

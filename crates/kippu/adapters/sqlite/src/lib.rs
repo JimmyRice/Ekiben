@@ -5,6 +5,7 @@ mod accounts;
 mod catalog;
 mod convert;
 mod housekeeping;
+mod images;
 mod outbox;
 mod payments;
 mod purchasing;

@@ -107,3 +107,7 @@ define_id!(
     /// An endpoint that receives integration events.
     WebhookId
 );
+define_id!(
+    /// An image of an event, kept in object storage.
+    ImageId
+);

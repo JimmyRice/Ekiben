@@ -17,5 +17,5 @@ pub use auth::{Permission, Principal, Scope};
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use config::Config;
 pub use error::{ApiError, ApiResult};
-pub use module::{BackgroundTask, Module, Progress};
+pub use module::{BackgroundTask, BodyLimit, Module, Progress};
 pub use modules::default_modules;

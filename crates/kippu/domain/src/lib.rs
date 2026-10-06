@@ -5,6 +5,7 @@ pub mod account;
 pub mod admission;
 pub mod catalog;
 pub mod id;
+pub mod image;
 pub mod money;
 pub mod outbox;
 pub mod payment;

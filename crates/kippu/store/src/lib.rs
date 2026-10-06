@@ -7,6 +7,7 @@ mod catalog;
 pub mod conformance;
 mod error;
 mod housekeeping;
+mod images;
 mod outbox;
 mod payments;
 mod purchasing;
@@ -20,6 +21,7 @@ pub use accounts::{AccountStore, Session, SessionRenewal, Unlink};
 pub use catalog::{CatalogStore, EventFilter};
 pub use error::{BoxError, StoreError};
 pub use housekeeping::{AuditEntry, HousekeepingStore, IdempotencyRecord};
+pub use images::ImageStore;
 pub use outbox::{OutboxRecord, OutboxStore, OutboxTx};
 pub use payments::{PaymentStore, PaymentsTx};
 pub use purchasing::{Hold, InventoryTx, PurchaseStore, PurchasesTx, ReservationsTx};
@@ -43,6 +45,7 @@ pub trait Store:
     + OutboxStore
     + HousekeepingStore
     + WebhookStore
+    + ImageStore
     + Send
     + Sync
     + 'static

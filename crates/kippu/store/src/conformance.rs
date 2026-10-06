@@ -26,6 +26,7 @@ use std::sync::Arc;
 use kippu_domain::account::{Account, Identity, Organization, Role};
 use kippu_domain::admission::AdmissionPolicy;
 use kippu_domain::catalog::{Event, EventStatus, Sale, TicketType};
+use kippu_domain::image::{EventImage, ImageFormat};
 use kippu_domain::outbox::IntegrationEvent;
 use kippu_domain::payment::{Environment, PaymentAttestation, PaymentDisposition};
 use kippu_domain::purchase::{Basket, LineItem, PurchaseRequest, PurchaseStatus};
@@ -33,8 +34,8 @@ use kippu_domain::reservation::{Reservation, ReservationStatus, ReservedItem};
 use kippu_domain::validation::{Email, IdempotencyKey, ProviderName, Slug, Subject};
 use kippu_domain::webhook::Webhook;
 use kippu_domain::{
-    AccountId, AttestorId, Currency, Duration, EventId, Money, OrganizationId, PurchaseRequestId,
-    ReservationId, SaleId, SessionId, TicketTypeId, Timestamp, WebhookId,
+    AccountId, AttestorId, Currency, Duration, EventId, ImageId, Money, OrganizationId,
+    PurchaseRequestId, ReservationId, SaleId, SessionId, TicketTypeId, Timestamp, WebhookId,
 };
 
 use crate::{
@@ -96,6 +97,7 @@ macro_rules! conformance_tests {
             the_last_sign_in_method_is_kept,
             webhooks_are_claimed_by_one_worker_when_due,
             webhook_settings_and_progress_are_separate,
+            event_images_keep_their_order,
         );
     };
     (@cases $mode:tt; $($case:ident),* $(,)?) => {
@@ -1265,4 +1267,52 @@ pub async fn webhook_settings_and_progress_are_separate(store: Arc<dyn Store>) {
     ));
     assert!(store.delete_webhook(hook.id).await.unwrap());
     assert!(!store.delete_webhook(hook.id).await.unwrap());
+}
+
+pub async fn event_images_keep_their_order(store: Arc<dyn Store>) {
+    let event = event_record(organization(store.as_ref()).await);
+    store.insert_event(&event).await.unwrap();
+    let other = event_record(organization(store.as_ref()).await);
+    store.insert_event(&other).await.unwrap();
+    let image = |event_id: EventId, position: u32| EventImage {
+        id: ImageId::generate(),
+        event_id,
+        format: ImageFormat::Webp,
+        size_bytes: 1_234,
+        position,
+        created_at: now(),
+    };
+    let (first, second, third) = (image(event.id, 1), image(event.id, 2), image(event.id, 3));
+    let elsewhere = image(other.id, 1);
+    for image in [&first, &second, &third, &elsewhere] {
+        store.insert_event_image(image).await.unwrap();
+    }
+    assert_eq!(
+        store.event_image(second.id).await.unwrap(),
+        Some(second.clone())
+    );
+    let ids =
+        |images: Vec<EventImage>| images.into_iter().map(|image| image.id).collect::<Vec<_>>();
+    assert_eq!(
+        ids(store.event_images(event.id).await.unwrap()),
+        vec![first.id, second.id, third.id]
+    );
+
+    store
+        .set_image_positions(event.id, &[third.id, first.id, second.id, elsewhere.id])
+        .await
+        .unwrap();
+    assert_eq!(
+        ids(store.event_images(event.id).await.unwrap()),
+        vec![third.id, first.id, second.id]
+    );
+    assert_eq!(
+        ids(store.event_images(other.id).await.unwrap()),
+        vec![elsewhere.id],
+        "another event's image is not moved"
+    );
+
+    assert!(store.delete_event_image(first.id).await.unwrap());
+    assert!(!store.delete_event_image(first.id).await.unwrap());
+    assert_eq!(store.event_image(first.id).await.unwrap(), None);
 }

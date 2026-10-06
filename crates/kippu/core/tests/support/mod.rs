@@ -19,8 +19,8 @@ use base64::engine::general_purpose::STANDARD;
 use ed25519_dalek::SigningKey;
 use kippu_core::auth::tokens::mint_root_token;
 use kippu_core::config::{
-    AuthConfig, Config, DatabaseConfig, IssuerConfig, KeysConfig, RootConfig, RootKey,
-    ServerConfig, WebhooksConfig, WorkersConfig,
+    AuthConfig, Config, DatabaseConfig, ImagesConfig, IssuerConfig, KeysConfig, RootConfig,
+    RootKey, ServerConfig, WebhooksConfig, WorkersConfig,
 };
 use kippu_core::{App, Kippu, ManualClock, Module};
 use kippu_domain::{Duration, Timestamp};
@@ -105,6 +105,16 @@ impl TestApp {
         extra: Vec<Arc<dyn Module>>,
         configure: impl FnOnce(&mut Config),
     ) -> Self {
+        Self::start_custom(extra, configure, |kippu| kippu).await
+    }
+
+    /// Like [`TestApp::start_with`], also letting `customize` adjust the builder (e.g. to give
+    /// it an in-memory object store).
+    pub async fn start_custom(
+        extra: Vec<Arc<dyn Module>>,
+        configure: impl FnOnce(&mut Config),
+        customize: impl FnOnce(Kippu) -> Kippu,
+    ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let (store, url) = test_store(&dir).await;
 
@@ -134,12 +144,13 @@ impl TestApp {
             auth: AuthConfig::default(),
             workers: WorkersConfig::default(),
             webhooks: WebhooksConfig::default(),
+            images: ImagesConfig::default(),
         };
         let clock = Arc::new(ManualClock::new(Timestamp::from_unix_seconds(
             1_798_761_600,
         ))); // 2027-01-01
         configure(&mut config);
-        let app = Kippu::new()
+        let app = customize(Kippu::new())
             .modules(kippu_core::default_modules())
             .modules(extra)
             .build(config, store, clock.clone())

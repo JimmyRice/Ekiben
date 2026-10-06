@@ -70,7 +70,11 @@ async fn handle(
 ) -> Result<Response, ApiError> {
     let scope = scope(state, &request);
     let (parts, body) = request.into_parts();
-    let body = to_bytes(body, state.config().server.max_body_bytes)
+    let limit = parts
+        .extensions
+        .get::<super::RequestBodyLimit>()
+        .map_or(state.config().server.max_body_bytes, |limit| limit.0);
+    let body = to_bytes(body, limit)
         .await
         .map_err(|_| ApiError::payload_too_large())?;
     let fingerprint = hex::encode(

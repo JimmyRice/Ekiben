@@ -12,16 +12,17 @@ use utoipa::IntoParams;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Router, middleware};
+use http_body_util::Limited;
 use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::cors::CorsLayer;
-use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
@@ -32,7 +33,7 @@ use utoipa_axum::routes;
 
 use crate::app::AppState;
 use crate::error::{ApiError, Problem};
-use crate::module::Module;
+use crate::module::{BodyLimit, Module};
 
 /// Keyset pagination parameters shared by every list endpoint.
 #[derive(Debug, Deserialize, IntoParams)]
@@ -129,10 +130,15 @@ pub(crate) fn router(state: &AppState, modules: &[Arc<dyn Module>]) -> Router {
             Duration::from_secs(server.request_timeout_seconds),
         ))
         .layer(middleware::from_fn_with_state(
-            server.max_body_bytes,
-            reject_declared_oversize,
+            Arc::new(BodyLimits {
+                default: server.max_body_bytes,
+                routes: modules
+                    .iter()
+                    .flat_map(|module| module.body_limits(state.config()))
+                    .collect(),
+            }),
+            limit_body,
         ))
-        .layer(RequestBodyLimitLayer::new(server.max_body_bytes))
         .layer(cors(&server.cors_allowed_origins));
 
     router
@@ -148,15 +154,30 @@ pub(crate) fn router(state: &AppState, modules: &[Arc<dyn Module>]) -> Router {
         .with_state(state.clone())
 }
 
-/// Answers 413 with a problem when `Content-Length` already exceeds the body limit.
-///
-/// [`RequestBodyLimitLayer`] enforces the limit while bodies are read, but answers a declared
-/// oversize length itself, in plain text; this runs in front of it so clients get a problem.
-async fn reject_declared_oversize(
-    State(limit): State<usize>,
-    request: Request,
+/// `server.max_body_bytes`, and the larger limits modules declare for some routes.
+struct BodyLimits {
+    default: usize,
+    routes: Vec<BodyLimit>,
+}
+
+/// The body limit that applies to a request, for code that buffers bodies itself.
+#[derive(Debug, Clone, Copy)]
+pub struct RequestBodyLimit(pub usize);
+
+/// Enforces the body limit for the request's route: a declared `Content-Length` over it is
+/// answered with a 413 problem at once, and the body is cut off when it grows past it, which
+/// extractors report as 413 too.
+async fn limit_body(
+    State(limits): State<Arc<BodyLimits>>,
+    mut request: Request,
     next: Next,
 ) -> Response {
+    let path = request.uri().path();
+    let limit = limits
+        .routes
+        .iter()
+        .find(|route| route.matches(path))
+        .map_or(limits.default, |route| route.max_bytes);
     let declared = request
         .headers()
         .get(header::CONTENT_LENGTH)
@@ -164,6 +185,8 @@ async fn reject_declared_oversize(
     if declared.is_some_and(|length| length > limit) {
         return ApiError::payload_too_large().into_response();
     }
+    request.extensions_mut().insert(RequestBodyLimit(limit));
+    let request = request.map(|body| Body::new(Limited::new(body, limit)));
     next.run(request).await
 }
 

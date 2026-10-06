@@ -53,6 +53,18 @@ admission_pass_ttl_seconds = 600
 # this on if every account's email is known to be verified.
 link_by_verified_email = false
 
+[images]
+# Event images live in an object store, never on an instance's disk. Without `url`, uploads
+# answer 501. Credentials come from the provider's environment variables (AWS_ACCESS_KEY_ID,
+# GOOGLE_SERVICE_ACCOUNT, AZURE_STORAGE_ACCOUNT_KEY, …).
+# url = "s3://kippu-images/production"
+# public_base_url = "https://images.example.org/production"   # serve through a CDN instead
+max_bytes = 5242880
+max_per_event = 20
+# [images.options]
+# aws_endpoint = "https://minio.internal:9000"   # S3-compatible services
+# aws_region = "auto"
+
 [webhooks]
 # Deliveries are signed with keys.webhook_signing_key (KIPPU_KEYS__WEBHOOK_SIGNING_KEY); without
 # it webhooks are unavailable. Receivers verify with /.well-known/kippu/webhook-keys.

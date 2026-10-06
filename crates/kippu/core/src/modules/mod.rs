@@ -3,6 +3,7 @@
 pub mod accounts;
 pub mod admission;
 pub mod catalog;
+pub mod images;
 pub mod payments;
 pub mod purchasing;
 pub mod ticketing;
@@ -17,6 +18,7 @@ pub fn default_modules() -> Vec<Arc<dyn Module>> {
     vec![
         Arc::new(accounts::Accounts),
         Arc::new(catalog::Catalog),
+        Arc::new(images::Images),
         Arc::new(admission::Admission),
         Arc::new(purchasing::Purchasing),
         Arc::new(payments::Payments),

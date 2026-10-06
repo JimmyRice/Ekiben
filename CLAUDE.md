@@ -30,7 +30,7 @@ Keep the repository root uncluttered and do not add speculative `.gitignore` ent
 ## Commands
 
 ```bash
-cargo test --workspace --all-features                                   # 175 tests incl. e2e over TCP
+cargo test --workspace --all-features                                   # 186 tests incl. e2e over TCP
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets           # default features too
 cargo fmt --all
@@ -92,6 +92,11 @@ as `shop`, `attestor`, `reserve`, `drain`); the full journey over real TCP is
   their fields in `crates/kippu/core/src/http/trace.rs`; `crates/kippu/server/src/telemetry.rs`
   renders them (pretty blocks, compact lines, JSON). Log business milestones with
   `tracing::info!` and they land in the right block. Never record headers, bodies or tokens.
+- **Object storage** (event images): `object_store` with the `*-base` features and `ring`
+  (no `fs`, no aws-lc). Deployments configure `images.url`; tests inject `InMemory` through
+  `Kippu::object_store` (`TestApp::start_custom`). Never add a local-disk backend.
+- **Body limits:** `server.max_body_bytes` everywhere, except routes a module raises with
+  `Module::body_limits`; code that buffers bodies reads the `RequestBodyLimit` extension.
 - **Outbound HTTP** (webhooks) goes through `modules/webhooks/delivery.rs`: rustls + ring,
   no redirects, no environment proxy, and a resolver that drops non-public addresses (SSRF).
   Reuse it for any new outbound call; never call user-supplied URLs with a plain client.

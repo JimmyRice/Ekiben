@@ -14,9 +14,11 @@ base64.workspace = true
 ed25519-dalek = { workspace = true, features = ["fast", "zeroize", "pkcs8", "pem", "rand_core"] }
 getrandom.workspace = true
 hex.workspace = true
+http-body-util.workspace = true
 kaisatsu = { workspace = true, features = ["issuer"] }
 kippu-domain = { workspace = true, features = ["openapi"] }
 kippu-store.workspace = true
+object_store.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
 rustls-native-certs.workspace = true
@@ -29,7 +31,7 @@ time.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 tokio-util = { workspace = true, features = ["rt"] }
 tower.workspace = true
-tower-http = { workspace = true, features = ["trace", "request-id", "catch-panic", "timeout", "limit", "cors", "util"] }
+tower-http = { workspace = true, features = ["trace", "request-id", "catch-panic", "timeout", "cors", "util"] }
 tracing.workspace = true
 utoipa = { workspace = true, features = ["uuid"] }
 utoipa-axum.workspace = true

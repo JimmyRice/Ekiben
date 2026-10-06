@@ -9,6 +9,7 @@ use std::str::FromStr;
 
 use kippu_domain::account::{Account, Identity, Organization, Role};
 use kippu_domain::catalog::{Event, EventStatus, Inventory, Sale, TicketType};
+use kippu_domain::image::EventImage;
 use kippu_domain::payment::{
     Attestor, AttestorKey, Environment, PaymentAttestation, PaymentDisposition,
 };
@@ -569,6 +570,31 @@ impl TryFrom<WebhookRow> for Webhook {
             next_attempt_at: instant(row.next_attempt_at),
             created_at: instant(row.created_at),
             version: row.version,
+        })
+    }
+}
+
+#[derive(sqlx::FromRow)]
+pub(crate) struct ImageRow {
+    id: Uuid,
+    event_id: Uuid,
+    format: String,
+    size_bytes: i64,
+    position: u32,
+    created_at: i64,
+}
+
+impl TryFrom<ImageRow> for EventImage {
+    type Error = StoreError;
+
+    fn try_from(row: ImageRow) -> Result<Self, StoreError> {
+        Ok(Self {
+            id: row.id.into(),
+            event_id: row.event_id.into(),
+            format: row.format.parse().map_err(StoreError::backend)?,
+            size_bytes: u64::try_from(row.size_bytes).map_err(StoreError::backend)?,
+            position: row.position,
+            created_at: instant(row.created_at),
         })
     }
 }
