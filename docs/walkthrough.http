@@ -54,7 +54,8 @@ Content-Type: application/json
   "title": "Comic Market 110",
   "venue": "Tokyo Big Sight",
   "starts_at": "2027-08-16T10:00:00+09:00",
-  "ends_at": "2027-08-17T16:00:00+09:00"
+  "ends_at": "2027-08-17T16:00:00+09:00",
+  "content": "<h1>Comic Market 110</h1><p>Two days at Tokyo Big Sight.</p>"
 }
 
 > {% client.global.set("event_id", response.body.id); %}

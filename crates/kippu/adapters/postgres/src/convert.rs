@@ -10,7 +10,7 @@ use std::str::FromStr;
 use kippu_domain::AttestorId;
 use kippu_domain::account::{Account, Identity, Organization, Role};
 use kippu_domain::admission::AdmissionPolicy;
-use kippu_domain::catalog::{Event, EventStatus, Inventory, Sale, TicketType};
+use kippu_domain::catalog::{Event, EventStatus, EventSummary, Inventory, Sale, TicketType};
 use kippu_domain::image::EventImage;
 use kippu_domain::payment::{
     Attestor, AttestorKey, Environment, PaymentAttestation, PaymentDisposition,
@@ -164,7 +164,7 @@ pub(crate) fn event_status(status: EventStatus) -> &'static str {
 }
 
 #[derive(sqlx::FromRow)]
-pub(crate) struct EventRow {
+pub(crate) struct EventSummaryRow {
     id: Uuid,
     organization_id: Uuid,
     slug: String,
@@ -179,10 +179,10 @@ pub(crate) struct EventRow {
     version: i64,
 }
 
-impl TryFrom<EventRow> for Event {
+impl TryFrom<EventSummaryRow> for EventSummary {
     type Error = StoreError;
 
-    fn try_from(row: EventRow) -> Result<Self, StoreError> {
+    fn try_from(row: EventSummaryRow) -> Result<Self, StoreError> {
         let status = match row.status.as_str() {
             "draft" => EventStatus::Draft,
             "published" => EventStatus::Published,
@@ -207,6 +207,21 @@ impl TryFrom<EventRow> for Event {
             updated_at: instant(row.updated_at),
             version: row.version,
         })
+    }
+}
+
+#[derive(sqlx::FromRow)]
+pub(crate) struct EventRow {
+    #[sqlx(flatten)]
+    summary: EventSummaryRow,
+    content: String,
+}
+
+impl TryFrom<EventRow> for Event {
+    type Error = StoreError;
+
+    fn try_from(row: EventRow) -> Result<Self, StoreError> {
+        Ok(EventSummary::try_from(row.summary)?.with_content(row.content))
     }
 }
 

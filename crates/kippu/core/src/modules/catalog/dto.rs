@@ -23,6 +23,10 @@ pub struct CreateEventRequest {
     pub starts_at: Timestamp,
     /// When it closes.
     pub ends_at: Timestamp,
+    /// The event's page — HTML, Markdown, JSON for your own components, anything — stored as
+    /// is, at most 256 KiB. Listings leave it out.
+    #[serde(default)]
+    pub content: String,
 }
 
 /// An event's new state. `version` must be the version you last read.
@@ -45,6 +49,10 @@ pub struct UpdateEventRequest {
     pub ends_at: Timestamp,
     /// `draft`, `published` or `cancelled`.
     pub status: EventStatus,
+    /// The event's page — HTML, Markdown, JSON for your own components, anything — stored as
+    /// is, at most 256 KiB. Listings leave it out.
+    #[serde(default)]
+    pub content: String,
 }
 
 /// A sale's settings, for creating or (with `version`) updating it.
@@ -137,6 +145,8 @@ pub struct EventPatch {
     pub ends_at: Option<Timestamp>,
     /// `draft`, `published` or `cancelled`.
     pub status: Option<EventStatus>,
+    /// The event's page, replaced as a whole; at most 256 KiB.
+    pub content: Option<String>,
 }
 
 /// Changes to a sale: only the fields to change, plus the `version` you last read.

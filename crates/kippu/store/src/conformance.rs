@@ -25,7 +25,9 @@ use std::sync::Arc;
 
 use kippu_domain::account::{Account, Identity, Organization, Role};
 use kippu_domain::admission::AdmissionPolicy;
-use kippu_domain::catalog::{Event, EventStatus, Sale, TicketType};
+use kippu_domain::catalog::{
+    Event, EventStatus, EventSummary, MAX_EVENT_CONTENT_BYTES, Sale, TicketType,
+};
 use kippu_domain::image::{EventImage, ImageFormat};
 use kippu_domain::outbox::IntegrationEvent;
 use kippu_domain::payment::{Environment, PaymentAttestation, PaymentDisposition};
@@ -39,7 +41,8 @@ use kippu_domain::{
 };
 
 use crate::{
-    Hold, Insertion, Lease, Session, SessionRenewal, Store, StoreError, Unlink, WebhookRun,
+    EventFilter, Hold, Insertion, Lease, PageRequest, Session, SessionRenewal, Store, StoreError,
+    Unlink, WebhookRun,
 };
 
 /// A store under test, plus whatever must outlive it (e.g. a temporary directory).
@@ -98,6 +101,7 @@ macro_rules! conformance_tests {
             webhooks_are_claimed_by_one_worker_when_due,
             webhook_settings_and_progress_are_separate,
             event_images_keep_their_order,
+            event_content_is_kept_whole_and_left_out_of_listings,
         );
     };
     (@cases $mode:tt; $($case:ident),* $(,)?) => {
@@ -164,6 +168,7 @@ fn event_record(organization: OrganizationId) -> Event {
         starts_at: now(),
         ends_at: now() + Duration::days(2),
         status: EventStatus::Published,
+        content: String::new(),
         created_at: now(),
         updated_at: now(),
         version: 1,
@@ -1315,4 +1320,34 @@ pub async fn event_images_keep_their_order(store: Arc<dyn Store>) {
     assert!(store.delete_event_image(first.id).await.unwrap());
     assert!(!store.delete_event_image(first.id).await.unwrap());
     assert_eq!(store.event_image(first.id).await.unwrap(), None);
+}
+
+pub async fn event_content_is_kept_whole_and_left_out_of_listings(store: Arc<dyn Store>) {
+    let organization = organization(store.as_ref()).await;
+    // The largest content allowed, with multi-byte characters: limits are in bytes.
+    let page = "<p>駅弁</p>".repeat(MAX_EVENT_CONTENT_BYTES / "<p>駅弁</p>".len());
+    let event = Event {
+        content: page.clone(),
+        ..event_record(organization)
+    };
+    store.insert_event(&event).await.unwrap();
+    assert_eq!(store.event(event.id).await.unwrap().unwrap().content, page);
+
+    let edited = Event {
+        content: "{\"blocks\": []}".to_owned(),
+        version: 2,
+        ..event.clone()
+    };
+    store.update_event(&edited, 1).await.unwrap();
+    assert_eq!(store.event(event.id).await.unwrap(), Some(edited.clone()));
+
+    let filter = EventFilter {
+        organization: Some(organization),
+        public_only: false,
+    };
+    let listed = store
+        .list_events(filter, PageRequest::first(10))
+        .await
+        .unwrap();
+    assert_eq!(listed, vec![EventSummary::from(edited)]);
 }

@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use crate::http::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use kippu_domain::catalog::{Event, EventStatus, Sale, TicketType};
+use kippu_domain::catalog::{Event, EventStatus, EventSummary, Sale, TicketType};
 use kippu_domain::validation::Slug;
 use kippu_domain::{EventId, OrganizationId, SaleId, TicketTypeId, ValidationError};
 use kippu_store::EventFilter;
@@ -39,12 +39,12 @@ fn check_version(stored: i64, expected: i64) -> ApiResult<()> {
 #[utoipa::path(
     get, path = "/v1/events", tag = TAG,
     params(PageQuery),
-    responses((status = 200, body = Vec<Event>))
+    responses((status = 200, body = Vec<EventSummary>))
 )]
 pub(crate) async fn list_events(
     State(state): State<AppState>,
     Query(query): Query<PageQuery>,
-) -> ApiResult<Json<Vec<Event>>> {
+) -> ApiResult<Json<Vec<EventSummary>>> {
     let filter = EventFilter {
         organization: None,
         public_only: true,
@@ -57,14 +57,14 @@ pub(crate) async fn list_events(
     get, path = "/v1/organizations/{organization_id}/events", tag = TAG,
     security(("bearer" = [])),
     params(("organization_id" = OrganizationId, Path), PageQuery),
-    responses((status = 200, body = Vec<Event>), (status = 403, body = Problem))
+    responses((status = 200, body = Vec<EventSummary>), (status = 403, body = Problem))
 )]
 pub(crate) async fn list_organization_events(
     State(state): State<AppState>,
     principal: Principal,
     Path(organization_id): Path<OrganizationId>,
     Query(query): Query<PageQuery>,
-) -> ApiResult<Json<Vec<Event>>> {
+) -> ApiResult<Json<Vec<EventSummary>>> {
     state.authorize(
         &principal,
         EVENTS_WRITE,
@@ -112,6 +112,7 @@ pub(crate) async fn create_event(
         starts_at: request.starts_at,
         ends_at: request.ends_at,
         status: EventStatus::Draft,
+        content: request.content,
         created_at: now,
         updated_at: now,
         version: 1,
@@ -160,6 +161,7 @@ pub(crate) async fn update_event(
         starts_at: request.starts_at,
         ends_at: request.ends_at,
         status: request.status,
+        content: request.content,
         ..current
     };
     save_event(&state, event, request.version).await
@@ -192,6 +194,7 @@ pub(crate) async fn patch_event(
         starts_at: patch.starts_at.unwrap_or(current.starts_at),
         ends_at: patch.ends_at.unwrap_or(current.ends_at),
         status: patch.status.unwrap_or(current.status),
+        content: patch.content.unwrap_or(current.content),
         ..current
     };
     save_event(&state, event, patch.version).await
@@ -496,18 +499,18 @@ async fn save_ticket_type(
 #[utoipa::path(
     get, path = "/v1/me/favorites", tag = TAG,
     security(("bearer" = [])),
-    responses((status = 200, body = Vec<Event>))
+    responses((status = 200, body = Vec<EventSummary>))
 )]
 pub(crate) async fn list_favorites(
     State(state): State<AppState>,
     principal: Principal,
-) -> ApiResult<Json<Vec<Event>>> {
+) -> ApiResult<Json<Vec<EventSummary>>> {
     let account = principal.require_account()?;
     state.authorize(&principal, FAVORITES_MANAGE, Scope::Account(account))?;
     let mut events = Vec::new();
     for event_id in state.store().favorites(account).await? {
         if let Ok(event) = visible_event(&state, Some(&principal), event_id).await {
-            events.push(event);
+            events.push(event.into());
         }
     }
     Ok(Json(events))

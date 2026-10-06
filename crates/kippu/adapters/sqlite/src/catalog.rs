@@ -1,18 +1,21 @@
 use async_trait::async_trait;
 use kippu_domain::admission::WaitingRoom;
-use kippu_domain::catalog::{Event, Inventory, Sale, TicketType};
+use kippu_domain::catalog::{Event, EventSummary, Inventory, Sale, TicketType};
 use kippu_domain::{AccountId, EventId, SaleId, TicketTypeId, Timestamp};
 use kippu_store::{CatalogStore, EventFilter, PageRequest, StoreError, StoreResult};
 use uuid::Uuid;
 
 use crate::convert::{
-    EventRow, InventoryRow, SaleRow, TicketTypeRow, all, event_status, extensions_json, json,
-    micros, optional,
+    EventRow, EventSummaryRow, InventoryRow, SaleRow, TicketTypeRow, all, event_status,
+    extensions_json, json, micros, optional,
 };
 use crate::{SqliteStore, error, unique};
 
+const EVENT_SUMMARY_COLUMNS: &str = "SELECT id, organization_id, slug, title, description, venue, \
+     starts_at, ends_at, status, created_at, updated_at, version FROM events";
+
 const EVENT_COLUMNS: &str = "SELECT id, organization_id, slug, title, description, venue, starts_at, \
-     ends_at, status, created_at, updated_at, version FROM events";
+     ends_at, status, created_at, updated_at, version, content FROM events";
 
 const SALE_COLUMNS: &str = "SELECT id, event_id, name, opens_at, closes_at, admission, \
      reservation_ttl_seconds, max_tickets_per_request, accepted_attestors, environment, \
@@ -36,8 +39,8 @@ impl CatalogStore for SqliteStore {
     async fn insert_event(&self, event: &Event) -> StoreResult<()> {
         sqlx::query(
             "INSERT INTO events (id, organization_id, slug, title, description, venue, starts_at,
-                                 ends_at, status, created_at, updated_at, version)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                                 ends_at, status, created_at, updated_at, version, content)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         )
         .bind(event.id.as_uuid())
         .bind(event.organization_id.as_uuid())
@@ -51,6 +54,7 @@ impl CatalogStore for SqliteStore {
         .bind(micros(event.created_at))
         .bind(micros(event.updated_at))
         .bind(event.version)
+        .bind(&event.content)
         .execute(&self.writer)
         .await
         .map_err(unique("slug"))?;
@@ -60,7 +64,8 @@ impl CatalogStore for SqliteStore {
     async fn update_event(&self, event: &Event, expected_version: i64) -> StoreResult<()> {
         let result = sqlx::query(
             "UPDATE events SET slug = ?2, title = ?3, description = ?4, venue = ?5, starts_at = ?6,
-                               ends_at = ?7, status = ?8, updated_at = ?9, version = ?10
+                               ends_at = ?7, status = ?8, updated_at = ?9, version = ?10,
+                               content = ?12
              WHERE id = ?1 AND version = ?11",
         )
         .bind(event.id.as_uuid())
@@ -74,6 +79,7 @@ impl CatalogStore for SqliteStore {
         .bind(micros(event.updated_at))
         .bind(event.version)
         .bind(expected_version)
+        .bind(&event.content)
         .execute(&self.writer)
         .await
         .map_err(unique("slug"))?;
@@ -91,9 +97,13 @@ impl CatalogStore for SqliteStore {
         optional(row)
     }
 
-    async fn list_events(&self, filter: EventFilter, page: PageRequest) -> StoreResult<Vec<Event>> {
-        let rows = sqlx::query_as::<_, EventRow>(sqlx::AssertSqlSafe(format!(
-            "{EVENT_COLUMNS}
+    async fn list_events(
+        &self,
+        filter: EventFilter,
+        page: PageRequest,
+    ) -> StoreResult<Vec<EventSummary>> {
+        let rows = sqlx::query_as::<_, EventSummaryRow>(sqlx::AssertSqlSafe(format!(
+            "{EVENT_SUMMARY_COLUMNS}
              WHERE (?1 IS NULL OR organization_id = ?1)
                AND (?2 = 0 OR status IN ('published', 'cancelled'))
                AND (?3 IS NULL OR id > ?3)

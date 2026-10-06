@@ -29,6 +29,9 @@ pub enum EventStatus {
     Cancelled,
 }
 
+/// The most bytes (UTF-8) an event's [`content`](Event::content) may have.
+pub const MAX_EVENT_CONTENT_BYTES: usize = 256 * 1024;
+
 /// A convention or other event.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -51,6 +54,10 @@ pub struct Event {
     pub ends_at: Timestamp,
     /// Visibility.
     pub status: EventStatus,
+    /// The event's page, in whatever form the deployment's clients render: HTML, Markdown,
+    /// JSON describing their own components… Kippu stores it as is, up to
+    /// [`MAX_EVENT_CONTENT_BYTES`].
+    pub content: String,
     /// When the event was created.
     pub created_at: Timestamp,
     /// When the event was last changed.
@@ -67,6 +74,9 @@ impl Event {
         if self.description.chars().count() > 20_000 {
             return Err(ValidationError::new("description", "is too long"));
         }
+        if self.content.len() > MAX_EVENT_CONTENT_BYTES {
+            return Err(ValidationError::new("content", "must be at most 256 KiB"));
+        }
         if self.ends_at <= self.starts_at {
             return Err(ValidationError::new("ends_at", "must be after starts_at"));
         }
@@ -76,6 +86,76 @@ impl Event {
     /// Whether the public may see the event.
     pub const fn is_public(&self) -> bool {
         matches!(self.status, EventStatus::Published | EventStatus::Cancelled)
+    }
+}
+
+/// An event without its [`content`](Event::content), as listings show it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct EventSummary {
+    /// Identity of the event.
+    pub id: EventId,
+    /// The organization running the event.
+    pub organization_id: OrganizationId,
+    /// URL-friendly name, unique across events.
+    pub slug: Slug,
+    /// Display title.
+    pub title: String,
+    /// Long description.
+    pub description: String,
+    /// Where it takes place.
+    pub venue: String,
+    /// When it opens.
+    pub starts_at: Timestamp,
+    /// When it closes.
+    pub ends_at: Timestamp,
+    /// Visibility.
+    pub status: EventStatus,
+    /// When the event was created.
+    pub created_at: Timestamp,
+    /// When the event was last changed.
+    pub updated_at: Timestamp,
+    /// Incremented on every change.
+    pub version: i64,
+}
+
+impl EventSummary {
+    /// The full event, given its content.
+    pub fn with_content(self, content: String) -> Event {
+        Event {
+            id: self.id,
+            organization_id: self.organization_id,
+            slug: self.slug,
+            title: self.title,
+            description: self.description,
+            venue: self.venue,
+            starts_at: self.starts_at,
+            ends_at: self.ends_at,
+            status: self.status,
+            content,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+            version: self.version,
+        }
+    }
+}
+
+impl From<Event> for EventSummary {
+    fn from(event: Event) -> Self {
+        Self {
+            id: event.id,
+            organization_id: event.organization_id,
+            slug: event.slug,
+            title: event.title,
+            description: event.description,
+            venue: event.venue,
+            starts_at: event.starts_at,
+            ends_at: event.ends_at,
+            status: event.status,
+            created_at: event.created_at,
+            updated_at: event.updated_at,
+            version: event.version,
+        }
     }
 }
 

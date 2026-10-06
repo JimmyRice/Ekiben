@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use kippu_domain::admission::WaitingRoom;
-use kippu_domain::catalog::{Event, Inventory, Sale, TicketType};
+use kippu_domain::catalog::{Event, EventSummary, Inventory, Sale, TicketType};
 use kippu_domain::{AccountId, EventId, OrganizationId, SaleId, TicketTypeId, Timestamp};
 
 use crate::{PageRequest, StoreResult};
@@ -26,8 +26,12 @@ pub trait CatalogStore {
     async fn update_event(&self, event: &Event, expected_version: i64) -> StoreResult<()>;
     /// Looks an event up by id.
     async fn event(&self, id: EventId) -> StoreResult<Option<Event>>;
-    /// Lists events in id order.
-    async fn list_events(&self, filter: EventFilter, page: PageRequest) -> StoreResult<Vec<Event>>;
+    /// Lists events in id order, without their content.
+    async fn list_events(
+        &self,
+        filter: EventFilter,
+        page: PageRequest,
+    ) -> StoreResult<Vec<EventSummary>>;
 
     /// Creates a sale.
     async fn insert_sale(&self, sale: &Sale) -> StoreResult<()>;

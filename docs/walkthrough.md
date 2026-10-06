@@ -94,7 +94,9 @@ Content-Type: application/json
 { "email": "staff@example.org", "password": "correct horse battery" }
 ```
 
-`access_token.token` is `{{organizer_token}}`. Create the event — it starts as a draft:
+`access_token.token` is `{{organizer_token}}`. Create the event — it starts as a draft.
+`content` is the event's page in any form your clients render (HTML here; Markdown or your own
+JSON work as well); Kippu stores it as is, and listings of events leave it out:
 
 ```http
 POST /v1/organizations/{{organization_id}}/events HTTP/1.1
@@ -107,7 +109,8 @@ Content-Type: application/json
   "title": "Comic Market 110",
   "venue": "Tokyo Big Sight",
   "starts_at": "2027-08-16T10:00:00+09:00",
-  "ends_at": "2027-08-17T16:00:00+09:00"
+  "ends_at": "2027-08-17T16:00:00+09:00",
+  "content": "<h1>Comic Market 110</h1><p>Two days at Tokyo Big Sight.</p>"
 }
 ```
 

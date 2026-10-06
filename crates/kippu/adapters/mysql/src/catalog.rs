@@ -1,18 +1,21 @@
 use async_trait::async_trait;
 use kippu_domain::admission::WaitingRoom;
-use kippu_domain::catalog::{Event, Inventory, Sale, TicketType};
+use kippu_domain::catalog::{Event, EventSummary, Inventory, Sale, TicketType};
 use kippu_domain::{AccountId, EventId, SaleId, TicketTypeId, Timestamp};
 use kippu_store::{CatalogStore, EventFilter, PageRequest, StoreError, StoreResult};
 use uuid::Uuid;
 
 use crate::convert::{
-    EventRow, InventoryRow, SaleRow, TicketTypeRow, all, event_status, extensions_json, json,
-    micros, optional,
+    EventRow, EventSummaryRow, InventoryRow, SaleRow, TicketTypeRow, all, event_status,
+    extensions_json, json, micros, optional,
 };
 use crate::{MySqlStore, error, unique};
 
+const EVENT_SUMMARY_COLUMNS: &str = "SELECT id, organization_id, slug, title, description, venue, \
+     starts_at, ends_at, status, created_at, updated_at, version FROM events";
+
 const EVENT_COLUMNS: &str = "SELECT id, organization_id, slug, title, description, venue, starts_at, \
-     ends_at, status, created_at, updated_at, version FROM events";
+     ends_at, status, created_at, updated_at, version, content FROM events";
 
 const SALE_COLUMNS: &str = "SELECT id, event_id, name, opens_at, closes_at, admission, \
      reservation_ttl_seconds, max_tickets_per_request, accepted_attestors, environment, \
@@ -36,8 +39,8 @@ impl CatalogStore for MySqlStore {
     async fn insert_event(&self, event: &Event) -> StoreResult<()> {
         sqlx::query(
             "INSERT INTO events (id, organization_id, slug, title, description, venue, starts_at,
-                                 ends_at, status, created_at, updated_at, version)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                 ends_at, status, created_at, updated_at, version, content)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(event.id.as_uuid())
         .bind(event.organization_id.as_uuid())
@@ -51,6 +54,7 @@ impl CatalogStore for MySqlStore {
         .bind(micros(event.created_at))
         .bind(micros(event.updated_at))
         .bind(event.version)
+        .bind(&event.content)
         .execute(&self.pool)
         .await
         .map_err(unique("slug"))?;
@@ -60,7 +64,8 @@ impl CatalogStore for MySqlStore {
     async fn update_event(&self, event: &Event, expected_version: i64) -> StoreResult<()> {
         let result = sqlx::query(
             "UPDATE events SET slug = ?, title = ?, description = ?, venue = ?, starts_at = ?,
-                               ends_at = ?, status = ?, updated_at = ?, version = ?
+                               ends_at = ?, status = ?, updated_at = ?, version = ?,
+                               content = ?
              WHERE id = ? AND version = ?",
         )
         .bind(event.slug.as_str())
@@ -72,6 +77,7 @@ impl CatalogStore for MySqlStore {
         .bind(event_status(event.status))
         .bind(micros(event.updated_at))
         .bind(event.version)
+        .bind(&event.content)
         .bind(event.id.as_uuid())
         .bind(expected_version)
         .execute(&self.pool)
@@ -91,9 +97,13 @@ impl CatalogStore for MySqlStore {
         optional(row)
     }
 
-    async fn list_events(&self, filter: EventFilter, page: PageRequest) -> StoreResult<Vec<Event>> {
-        let rows = sqlx::query_as::<_, EventRow>(sqlx::AssertSqlSafe(format!(
-            "{EVENT_COLUMNS}
+    async fn list_events(
+        &self,
+        filter: EventFilter,
+        page: PageRequest,
+    ) -> StoreResult<Vec<EventSummary>> {
+        let rows = sqlx::query_as::<_, EventSummaryRow>(sqlx::AssertSqlSafe(format!(
+            "{EVENT_SUMMARY_COLUMNS}
              WHERE (? IS NULL OR organization_id = ?)
                AND (? = 0 OR status IN ('published', 'cancelled'))
                AND (? IS NULL OR id > ?)

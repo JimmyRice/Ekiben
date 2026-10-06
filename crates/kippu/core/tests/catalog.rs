@@ -1,4 +1,4 @@
-//! Editing the catalog: partial updates with `PATCH` and optimistic concurrency.
+//! Editing the catalog: partial updates with `PATCH`, optimistic concurrency and event content.
 
 mod support;
 
@@ -153,4 +153,59 @@ async fn patch_is_documented_as_merge_patch() {
         );
         assert!(content["application/json"].is_object(), "{path}");
     }
+}
+
+#[tokio::test]
+async fn event_content_is_stored_as_is_and_left_out_of_listings() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let path = format!("/v1/events/{}", shop.event_id);
+    let event = app.call(Method::GET, &path, None, None).await.body;
+    assert_eq!(event["content"], "", "content defaults to empty");
+
+    let page = r#"{"blocks": [{"type": "hero", "text": "<b>駅弁</b>"}]}"#;
+    let patched = app
+        .call(
+            Method::PATCH,
+            &path,
+            Some(&shop.organizer),
+            Some(json!({ "version": event["version"], "content": page })),
+        )
+        .await;
+    assert_eq!(patched.status, StatusCode::OK, "{:?}", patched.body);
+    assert_eq!(
+        app.call(Method::GET, &path, None, None).await.body["content"],
+        page
+    );
+
+    let listed = app.call(Method::GET, "/v1/events", None, None).await.body;
+    let summary = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|summary| summary["id"] == event["id"])
+        .unwrap();
+    assert_eq!(summary["title"], event["title"]);
+    assert!(summary.get("content").is_none(), "{summary:?}");
+
+    let too_long = app
+        .call(
+            Method::PATCH,
+            &path,
+            Some(&shop.organizer),
+            Some(json!({
+                "version": patched.body["version"],
+                "content": "a".repeat(256 * 1024 + 1),
+            })),
+        )
+        .await;
+    assert_eq!(too_long.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        too_long.body["detail"]
+            .as_str()
+            .unwrap()
+            .contains("content"),
+        "{:?}",
+        too_long.body
+    );
 }
