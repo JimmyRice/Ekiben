@@ -6,10 +6,10 @@ deployments need different ones. Instead it has two building blocks, and you wri
 module that connects them to the provider of your choice:
 
 ```text
-app ─▶ your module ─▶ provider (Apple, WeChat, …) ─▶ your module
-                                                       │ knows who it is
-                       external::link_or_create ◀──────┘
-                       sessions::issue ─▶ ordinary Kippu access + refresh tokens
+app --> your module --> provider (Apple, WeChat, ...) --> your module
+                                                          |  knows who it is
+                       external::link_or_create <---------+
+                       sessions::issue --> ordinary Kippu access + refresh tokens
 ```
 
 After that the person is an ordinary Kippu user. Every API call uses Kippu's own tokens, so

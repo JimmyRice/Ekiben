@@ -16,18 +16,18 @@ called `Pinpon`.
 ## Workspace layout
 
 ```text
-src/main.rs                     the `kippu` binary — about ten lines of wiring
+src/main.rs                     the `kippu` binary - about ten lines of wiring
 spec/                           language-neutral protocols and test vectors
-docs/                           walkthrough (empty database → verified ticket), external sign-in
+docs/                           walkthrough (empty database -> verified ticket), external sign-in
 crates/
-├── kippu/domain                kippu-domain        pure domain model, no I/O
-├── kippu/store                 kippu-store         storage ports + consistency contract
-├── kippu/core                  kippu-core          modules, auth, HTTP API, workers
-├── kippu/server                kippu-server        CLI, configuration sources, adapter wiring
-├── kippu/adapters/sqlite       kippu-store-sqlite  SQLite adapter
-├── kaisatsu                    kaisatsu            ticket protocol + verification (no_std)
-├── ffi/c                       kaisatsu-ffi        C ABI
-└── xtask                       xtask               `cargo xtask …` automation
+|-- kippu/domain                kippu-domain        pure domain model, no I/O
+|-- kippu/store                 kippu-store         storage ports + consistency contract
+|-- kippu/core                  kippu-core          modules, auth, HTTP API, workers
+|-- kippu/server                kippu-server        CLI, configuration sources, adapter wiring
+|-- kippu/adapters/sqlite       kippu-store-sqlite  SQLite adapter
+|-- kaisatsu                    kaisatsu            ticket protocol + verification (no_std)
+|-- ffi/c                       kaisatsu-ffi        C ABI
+`-- xtask                       xtask               `cargo xtask ...` automation
 ```
 
 ## Quickstart
@@ -60,13 +60,13 @@ buyer pays through an attestor, and `kippu verify` checks the ticket like a gate
 ## How a purchase works
 
 ```text
-buyer ─▶ waiting room ─▶ POST purchase-request (Idempotency-Key) ─▶ 202, poll Location
-                                   │ durable, queued
-                         worker ───┴─▶ reserve stock + quota in one transaction ─▶ Reserved
-buyer ─▶ checkout(attestor) ─▶ payment.requested ─▶ your payment service charges the buyer
-attestor ─▶ signed POST /v1/payment-attestations ─▶ one transaction: record payment, sell
-                                                   stock, sign tickets, emit tickets.issued
-gate ─▶ Kaisatsu verifies the QR offline with keys from /.well-known/kippu/ticket-keys
+buyer --> waiting room --> POST purchase-request (Idempotency-Key) --> 202, poll Location
+                                   |  durable, queued
+                         worker ---+--> reserve stock + quota in one transaction --> Reserved
+buyer --> checkout(attestor) --> payment.requested --> your payment service charges the buyer
+attestor --> signed POST /v1/payment-attestations --> one transaction: record payment, sell
+                                                      stock, sign tickets, emit tickets.issued
+gate --> Kaisatsu verifies the QR offline with keys from /.well-known/kippu/ticket-keys
 ```
 
 - No overselling: inventory changes are conditional updates guarded by a database `CHECK`.
