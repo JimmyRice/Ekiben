@@ -62,6 +62,7 @@ fn attestor_key(
 }
 
 /// Registers an attestor: a service trusted to report payments.
+#[tracing::instrument(skip_all)]
 pub async fn create_attestor(
     state: &AppState,
     principal: &Principal,
@@ -92,6 +93,7 @@ pub async fn create_attestor(
 }
 
 /// Every attestor, including the built-in `free` and `manual` ones.
+#[tracing::instrument(skip_all)]
 pub async fn attestors(
     state: &AppState,
     principal: &Principal,
@@ -105,6 +107,7 @@ pub async fn attestors(
 }
 
 /// Revokes or restores an attestor. Takes effect immediately on every instance.
+#[tracing::instrument(skip_all)]
 pub async fn set_attestor_revoked(
     state: &AppState,
     principal: &Principal,
@@ -128,6 +131,7 @@ pub async fn set_attestor_revoked(
 }
 
 /// Registers another signing key for an attestor, e.g. to rotate keys.
+#[tracing::instrument(skip_all)]
 pub async fn add_attestor_key(
     state: &AppState,
     principal: &Principal,
@@ -155,6 +159,7 @@ pub async fn add_attestor_key(
 }
 
 /// Revokes or restores one signing key.
+#[tracing::instrument(skip_all)]
 pub async fn set_attestor_key_revoked(
     state: &AppState,
     principal: &Principal,

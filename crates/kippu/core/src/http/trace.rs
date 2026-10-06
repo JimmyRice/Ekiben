@@ -5,6 +5,10 @@
 //! the request or run that caused them, so a log layer can render each as one unit (see
 //! `kippu-server`'s log formats).
 //!
+//! Service functions are instrumented with `#[tracing::instrument(skip_all)]`; the spans they
+//! open nest inside the request or task run and make up its call chain: log layers show which
+//! steps ran, how long each took and where warnings and errors came from.
+//!
 //! The spans carry only the fields listed here. Headers such as `Authorization` and request
 //! bodies are never recorded.
 
@@ -26,8 +30,9 @@ use crate::error::ApiError;
 ///
 /// Fields: `method`, `path` (without the query), `request_id`, `client` (the peer address,
 /// when known), `idempotency_key`, and — recorded as the request progresses — `caller`
-/// ([`Principal::actor`] plus the role, or `attestor:<id>`), `problem` (the problem kind and detail of an error
-/// response), `status` and `latency_us`.
+/// ([`Principal::actor`] plus the role, or `attestor:<id>`), `problem` (the problem kind and
+/// detail of an error response), `origin` (where that problem was raised, see
+/// [`ApiError::origin`]), `status` and `latency_us`.
 pub const REQUEST_SPAN: &str = "request";
 
 /// Name of the span each run of a background task runs in.
@@ -56,6 +61,7 @@ pub(crate) fn make_span(request: &Request) -> Span {
         idempotency_key = header(IDEMPOTENCY_KEY),
         caller = Empty,
         problem = Empty,
+        origin = Empty,
         status = Empty,
         latency_us = Empty,
     )
@@ -88,10 +94,12 @@ pub(crate) fn record_attestor(id: AttestorId) {
 
 /// Records an error response's problem, on the current request's span.
 pub(crate) fn record_problem(error: &ApiError) {
-    Span::current().record(
+    let span = Span::current();
+    span.record(
         "problem",
         display(format_args!("{}: {}", error.kind(), error.detail())),
     );
+    span.record("origin", error.origin());
 }
 
 /// A background task's span. `outcome` is recorded with [`record_outcome`].

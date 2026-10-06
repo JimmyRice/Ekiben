@@ -64,6 +64,7 @@ impl From<TicketTypeSettings> for TicketTypeChanges {
 }
 
 /// A ticket type the caller may edit.
+#[tracing::instrument(skip_all)]
 pub async fn writable_ticket_type(
     state: &AppState,
     principal: &Principal,
@@ -79,6 +80,7 @@ pub async fn writable_ticket_type(
 }
 
 /// Adds a ticket type, and its inventory, to a sale.
+#[tracing::instrument(skip_all)]
 pub async fn create_ticket_type(
     state: &AppState,
     principal: &Principal,
@@ -107,6 +109,7 @@ pub async fn create_ticket_type(
 
 /// Edits a ticket type. Capacity can drop no lower than what is held and sold.
 /// `expected_version` is the version the caller read.
+#[tracing::instrument(skip_all)]
 pub async fn update_ticket_type(
     state: &AppState,
     principal: &Principal,

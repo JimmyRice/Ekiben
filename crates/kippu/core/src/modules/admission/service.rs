@@ -45,6 +45,7 @@ fn admission_required() -> ApiError {
 }
 
 /// Joins a sale's waiting room.
+#[tracing::instrument(skip_all)]
 pub async fn join_waiting_room(
     state: &AppState,
     principal: &Principal,
@@ -69,6 +70,7 @@ pub async fn join_waiting_room(
 
 /// Asks whether it is the caller's turn to buy, presenting the queue ticket from joining.
 /// Sales without a waiting room admit everyone.
+#[tracing::instrument(skip_all)]
 pub async fn request_admission(
     state: &AppState,
     principal: &Principal,
@@ -99,6 +101,7 @@ pub async fn request_admission(
 
 /// Background task: advances every waiting room by one batch, unless its sale's purchase
 /// backlog is already large. Safe on many instances: the advance is a compare-and-set.
+#[tracing::instrument(skip_all)]
 pub(crate) async fn admit_batches(state: AppState) -> Result<Progress, BoxError> {
     let store = state.store();
     for sale_id in store.pending_waiting_rooms().await? {

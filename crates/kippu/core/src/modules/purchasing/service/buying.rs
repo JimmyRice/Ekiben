@@ -39,6 +39,7 @@ pub struct Submitted {
 
 /// Asks to buy tickets: records a queued purchase request for a worker to fulfil or reject.
 /// Submitting the same key again returns the same request.
+#[tracing::instrument(skip_all)]
 pub async fn submit_purchase(
     state: &AppState,
     principal: &Principal,
@@ -87,6 +88,7 @@ pub async fn submit_purchase(
 
 /// A purchase request of the caller's: `queued`, `reserved` or `rejected`. `receipt` is the
 /// one it was submitted with, if any.
+#[tracing::instrument(skip_all)]
 pub async fn purchase_request(
     state: &AppState,
     principal: &Principal,
@@ -116,6 +118,7 @@ pub async fn purchase_request(
 }
 
 /// The caller's reservations, newest first.
+#[tracing::instrument(skip_all)]
 pub async fn reservations(state: &AppState, principal: &Principal) -> ApiResult<Vec<Reservation>> {
     let account = principal.require_account()?;
     state.authorize(principal, RESERVATIONS_READ, Scope::Account(account))?;
@@ -123,6 +126,7 @@ pub async fn reservations(state: &AppState, principal: &Principal) -> ApiResult<
 }
 
 /// A reservation the caller may see: their own (admins see all). Others look missing.
+#[tracing::instrument(skip_all)]
 pub async fn reservation(
     state: &AppState,
     principal: &Principal,
@@ -145,6 +149,7 @@ pub async fn reservation(
 }
 
 /// The buyer gives a reservation up, releasing its tickets. Idempotent.
+#[tracing::instrument(skip_all)]
 pub async fn cancel(
     state: &AppState,
     principal: &Principal,
@@ -171,6 +176,7 @@ pub async fn cancel(
 
 /// The buyer chooses how to pay; the attestor is told through `payment.requested`. Free
 /// reservations are settled on the spot and need no attestor.
+#[tracing::instrument(skip_all)]
 pub async fn checkout(
     state: &AppState,
     principal: &Principal,

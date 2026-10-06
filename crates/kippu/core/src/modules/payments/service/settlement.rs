@@ -97,6 +97,7 @@ pub(crate) fn holds(reservation: &Reservation, ticket_types: &[TicketType]) -> V
 
 /// A reservation an attestor may charge for: one of a sale that accepts it. Others look
 /// missing.
+#[tracing::instrument(skip_all)]
 pub async fn reservation_for_attestor(
     state: &AppState,
     attestor: &Attestor,
@@ -121,6 +122,7 @@ pub async fn reservation_for_attestor(
 
 /// Records what an attestor reports: a payment, or a refund Kippu asked for. Safe to retry:
 /// a report is recorded once per `attestation_id`, and every delivery gets the same answer.
+#[tracing::instrument(skip_all)]
 pub async fn record_attestation(
     state: &AppState,
     attestor: &Attestor,
@@ -135,6 +137,7 @@ pub async fn record_attestation(
 }
 
 /// Records a payment an organizer took in person, through the built-in `manual` attestor.
+#[tracing::instrument(skip_all)]
 pub async fn manual_payment(
     state: &AppState,
     principal: &Principal,
@@ -177,6 +180,7 @@ pub async fn manual_payment(
 /// Records an attested payment and settles the reservation it pays for. Idempotent: the same
 /// `(attestor, attestation_id)` delivered any number of times settles once and always yields
 /// the same answer.
+#[tracing::instrument(skip_all)]
 pub async fn settle(
     state: &AppState,
     attestor: &Attestor,
@@ -371,6 +375,7 @@ async fn replay(state: &AppState, attestation: PaymentAttestation) -> ApiResult<
 }
 
 /// The attestor confirms it returned a payment that required a refund. Idempotent.
+#[tracing::instrument(skip_all)]
 pub async fn confirm_refund(
     state: &AppState,
     attestor: AttestorId,

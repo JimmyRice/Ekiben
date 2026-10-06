@@ -34,6 +34,7 @@ fn resubmitted(existing: PurchaseRequest, basket: &Basket) -> ApiResult<Purchase
 /// With an inbox the request is accepted into it and persisted by a worker later, unless the
 /// database already has it. A retry while the first attempt is still in the inbox is
 /// dropped by the inbox's deduplication; if its basket differed, the first one wins.
+#[tracing::instrument(skip_all)]
 pub(super) async fn submit(
     state: &AppState,
     account: AccountId,
@@ -134,6 +135,7 @@ async fn reject(
 
 /// Processes one queued request: reserves its tickets or rejects it, in one transaction.
 /// Processing a request that is no longer queued does nothing, so redelivery is harmless.
+#[tracing::instrument(skip_all)]
 pub(crate) async fn process(state: &AppState, request: &PurchaseRequest) -> ApiResult<()> {
     let store = state.store();
     let sale = store
@@ -251,6 +253,7 @@ fn by_sale(requests: Vec<PurchaseRequest>) -> Vec<Vec<PurchaseRequest>> {
 /// Requests of one sale compete for the same stock, so they are always processed in the order
 /// they were accepted. When the store allows concurrent writers, up to
 /// `workers.purchase_concurrency` sales are processed at once.
+#[tracing::instrument(skip_all)]
 pub(crate) async fn process_batch(state: AppState) -> Result<Progress, BoxError> {
     let workers = &state.config().workers;
     let now = state.now();
@@ -305,6 +308,7 @@ pub(super) async fn release(tx: &mut dyn StoreTx, reservation: &Reservation) -> 
 }
 
 /// Expires one overdue reservation. Does nothing if it was paid or released meanwhile.
+#[tracing::instrument(skip_all)]
 pub(crate) async fn expire(state: &AppState, id: ReservationId) -> ApiResult<()> {
     let now = state.now();
     let mut tx = state.store().begin().await?;
@@ -329,6 +333,7 @@ pub(crate) async fn expire(state: &AppState, id: ReservationId) -> ApiResult<()>
 }
 
 /// Background task: expires a batch of overdue reservations.
+#[tracing::instrument(skip_all)]
 pub(crate) async fn expire_batch(state: AppState) -> Result<Progress, BoxError> {
     const BATCH: u32 = 100;
     let overdue = state

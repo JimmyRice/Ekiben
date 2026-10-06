@@ -21,6 +21,7 @@ pub struct NewOrganization {
 }
 
 /// Creates an account of a role below the caller's own.
+#[tracing::instrument(skip_all)]
 pub async fn create_account(
     state: &AppState,
     principal: &Principal,
@@ -37,6 +38,7 @@ pub async fn create_account(
 }
 
 /// Lists accounts.
+#[tracing::instrument(skip_all)]
 pub async fn accounts(
     state: &AppState,
     principal: &Principal,
@@ -47,6 +49,7 @@ pub async fn accounts(
 }
 
 /// Deletes an account of a role below the caller's own.
+#[tracing::instrument(skip_all)]
 pub async fn delete_account(
     state: &AppState,
     principal: &Principal,
@@ -66,6 +69,7 @@ pub async fn delete_account(
 }
 
 /// Creates an organization.
+#[tracing::instrument(skip_all)]
 pub async fn create_organization(
     state: &AppState,
     principal: &Principal,
@@ -87,6 +91,7 @@ pub async fn create_organization(
 }
 
 /// Lists organizations.
+#[tracing::instrument(skip_all)]
 pub async fn organizations(
     state: &AppState,
     principal: &Principal,
@@ -97,6 +102,7 @@ pub async fn organizations(
 }
 
 /// Makes an account a member of an organization.
+#[tracing::instrument(skip_all)]
 pub async fn add_member(
     state: &AppState,
     principal: &Principal,
@@ -128,6 +134,7 @@ pub async fn add_member(
 }
 
 /// Removes an account from an organization.
+#[tracing::instrument(skip_all)]
 pub async fn remove_member(
     state: &AppState,
     principal: &Principal,
@@ -149,6 +156,7 @@ pub async fn remove_member(
 }
 
 /// The most recent audit log entries, newest first.
+#[tracing::instrument(skip_all)]
 pub async fn audit_log(
     state: &AppState,
     principal: &Principal,

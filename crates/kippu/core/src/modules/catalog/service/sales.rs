@@ -87,6 +87,7 @@ pub struct TicketTypeAvailability {
 }
 
 /// A sale whose event the caller may see.
+#[tracing::instrument(skip_all)]
 pub async fn visible_sale(
     state: &AppState,
     principal: Option<&Principal>,
@@ -102,6 +103,7 @@ pub async fn visible_sale(
 }
 
 /// A sale the caller may edit.
+#[tracing::instrument(skip_all)]
 pub async fn writable_sale(
     state: &AppState,
     principal: &Principal,
@@ -134,6 +136,7 @@ async fn offer(state: &AppState, sale: Sale) -> ApiResult<SaleOffer> {
 }
 
 /// The sales of an event the caller may see, with availability.
+#[tracing::instrument(skip_all)]
 pub async fn event_sales(
     state: &AppState,
     principal: Option<&Principal>,
@@ -148,6 +151,7 @@ pub async fn event_sales(
 }
 
 /// A sale the caller may see, with its ticket types and availability.
+#[tracing::instrument(skip_all)]
 pub async fn sale_offer(
     state: &AppState,
     principal: Option<&Principal>,
@@ -158,6 +162,7 @@ pub async fn sale_offer(
 }
 
 /// Creates a sale for an event.
+#[tracing::instrument(skip_all)]
 pub async fn create_sale(
     state: &AppState,
     principal: &Principal,
@@ -185,6 +190,7 @@ pub async fn create_sale(
 }
 
 /// Edits a sale. `expected_version` is the version the caller read.
+#[tracing::instrument(skip_all)]
 pub async fn update_sale(
     state: &AppState,
     principal: &Principal,

@@ -96,6 +96,7 @@ impl AppState {
     }
 
     /// Fails with 403 unless `principal` may perform `permission` within `scope`.
+    #[track_caller]
     pub fn authorize(
         &self,
         principal: &Principal,

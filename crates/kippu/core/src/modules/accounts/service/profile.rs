@@ -36,6 +36,7 @@ fn own_account(state: &AppState, principal: &Principal) -> ApiResult<AccountId> 
 }
 
 /// Who the caller is.
+#[tracing::instrument(skip_all)]
 pub async fn whoami(state: &AppState, principal: &Principal) -> ApiResult<Whoami> {
     match principal {
         Principal::Root { key_name } => Ok(Whoami::Root {
@@ -58,6 +59,7 @@ pub async fn whoami(state: &AppState, principal: &Principal) -> ApiResult<Whoami
 
 /// Sets the caller's email address, e.g. after signing up through a provider that shared
 /// none.
+#[tracing::instrument(skip_all)]
 pub async fn set_email(
     state: &AppState,
     principal: &Principal,
@@ -77,6 +79,7 @@ pub async fn set_email(
 
 /// Sets or changes an account's password. Changing one requires the current password;
 /// accounts created through an external sign-in set their first one without.
+#[tracing::instrument(skip_all)]
 pub async fn set_password(
     state: &AppState,
     account: AccountId,
@@ -106,6 +109,7 @@ pub async fn set_password(
 }
 
 /// Sets or changes the caller's own password, and records that in the audit log.
+#[tracing::instrument(skip_all)]
 pub async fn change_password(
     state: &AppState,
     principal: &Principal,
@@ -120,6 +124,7 @@ pub async fn change_password(
 }
 
 /// The external sign-ins linked to the caller's account.
+#[tracing::instrument(skip_all)]
 pub async fn identities(state: &AppState, principal: &Principal) -> ApiResult<Vec<Identity>> {
     let account = own_account(state, principal)?;
     Ok(state.store().identities(account).await?)
@@ -127,6 +132,7 @@ pub async fn identities(state: &AppState, principal: &Principal) -> ApiResult<Ve
 
 /// Unlinks one of the caller's external sign-ins. An account always keeps a way to sign in:
 /// the last one cannot be unlinked until a password is set.
+#[tracing::instrument(skip_all)]
 pub async fn unlink_identity(
     state: &AppState,
     principal: &Principal,

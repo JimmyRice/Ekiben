@@ -28,10 +28,20 @@ pub struct ApiError {
     kind: &'static str,
     detail: Cow<'static, str>,
     source: Option<BoxError>,
+    origin: Origin,
+}
+
+/// Where an [`ApiError`] was raised: the source line and the innermost step (an instrumented
+/// service function) that was running. Logged, never returned to clients.
+#[derive(Debug, Clone, Copy)]
+struct Origin {
+    location: &'static std::panic::Location<'static>,
+    step: Option<&'static str>,
 }
 
 impl ApiError {
     /// An error with a custom problem kind.
+    #[track_caller]
     pub fn new(
         status: StatusCode,
         kind: &'static str,
@@ -42,15 +52,29 @@ impl ApiError {
             kind,
             detail: detail.into(),
             source: None,
+            origin: Origin {
+                location: std::panic::Location::caller(),
+                step: tracing::Span::current()
+                    .metadata()
+                    .map(tracing::Metadata::name)
+                    .filter(|name| {
+                        !matches!(
+                            *name,
+                            crate::http::trace::REQUEST_SPAN | crate::http::trace::TASK_SPAN
+                        )
+                    }),
+            },
         }
     }
 
     /// 401: no or invalid credentials.
+    #[track_caller]
     pub fn unauthenticated(detail: impl Into<Cow<'static, str>>) -> Self {
         Self::new(StatusCode::UNAUTHORIZED, "unauthenticated", detail)
     }
 
     /// 403: authenticated, but not allowed.
+    #[track_caller]
     pub fn forbidden() -> Self {
         Self::new(
             StatusCode::FORBIDDEN,
@@ -60,6 +84,7 @@ impl ApiError {
     }
 
     /// 404: `what` does not exist (or is not visible to the caller).
+    #[track_caller]
     pub fn not_found(what: &'static str) -> Self {
         Self::new(
             StatusCode::NOT_FOUND,
@@ -69,6 +94,7 @@ impl ApiError {
     }
 
     /// 409: the request conflicts with the current state of `what`.
+    #[track_caller]
     pub fn conflict(what: &'static str) -> Self {
         Self::new(
             StatusCode::CONFLICT,
@@ -78,6 +104,7 @@ impl ApiError {
     }
 
     /// 413: the request body is larger than `server.max_body_bytes`.
+    #[track_caller]
     pub fn payload_too_large() -> Self {
         Self::new(
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -87,6 +114,7 @@ impl ApiError {
     }
 
     /// 412: the record changed since the caller read it.
+    #[track_caller]
     pub fn stale_version() -> Self {
         Self::new(
             StatusCode::PRECONDITION_FAILED,
@@ -96,6 +124,7 @@ impl ApiError {
     }
 
     /// 503: a dependency is temporarily unavailable. Safe to retry.
+    #[track_caller]
     pub fn unavailable(source: impl Into<BoxError>) -> Self {
         Self::new(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -106,6 +135,7 @@ impl ApiError {
     }
 
     /// 500: a bug or an unexpected failure. Details are logged, not returned.
+    #[track_caller]
     pub fn internal(source: impl Into<BoxError>) -> Self {
         Self::new(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -132,6 +162,15 @@ impl ApiError {
         self.kind
     }
 
+    /// Where the error was raised, for logs: `step @ file:line`, or just `file:line`.
+    pub fn origin(&self) -> String {
+        let Origin { location, step } = self.origin;
+        match step {
+            Some(step) => format!("{step} @ {}:{}", location.file(), location.line()),
+            None => format!("{}:{}", location.file(), location.line()),
+        }
+    }
+
     /// The human-readable explanation.
     pub fn detail(&self) -> &str {
         &self.detail
@@ -151,6 +190,7 @@ impl std::error::Error for ApiError {
 }
 
 impl From<ValidationError> for ApiError {
+    #[track_caller]
     fn from(error: ValidationError) -> Self {
         Self::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -161,6 +201,7 @@ impl From<ValidationError> for ApiError {
 }
 
 impl From<IllegalTransition> for ApiError {
+    #[track_caller]
     fn from(error: IllegalTransition) -> Self {
         Self::new(
             StatusCode::CONFLICT,
@@ -171,6 +212,7 @@ impl From<IllegalTransition> for ApiError {
 }
 
 impl From<StoreError> for ApiError {
+    #[track_caller]
     fn from(error: StoreError) -> Self {
         match error {
             StoreError::Conflict("version") => Self::stale_version(),
@@ -200,7 +242,7 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         crate::http::trace::record_problem(&self);
         if self.status.is_server_error() {
-            tracing::error!(error = %self, source = ?self.source, "request failed");
+            tracing::error!(error = %self, source = ?self.source, origin = %self.origin(), "request failed");
         }
         let problem = Problem {
             kind: format!("urn:kippu:problem:{}", self.kind),

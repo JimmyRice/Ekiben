@@ -88,6 +88,7 @@ async fn image_of(state: &AppState, event_id: EventId, image_id: ImageId) -> Api
 /// `body` reads the bytes. It is awaited only once the caller is known to be allowed, so
 /// strangers cannot make an instance buffer uploads; the bytes must really be an image of the
 /// declared format.
+#[tracing::instrument(skip_all)]
 pub async fn upload_image(
     state: &AppState,
     principal: &Principal,
@@ -160,6 +161,7 @@ pub async fn upload_image(
 }
 
 /// The images of an event the caller may see, in gallery order.
+#[tracing::instrument(skip_all)]
 pub async fn event_images(
     state: &AppState,
     principal: Option<&Principal>,
@@ -175,6 +177,7 @@ pub async fn event_images(
 }
 
 /// An image of an event the caller may see: where it is served, or its bytes.
+#[tracing::instrument(skip_all)]
 pub async fn image_content(
     state: &AppState,
     principal: Option<&Principal>,
@@ -206,6 +209,7 @@ pub async fn image_content(
 }
 
 /// Deletes an image of an event the caller may edit.
+#[tracing::instrument(skip_all)]
 pub async fn delete_image(
     state: &AppState,
     principal: &Principal,
@@ -224,6 +228,7 @@ pub async fn delete_image(
 }
 
 /// Puts an event's images in a new order: `order` lists every image exactly once.
+#[tracing::instrument(skip_all)]
 pub async fn order_images(
     state: &AppState,
     principal: &Principal,

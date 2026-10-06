@@ -32,6 +32,7 @@ pub fn gate_keys(state: &AppState) -> GateKeys {
 }
 
 /// The caller's tickets, newest first.
+#[tracing::instrument(skip_all)]
 pub async fn tickets(state: &AppState, principal: &Principal) -> ApiResult<Vec<Ticket>> {
     let account = principal.require_account()?;
     state.authorize(principal, TICKETS_READ, Scope::Account(account))?;
@@ -39,6 +40,7 @@ pub async fn tickets(state: &AppState, principal: &Principal) -> ApiResult<Vec<T
 }
 
 /// A ticket of the caller's. Other people's tickets are reported as missing.
+#[tracing::instrument(skip_all)]
 pub async fn ticket(state: &AppState, principal: &Principal, id: TicketId) -> ApiResult<Ticket> {
     let ticket = state
         .store()

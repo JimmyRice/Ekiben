@@ -6,10 +6,14 @@
 //! interleave:
 //!
 //! - `pretty`: a block per request, from arrival to response, with a blank line after it.
-//!   Task runs get a small block too, unless they found nothing to do.
-//! - `compact`: one line per request.
-//! - `json`: one object per line and per event, tagged with `request_id` (or `task`), plus a
-//!   `request finished` line per request carrying its status and latency.
+//!   Task runs get a small block too, unless they found nothing to do. Besides the events, a
+//!   block shows the call chain: every service function the request went through (`▸`, nested
+//!   by call, with its duration), and for a failed request where the problem was raised
+//!   (`origin`). Warnings and errors name the source line that logged them.
+//! - `compact`: one line per request; failed requests add the `trace` of steps they ran.
+//! - `json`: one object per line and per event, tagged with `request_id` (or `task`) and the
+//!   `step` it happened in, plus a `request finished` line per request carrying its status,
+//!   latency and `origin`.
 //!
 //! Pretty and compact output show a request once it is finished: a stuck request shows up when
 //! the request timeout ends it with 408.
@@ -17,7 +21,7 @@
 use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::io::{IsTerminal, Write as _};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::http::StatusCode;
 use kippu_core::http::trace::{REQUEST_SPAN, TASK_SPAN};
@@ -78,7 +82,48 @@ struct Unit {
     kind: UnitKind,
     started: SystemTime,
     fields: Fields,
-    events: Vec<Entry>,
+    items: Vec<Item>,
+}
+
+/// A line of a block, in the order it happened.
+enum Item {
+    /// A service function that ran inside the request or task run.
+    Step(Step),
+    Event(Entry),
+}
+
+/// One step of the call chain: an instrumented function's span.
+struct Step {
+    at: SystemTime,
+    depth: usize,
+    label: String,
+    /// Filled in when the span closes.
+    elapsed: Option<Duration>,
+}
+
+/// Marks a span nested in a unit; kept in the span's extensions.
+struct StepMark {
+    /// Position in the unit's items, unless the format shows no steps.
+    index: Option<usize>,
+    label: String,
+    started: Instant,
+}
+
+/// The module and function of a step, e.g. `purchasing::buying::submit_purchase`.
+fn step_label(target: &str, name: &str) -> String {
+    let module = target
+        .split_once("modules::")
+        .map_or(target, |(_, rest)| rest)
+        .split("::")
+        .filter(|part| *part != "service")
+        .collect::<Vec<_>>()
+        .join("::");
+    let module = module.rsplit("::").take(2).collect::<Vec<_>>();
+    match module.as_slice() {
+        [last, first] => format!("{first}::{last}::{name}"),
+        [only] => format!("{only}::{name}"),
+        _ => name.to_owned(),
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -92,6 +137,10 @@ struct Entry {
     at: SystemTime,
     level: Level,
     target: String,
+    /// Source file and line of the logging call.
+    location: Option<String>,
+    /// How many steps deep the event happened.
+    depth: usize,
     message: String,
     fields: Fields,
 }
@@ -183,19 +232,22 @@ where
     W: for<'writer> MakeWriter<'writer> + 'static,
 {
     fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
+        let Some(span) = ctx.span(id) else { return };
         let kind = match attrs.metadata().name() {
             REQUEST_SPAN => UnitKind::Request,
             TASK_SPAN => UnitKind::Task,
-            _ => return,
+            name => {
+                self.enter_step(&span, name, attrs.metadata().target());
+                return;
+            }
         };
-        let Some(span) = ctx.span(id) else { return };
         let mut collector = Collector::default();
         attrs.record(&mut collector);
         span.extensions_mut().insert(Unit {
             kind,
             started: SystemTime::now(),
             fields: collector.fields,
-            events: Vec::new(),
+            items: Vec::new(),
         });
     }
 
@@ -219,14 +271,30 @@ where
             at: SystemTime::now(),
             level: *event.metadata().level(),
             target: event.metadata().target().to_owned(),
+            location: event
+                .metadata()
+                .file()
+                .zip(event.metadata().line())
+                .map(|(file, line)| format!("{file}:{line}")),
+            depth: 0,
             message: collector.message.unwrap_or_default(),
             fields: collector.fields,
         };
-        let unit = ctx.event_scope(event).and_then(|scope| {
-            scope
-                .into_iter()
-                .find(|span| span.extensions().get::<Unit>().is_some())
-        });
+        let mut entry = entry;
+        let mut step = None;
+        let mut unit = None;
+        if let Some(scope) = ctx.event_scope(event) {
+            for span in scope {
+                if span.extensions().get::<Unit>().is_some() {
+                    unit = Some(span);
+                    break;
+                }
+                if let Some(mark) = span.extensions().get::<StepMark>() {
+                    step.get_or_insert_with(|| mark.label.clone());
+                    entry.depth += 1;
+                }
+            }
+        }
         match (self.format, unit) {
             (LogFormat::Json, unit) => {
                 let tag = unit.as_ref().and_then(|span| {
@@ -239,11 +307,11 @@ where
                         UnitKind::Task => ("task", unit.fields.get("task")?.into_owned()),
                     })
                 });
-                self.write(&json_event(&entry, tag));
+                self.write(&json_event(&entry, tag, step.as_deref()));
             }
             (_, Some(span)) => {
                 if let Some(unit) = span.extensions_mut().get_mut::<Unit>() {
-                    unit.events.push(entry);
+                    unit.items.push(Item::Event(entry));
                 }
             }
             (LogFormat::Pretty | LogFormat::Compact, None) => {
@@ -254,11 +322,16 @@ where
 
     fn on_close(&self, id: Id, ctx: Context<'_, S>) {
         let Some(span) = ctx.span(&id) else { return };
+        let mark = span.extensions_mut().remove::<StepMark>();
+        if let Some(mark) = mark {
+            Self::leave_step(&span, &mark);
+            return;
+        }
         let Some(unit) = span.extensions_mut().remove::<Unit>() else {
             return;
         };
         let idle = unit.kind == UnitKind::Task
-            && unit.events.is_empty()
+            && !unit.items.iter().any(|item| matches!(item, Item::Event(_)))
             && unit.fields.get("outcome").as_deref() != Some("failed");
         if idle {
             return;
@@ -270,6 +343,72 @@ where
             (LogFormat::Json, UnitKind::Task) => return,
         };
         self.write(&output);
+    }
+}
+
+impl<W> RequestLog<W> {
+    /// Adds a span nested in a request or task run to its call chain.
+    fn enter_step<S>(
+        &self,
+        span: &tracing_subscriber::registry::SpanRef<'_, S>,
+        name: &str,
+        target: &str,
+    ) where
+        S: Subscriber + for<'lookup> LookupSpan<'lookup>,
+    {
+        let mut depth = 0;
+        let mut unit = None;
+        for ancestor in span.scope().skip(1) {
+            if ancestor.extensions().get::<Unit>().is_some() {
+                unit = Some(ancestor);
+                break;
+            }
+            if ancestor.extensions().get::<StepMark>().is_some() {
+                depth += 1;
+            }
+        }
+        let Some(unit) = unit else { return };
+        let label = step_label(target, name);
+        let index = if self.format == LogFormat::Json {
+            None
+        } else {
+            unit.extensions_mut().get_mut::<Unit>().map(|unit| {
+                unit.items.push(Item::Step(Step {
+                    at: SystemTime::now(),
+                    depth,
+                    label: label.clone(),
+                    elapsed: None,
+                }));
+                unit.items.len() - 1
+            })
+        };
+        span.extensions_mut().insert(StepMark {
+            index,
+            label,
+            started: Instant::now(),
+        });
+    }
+
+    /// Records how long a step took.
+    fn leave_step<S>(span: &tracing_subscriber::registry::SpanRef<'_, S>, mark: &StepMark)
+    where
+        S: Subscriber + for<'lookup> LookupSpan<'lookup>,
+    {
+        let Some(index) = mark.index else { return };
+        let Some(unit) = span
+            .scope()
+            .skip(1)
+            .find(|ancestor| ancestor.extensions().get::<Unit>().is_some())
+        else {
+            return;
+        };
+        if let Some(Item::Step(step)) = unit
+            .extensions_mut()
+            .get_mut::<Unit>()
+            .and_then(|unit| unit.items.get_mut(index))
+        {
+            step.elapsed = Some(mark.started.elapsed());
+        }
     }
 }
 
@@ -317,6 +456,16 @@ impl<W: for<'writer> MakeWriter<'writer>> RequestLog<W> {
         )
     }
 
+    /// `  @ file:line` for warnings and errors: where the log call is.
+    fn origin_of(&self, entry: &Entry) -> String {
+        match &entry.location {
+            Some(location) if entry.level <= Level::WARN => {
+                self.paint("2", &format!("  @ {location}"))
+            }
+            _ => String::new(),
+        }
+    }
+
     /// A `pretty` block.
     fn block(&self, unit: &Unit) -> String {
         let fields = &unit.fields;
@@ -348,18 +497,44 @@ impl<W: for<'writer> MakeWriter<'writer>> RequestLog<W> {
                 row(label, &value);
             }
         }
-        for entry in &unit.events {
-            let _ = writeln!(
-                block,
-                "│  {} {}{}{}",
-                self.paint("2", &clock(entry.at)),
-                self.level(entry.level, LABEL - 13),
-                sanitize(&entry.message),
-                pairs(&entry.fields),
-            );
+        for item in &unit.items {
+            match item {
+                Item::Step(step) => {
+                    let head = format!(
+                        "│  {}      {}▸ {}",
+                        clock(step.at),
+                        "  ".repeat(step.depth),
+                        step.label
+                    );
+                    let elapsed = step.elapsed.map(format_latency).unwrap_or_default();
+                    let gap = WIDTH
+                        .saturating_sub(head.chars().count() + elapsed.chars().count())
+                        .max(1);
+                    let _ = writeln!(
+                        block,
+                        "{}",
+                        self.paint("2", &format!("{head}{}{elapsed}", " ".repeat(gap)))
+                    );
+                }
+                Item::Event(entry) => {
+                    let _ = writeln!(
+                        block,
+                        "│  {} {}{}{}{}{}",
+                        self.paint("2", &clock(entry.at)),
+                        self.level(entry.level, LABEL - 13),
+                        "  ".repeat(entry.depth),
+                        sanitize(&entry.message),
+                        pairs(&entry.fields),
+                        self.origin_of(entry),
+                    );
+                }
+            }
         }
         if let Some(problem) = fields.get("problem") {
             let _ = writeln!(block, "│  {:<LABEL$}{}", "problem", sanitize(&problem));
+        }
+        if let Some(origin) = fields.get("origin") {
+            let _ = writeln!(block, "│  {:<LABEL$}{}", "origin", sanitize(&origin));
         }
 
         let (outcome, color) = match unit.kind {
@@ -413,7 +588,7 @@ impl<W: for<'writer> MakeWriter<'writer>> RequestLog<W> {
                     format_latency(latency(unit)),
                     short(&field("request_id")),
                 );
-                for name in ["caller", "client", "idempotency_key", "problem"] {
+                for name in ["caller", "client", "idempotency_key", "problem", "origin"] {
                     if let Some(value) = fields.get(name) {
                         let _ = write!(line, " {name}={}", quote(&value));
                     }
@@ -423,7 +598,21 @@ impl<W: for<'writer> MakeWriter<'writer>> RequestLog<W> {
                 let _ = write!(line, "task {} {}", field("task"), field("outcome"));
             }
         }
-        for entry in &unit.events {
+        if status(fields).is_some_and(|status| status.as_u16() >= 400) {
+            let steps: Vec<&str> = unit
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    Item::Step(step) => Some(step.label.as_str()),
+                    Item::Event(_) => None,
+                })
+                .collect();
+            if !steps.is_empty() {
+                let _ = write!(line, " trace={}", quote(&steps.join(">")));
+            }
+        }
+        for item in &unit.items {
+            let Item::Event(entry) = item else { continue };
             let shown = unit.kind == UnitKind::Task || entry.level <= Level::WARN;
             if shown {
                 let _ = write!(
@@ -544,13 +733,19 @@ fn pairs(fields: &Fields) -> String {
     text
 }
 
-fn json_event(entry: &Entry, tag: Option<(&str, String)>) -> String {
+fn json_event(entry: &Entry, tag: Option<(&str, String)>, step: Option<&str>) -> String {
     let mut object = serde_json::Map::new();
     object.insert("timestamp".into(), timestamp(entry.at).into());
     object.insert("level".into(), entry.level.as_str().into());
     object.insert("target".into(), entry.target.clone().into());
     if let Some((key, value)) = tag {
         object.insert(key.into(), value.into());
+    }
+    if let Some(step) = step {
+        object.insert("step".into(), step.into());
+    }
+    if let (Some(location), true) = (&entry.location, entry.level <= Level::WARN) {
+        object.insert("at".into(), location.clone().into());
     }
     object.insert("message".into(), entry.message.clone().into());
     for (key, value) in &entry.fields.0 {
@@ -617,6 +812,7 @@ mod tests {
                 idempotency_key = "my-first-order",
                 caller = Empty,
                 problem = Empty,
+                origin = Empty,
                 status = Empty,
                 latency_us = Empty,
             );
@@ -626,6 +822,13 @@ mod tests {
                 other.in_scope(|| tracing::info!("interleaved"));
                 tracing::info!(id = "6ba1", "purchase request queued");
                 tracing::warn!("evil\nINFO forged line");
+                let step = tracing::info_span!("submit_purchase");
+                step.in_scope(|| {
+                    tracing::info_span!("visible_sale").in_scope(|| {
+                        tracing::warn!("sale is not open");
+                    });
+                });
+                tracing::Span::current().record("origin", "submit_purchase @ buying.rs:58");
             });
             request.record("status", 202_u16);
             request.record("latency_us", 4_800_u64);
@@ -675,6 +878,19 @@ mod tests {
         assert!(foot.starts_with("└─ 202 Accepted"), "{foot}");
         assert!(foot.ends_with("4.8 ms"), "{foot}");
         assert_eq!(foot.chars().count(), WIDTH, "{foot}");
+        assert!(
+            block.contains("▸ telemetry::tests::submit_purchase"),
+            "{block}"
+        );
+        assert!(
+            block.contains("  ▸ telemetry::tests::visible_sale"),
+            "{block}"
+        );
+        assert!(block.contains("    sale is not open"), "{block}");
+        assert!(
+            block.contains("origin            submit_purchase @ buying.rs:58"),
+            "{block}"
+        );
         assert!(
             !output.contains("expiry"),
             "idle task runs are not shown: {output}"

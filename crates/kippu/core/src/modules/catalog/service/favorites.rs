@@ -17,6 +17,7 @@ fn own_account(state: &AppState, principal: &Principal) -> ApiResult<AccountId> 
 }
 
 /// The caller's favourite events that they can still see.
+#[tracing::instrument(skip_all)]
 pub async fn favorites(state: &AppState, principal: &Principal) -> ApiResult<Vec<EventSummary>> {
     let account = own_account(state, principal)?;
     let mut events = Vec::new();
@@ -29,6 +30,7 @@ pub async fn favorites(state: &AppState, principal: &Principal) -> ApiResult<Vec
 }
 
 /// Marks an event the caller can see as a favourite.
+#[tracing::instrument(skip_all)]
 pub async fn add_favorite(
     state: &AppState,
     principal: &Principal,
@@ -44,6 +46,7 @@ pub async fn add_favorite(
 }
 
 /// Forgets a favourite.
+#[tracing::instrument(skip_all)]
 pub async fn remove_favorite(
     state: &AppState,
     principal: &Principal,

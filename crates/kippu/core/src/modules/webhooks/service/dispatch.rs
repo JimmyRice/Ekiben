@@ -103,6 +103,7 @@ fn truncate(mut error: String) -> String {
 
 /// Background task: claims one due webhook and delivers what it has not received yet.
 /// Reports more work after every claim, so all due webhooks are served before resting.
+#[tracing::instrument(skip_all)]
 pub(crate) async fn deliver(
     state: AppState,
     client: reqwest::Client,

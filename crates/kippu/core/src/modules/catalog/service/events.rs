@@ -64,6 +64,7 @@ pub fn can_write(state: &AppState, principal: Option<&Principal>, event: &Event)
 
 /// An event the caller may see: published or cancelled, or a draft they could edit.
 /// Hidden events are reported as missing rather than forbidden.
+#[tracing::instrument(skip_all)]
 pub async fn visible_event(
     state: &AppState,
     principal: Option<&Principal>,
@@ -82,6 +83,7 @@ pub async fn visible_event(
 }
 
 /// An event the caller may edit.
+#[tracing::instrument(skip_all)]
 pub async fn writable_event(
     state: &AppState,
     principal: &Principal,
@@ -97,6 +99,7 @@ pub async fn writable_event(
 }
 
 /// Published and cancelled events, for everyone.
+#[tracing::instrument(skip_all)]
 pub async fn public_events(state: &AppState, page: PageRequest) -> ApiResult<Vec<EventSummary>> {
     let filter = EventFilter {
         organization: None,
@@ -106,6 +109,7 @@ pub async fn public_events(state: &AppState, page: PageRequest) -> ApiResult<Vec
 }
 
 /// All events of an organization, drafts included, for its organizers.
+#[tracing::instrument(skip_all)]
 pub async fn organization_events(
     state: &AppState,
     principal: &Principal,
@@ -121,6 +125,7 @@ pub async fn organization_events(
 }
 
 /// Creates a draft event for an organization.
+#[tracing::instrument(skip_all)]
 pub async fn create_event(
     state: &AppState,
     principal: &Principal,
@@ -156,6 +161,7 @@ pub async fn create_event(
 
 /// Edits an event, including publishing or cancelling it. `expected_version` is the version
 /// the caller read; a different stored version fails with 412.
+#[tracing::instrument(skip_all)]
 pub async fn update_event(
     state: &AppState,
     principal: &Principal,

@@ -75,6 +75,7 @@ fn authorize(
 }
 
 /// A webhook the caller may manage. Others' webhooks are reported as missing.
+#[tracing::instrument(skip_all)]
 pub async fn webhook(state: &AppState, principal: &Principal, id: WebhookId) -> ApiResult<Webhook> {
     let webhook = state
         .store()
@@ -88,6 +89,7 @@ pub async fn webhook(state: &AppState, principal: &Principal, id: WebhookId) -> 
 
 /// Registers a webhook for an organization's events, or with `owner` `None` for every event
 /// of the deployment. It receives events from now on, not those recorded before.
+#[tracing::instrument(skip_all)]
 pub async fn create_webhook(
     state: &AppState,
     principal: &Principal,
@@ -127,6 +129,7 @@ pub async fn create_webhook(
 }
 
 /// The webhooks of an organization, or with `owner` `None` the global ones.
+#[tracing::instrument(skip_all)]
 pub async fn webhooks(
     state: &AppState,
     principal: &Principal,
@@ -138,6 +141,7 @@ pub async fn webhooks(
 
 /// Changes a webhook's URL or topics, or pauses and resumes it. `expected_version` is the
 /// version the caller read.
+#[tracing::instrument(skip_all)]
 pub async fn update_webhook(
     state: &AppState,
     principal: &Principal,
@@ -167,6 +171,7 @@ pub async fn update_webhook(
 }
 
 /// Deletes a webhook. Deliveries in flight may still arrive.
+#[tracing::instrument(skip_all)]
 pub async fn delete_webhook(
     state: &AppState,
     principal: &Principal,

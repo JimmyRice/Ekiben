@@ -10,11 +10,13 @@ use crate::auth::sessions::{self, SessionResponse};
 use crate::error::{ApiError, ApiResult};
 
 /// Signs a new `user` up.
+#[tracing::instrument(skip_all)]
 pub async fn register(state: &AppState, new: NewAccount) -> ApiResult<Account> {
     insert_account(state, new, Role::User).await
 }
 
 /// Signs in with an email and password, starting a session.
+#[tracing::instrument(skip_all)]
 pub async fn login(
     state: &AppState,
     email: String,

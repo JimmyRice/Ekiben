@@ -11,6 +11,7 @@ use crate::modules::payments::permissions::FEED_READ;
 
 /// The integration events after `after` addressed to `attestor` (`payment.requested`,
 /// `refund.required`), reading at most `limit` events of the outbox.
+#[tracing::instrument(skip_all)]
 pub async fn attestor_feed(
     state: &AppState,
     attestor: &Attestor,
@@ -29,6 +30,7 @@ pub async fn attestor_feed(
 }
 
 /// Every integration event after `after`, at most `limit` of them.
+#[tracing::instrument(skip_all)]
 pub async fn full_feed(
     state: &AppState,
     principal: &Principal,
