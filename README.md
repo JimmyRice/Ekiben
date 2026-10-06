@@ -72,6 +72,8 @@ gate ─▶ Kaisatsu verifies the QR offline with keys from /.well-known/kippu/t
 - No overselling: inventory changes are conditional updates guarded by a database `CHECK`.
 - Everything that may be retried is idempotent: purchases (id derived from the key), payment
   attestations (unique per attestor), queue redelivery, expiry.
+- Integrators get events pushed as signed webhooks, in order and at least once — see
+  [`spec/webhook-protocol.md`](spec/webhook-protocol.md) — or read them as a feed.
 - Money is never taken without tickets: a payment that cannot be used ends in an explicit
   `refund_required` that the attestor acts on. See [`spec/attestor-protocol.md`](spec/attestor-protocol.md).
 

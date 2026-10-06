@@ -9,7 +9,7 @@ Code, rustdoc, READMEs and `spec/` are written in English.
 
 ```text
 src/main.rs                    the `kippu` binary: ~10 lines of wiring, nothing else
-spec/                          normative protocols (KP1 tickets, attestors) + shared test vectors
+spec/                          normative protocols (KP1 tickets, attestors, webhooks) + shared test vectors
 docs/                          walkthrough.md/.http, external-login.md (writing a sign-in module)
 crates/kippu/domain            pure domain: ids, money, timestamps, state machines — no I/O, no clock
 crates/kippu/store             storage ports, consistency contract, `conformance` test suite
@@ -30,7 +30,7 @@ Keep the repository root uncluttered and do not add speculative `.gitignore` ent
 ## Commands
 
 ```bash
-cargo test --workspace --all-features                                   # 160 tests incl. e2e over TCP
+cargo test --workspace --all-features                                   # 175 tests incl. e2e over TCP
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets           # default features too
 cargo fmt --all
@@ -92,6 +92,9 @@ as `shop`, `attestor`, `reserve`, `drain`); the full journey over real TCP is
   their fields in `crates/kippu/core/src/http/trace.rs`; `crates/kippu/server/src/telemetry.rs`
   renders them (pretty blocks, compact lines, JSON). Log business milestones with
   `tracing::info!` and they land in the right block. Never record headers, bodies or tokens.
+- **Outbound HTTP** (webhooks) goes through `modules/webhooks/delivery.rs`: rustls + ring,
+  no redirects, no environment proxy, and a resolver that drops non-public addresses (SSRF).
+  Reuse it for any new outbound call; never call user-supplied URLs with a plain client.
 - **Ticket transport:** the API returns tickets as Base64 (`ticket`) and raw bytes
   (`/v1/tickets/{id}/raw`); how they reach a gate is the integrator's choice. Base45 is an
   optional `base45` feature (kaisatsu, kaisatsu-ffi with `KAISATSU_BASE45`, kippu-server);
