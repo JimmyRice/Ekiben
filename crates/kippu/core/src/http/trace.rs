@@ -13,11 +13,8 @@ use std::fmt::Display;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use axum::body::HttpBody as _;
-use axum::body::{Body, to_bytes};
 use axum::extract::{ConnectInfo, Request};
-use axum::http::{Response, header};
-use axum::middleware::Next;
+use axum::http::Response;
 use kippu_domain::AttestorId;
 use tracing::Span;
 
@@ -83,52 +80,4 @@ pub(crate) fn task_span(name: &'static str) -> Span {
 /// Records how a run of a background task ended.
 pub(crate) fn record_outcome(span: &Span, outcome: &'static str) {
     kippu_telemetry::record_outcome(span, outcome);
-}
-
-/// The longest rejection text worth reading back for the log.
-const REJECTION_TEXT: usize = 512;
-
-/// Explains in the log the error responses that are not [`ApiError`]s — an unknown route, a
-/// wrong method, a path parameter that does not parse — which would otherwise show a bare
-/// status. The response itself is passed on unchanged.
-pub(crate) async fn explain_rejections(request: Request, next: Next) -> Response<Body> {
-    let response = next.run(request).await;
-    let status = response.status();
-    let is_problem = response
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .is_some_and(|value| value.as_bytes().starts_with(b"application/problem+json"));
-    if !(status.is_client_error() || status.is_server_error()) || is_problem {
-        return response;
-    }
-    let (parts, body) = response.into_parts();
-    let readable = body
-        .size_hint()
-        .exact()
-        .is_some_and(|size| size <= REJECTION_TEXT as u64);
-    let (body, text) = if readable {
-        match to_bytes(body, REJECTION_TEXT).await {
-            Ok(bytes) => {
-                let text = String::from_utf8_lossy(&bytes).into_owned();
-                (Body::from(bytes), text)
-            }
-            Err(_) => (Body::empty(), String::new()),
-        }
-    } else {
-        (body, String::new())
-    };
-    let kind = status
-        .canonical_reason()
-        .unwrap_or("error")
-        .to_ascii_lowercase()
-        .replace(' ', "-");
-    let detail = if !text.is_empty() {
-        text
-    } else if status == axum::http::StatusCode::NOT_FOUND {
-        "no route matches this path".to_owned()
-    } else {
-        status.canonical_reason().unwrap_or("error").to_owned()
-    };
-    kippu_telemetry::record_problem(&kind, &detail, None);
-    Response::from_parts(parts, body)
 }

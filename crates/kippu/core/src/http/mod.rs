@@ -6,6 +6,7 @@ pub mod idempotency;
 mod json;
 mod openapi;
 mod paging;
+mod problems;
 mod router;
 pub mod trace;
 

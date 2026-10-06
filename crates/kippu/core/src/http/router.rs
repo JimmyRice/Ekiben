@@ -19,7 +19,7 @@ use utoipa_axum::routes;
 
 use super::body_limit::{BodyLimits, limit_body};
 use super::openapi::ApiDoc;
-use super::{Json, health, idempotency, trace};
+use super::{Json, health, idempotency, problems, trace};
 use crate::app::AppState;
 use crate::module::Module;
 
@@ -46,7 +46,7 @@ pub(crate) fn router(state: &AppState, modules: &[Arc<dyn Module>]) -> Router {
                 // Error responses are logged where they are created, with their cause.
                 .on_failure(()),
         )
-        .layer(middleware::from_fn(trace::explain_rejections))
+        .layer(middleware::from_fn(problems::framework_errors))
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(CatchPanicLayer::new())
         .layer(TimeoutLayer::with_status_code(

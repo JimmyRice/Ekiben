@@ -216,23 +216,30 @@ pub struct Problem {
     pub detail: String,
 }
 
+impl Problem {
+    /// The `application/problem+json` response for a problem of `kind`.
+    pub(crate) fn response(status: StatusCode, kind: &str, detail: String) -> Response {
+        let problem = Self {
+            kind: format!("urn:kippu:problem:{kind}"),
+            title: status.canonical_reason().unwrap_or("Error").to_owned(),
+            status: status.as_u16(),
+            detail,
+        };
+        let mut response = (status, Json(problem)).into_response();
+        response.headers_mut().insert(
+            header::CONTENT_TYPE,
+            header::HeaderValue::from_static("application/problem+json"),
+        );
+        response
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         crate::http::trace::record_problem(&self);
         if self.status.is_server_error() {
             tracing::error!(error = %self, source = ?self.source, origin = %self.origin, "request failed");
         }
-        let problem = Problem {
-            kind: format!("urn:kippu:problem:{}", self.kind),
-            title: self.status.canonical_reason().unwrap_or("Error").to_owned(),
-            status: self.status.as_u16(),
-            detail: self.detail.into_owned(),
-        };
-        let mut response = (self.status, Json(problem)).into_response();
-        response.headers_mut().insert(
-            header::CONTENT_TYPE,
-            header::HeaderValue::from_static("application/problem+json"),
-        );
-        response
+        Problem::response(self.status, self.kind, self.detail.into_owned())
     }
 }

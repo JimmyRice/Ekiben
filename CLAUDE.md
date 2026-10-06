@@ -32,7 +32,7 @@ Keep the repository root uncluttered and do not add speculative `.gitignore` ent
 ## Commands
 
 ```bash
-cargo test --workspace --all-features                                   # 198 tests incl. e2e over TCP
+cargo test --workspace --all-features                                   # 201 tests incl. e2e over TCP
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets           # default features too
 cargo fmt --all
@@ -91,7 +91,9 @@ as `shop`, `attestor`, `reserve`, `drain`); the full journey over real TCP is
 - **Errors:** `ApiError::new(status, "kebab-kind", detail)` → `urn:kippu:problem:<kind>`. Kinds
   are API: never rename them. Take bodies with `crate::http::Json`, never `axum::Json`, so
   unreadable bodies are problems too (`invalid-json`, `unsupported-media-type`,
-  `payload-too-large`).
+  `payload-too-large`). Errors the framework answers (unknown route, wrong method, bad path
+  parameter, panic, timeout) are rewritten into problems by `http/problems.rs`; clients see one
+  error format.
 - **Idempotency:** anything that may be retried must be safe to repeat (derived ids, unique
   keys returning `Insertion::Existing`, status checks before transitions). Handlers that are
   idempotent by design insert `IdempotentByDesign` into the response extensions.
