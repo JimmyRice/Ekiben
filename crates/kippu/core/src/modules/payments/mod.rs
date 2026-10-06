@@ -11,7 +11,7 @@
 
 mod dto;
 mod routes;
-pub(crate) mod service;
+pub mod service;
 pub mod signature;
 
 use kippu_domain::account::Role;

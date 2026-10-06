@@ -3,12 +3,16 @@
 use std::borrow::Cow;
 
 use axum::Json;
-use axum::http::{StatusCode, header};
+use axum::http::header;
 use axum::response::{IntoResponse, Response};
 use kippu_domain::ValidationError;
 use kippu_domain::reservation::IllegalTransition;
 use kippu_store::{BoxError, StoreError};
 use serde::Serialize;
+
+/// The status codes problems are reported with, re-exported so services build their errors
+/// without depending on the HTTP framework.
+pub use axum::http::StatusCode;
 
 /// Result of an API operation.
 pub type ApiResult<T> = Result<T, ApiError>;

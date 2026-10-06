@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+use super::service::{Admission, QueueTicket};
 use crate::auth::tokens::IssuedToken;
 
 /// Your place in the waiting room.
@@ -35,4 +36,28 @@ pub enum AdmissionView {
         /// Everyone up to this position has been admitted.
         admitted_through: u64,
     },
+}
+
+impl From<QueueTicket> for QueuePlace {
+    fn from(ticket: QueueTicket) -> Self {
+        Self {
+            position: ticket.position,
+            queue_ticket: ticket.token,
+        }
+    }
+}
+
+impl From<Admission> for AdmissionView {
+    fn from(admission: Admission) -> Self {
+        match admission {
+            Admission::Admitted(admission_pass) => Self::Admitted { admission_pass },
+            Admission::Waiting {
+                position,
+                admitted_through,
+            } => Self::Waiting {
+                position,
+                admitted_through,
+            },
+        }
+    }
 }

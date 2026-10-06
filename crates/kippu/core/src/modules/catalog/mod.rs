@@ -5,7 +5,7 @@
 
 mod dto;
 mod routes;
-pub(crate) mod service;
+pub mod service;
 
 use kippu_domain::account::Role;
 use utoipa_axum::router::OpenApiRouter;

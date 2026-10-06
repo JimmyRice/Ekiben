@@ -9,6 +9,7 @@
 
 mod dto;
 mod routes;
+pub mod service;
 pub(crate) mod storage;
 
 use utoipa_axum::router::OpenApiRouter;

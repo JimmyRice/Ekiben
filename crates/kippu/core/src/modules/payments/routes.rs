@@ -1,58 +1,36 @@
-use crate::http::Json;
+//! HTTP handlers: each turns a request into one [`service`](super::service) call and its
+//! result into a response. Rules live in the service, not here.
+
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use kippu_domain::outbox::IntegrationEvent;
-use kippu_domain::payment::{Attestor, AttestorKey};
 use kippu_domain::reservation::Reservation;
-use kippu_domain::validation::non_empty;
-use kippu_domain::{AttestorId, ReservationId, ValidationError};
+use kippu_domain::{AttestorId, ReservationId};
+use kippu_store::OutboxRecord;
 
 use super::dto::{
-    AttestationRequest, AttestorKeyRequest, AttestorKeyView, AttestorView, CreateAttestorRequest,
-    FeedEvent, FeedQuery, ManualPaymentRequest, PaymentOutcome, RevokedRequest, SettlementView,
+    AttestationRequest, AttestorKeyRequest, AttestorView, CreateAttestorRequest, FeedEvent,
+    FeedQuery, ManualPaymentRequest, RevokedRequest, SettlementView,
 };
-use super::permissions::{ATTESTORS_MANAGE, FEED_READ, PAYMENTS_MANUAL};
-use super::service::{IncomingPayment, confirm_refund, settle};
+use super::service::{self, AttestorReport, PaymentResult};
 use super::signature::Attested;
 use crate::app::AppState;
-use crate::auth::{Principal, Scope};
-use crate::error::{ApiError, ApiResult, Problem};
+use crate::auth::Principal;
+use crate::error::{ApiResult, Problem};
+use crate::http::Json;
 use crate::http::idempotency::IdempotentByDesign;
-use crate::keys::{encode_key, parse_verifying_key};
 
 const TAG: &str = "payments";
 
-async fn attestor_view(state: &AppState, attestor: Attestor) -> ApiResult<AttestorView> {
-    let keys = state.store().attestor_keys(attestor.id).await?;
-    Ok(AttestorView {
-        attestor,
-        keys: keys
-            .into_iter()
-            .map(|key| AttestorKeyView {
-                key_id: key.key_id,
-                public_key: encode_key(&key.public_key),
-                revoked: key.revoked,
-            })
-            .collect(),
-    })
+/// A settlement response, marked as safe to repeat without the idempotency middleware.
+fn settlement(result: PaymentResult) -> Response {
+    let mut response = Json(SettlementView::from(result)).into_response();
+    response.extensions_mut().insert(IdempotentByDesign);
+    response
 }
 
-fn attestor_key(
-    state: &AppState,
-    attestor: AttestorId,
-    request: &AttestorKeyRequest,
-) -> ApiResult<AttestorKey> {
-    non_empty("key_id", &request.key_id, 64)?;
-    let public_key = parse_verifying_key("public_key", &request.public_key)
-        .map_err(|_| ValidationError::new("public_key", "must be an Ed25519 public key"))?;
-    Ok(AttestorKey {
-        attestor_id: attestor,
-        key_id: request.key_id.clone(),
-        public_key: public_key.to_bytes(),
-        revoked: false,
-        created_at: state.now(),
-    })
+fn feed(records: Vec<OutboxRecord>) -> Json<Vec<FeedEvent>> {
+    Json(records.into_iter().map(FeedEvent::from).collect())
 }
 
 /// Register an attestor: a service trusted to report payments.
@@ -67,31 +45,8 @@ pub(crate) async fn create_attestor(
     principal: Principal,
     Json(request): Json<CreateAttestorRequest>,
 ) -> ApiResult<(StatusCode, Json<AttestorView>)> {
-    state.authorize(&principal, ATTESTORS_MANAGE, Scope::Global)?;
-    non_empty("name", &request.name, 200)?;
-    let attestor = Attestor {
-        id: AttestorId::generate(),
-        name: request.name,
-        environment: request.environment,
-        revoked: false,
-        created_at: state.now(),
-    };
-    let keys = request
-        .keys
-        .iter()
-        .map(|key| attestor_key(&state, attestor.id, key))
-        .collect::<ApiResult<Vec<_>>>()?;
-    state.store().insert_attestor(&attestor).await?;
-    for key in &keys {
-        state.store().insert_attestor_key(key).await?;
-    }
-    state
-        .audit(&principal, "attestor.create", attestor.id)
-        .await?;
-    Ok((
-        StatusCode::CREATED,
-        Json(attestor_view(&state, attestor).await?),
-    ))
+    let attestor = service::create_attestor(&state, &principal, request.into()).await?;
+    Ok((StatusCode::CREATED, Json(attestor.into())))
 }
 
 /// Every attestor, including the built-in `free` and `manual` ones.
@@ -104,12 +59,10 @@ pub(crate) async fn list_attestors(
     State(state): State<AppState>,
     principal: Principal,
 ) -> ApiResult<Json<Vec<AttestorView>>> {
-    state.authorize(&principal, ATTESTORS_MANAGE, Scope::Global)?;
-    let mut views = Vec::new();
-    for attestor in state.store().list_attestors().await? {
-        views.push(attestor_view(&state, attestor).await?);
-    }
-    Ok(Json(views))
+    let attestors = service::attestors(&state, &principal).await?;
+    Ok(Json(
+        attestors.into_iter().map(AttestorView::from).collect(),
+    ))
 }
 
 /// Revoke or restore an attestor. Takes effect immediately on every instance.
@@ -126,20 +79,7 @@ pub(crate) async fn set_attestor_revoked(
     Path(attestor_id): Path<AttestorId>,
     Json(request): Json<RevokedRequest>,
 ) -> ApiResult<StatusCode> {
-    state.authorize(&principal, ATTESTORS_MANAGE, Scope::Global)?;
-    if !state
-        .store()
-        .set_attestor_revoked(attestor_id, request.revoked)
-        .await?
-    {
-        return Err(ApiError::not_found("attestor"));
-    }
-    let action = if request.revoked {
-        "attestor.revoke"
-    } else {
-        "attestor.restore"
-    };
-    state.audit(&principal, action, attestor_id).await?;
+    service::set_attestor_revoked(&state, &principal, attestor_id, request.revoked).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -157,24 +97,7 @@ pub(crate) async fn add_attestor_key(
     Path(attestor_id): Path<AttestorId>,
     Json(request): Json<AttestorKeyRequest>,
 ) -> ApiResult<StatusCode> {
-    state.authorize(&principal, ATTESTORS_MANAGE, Scope::Global)?;
-    let attestor = state
-        .store()
-        .attestor(attestor_id)
-        .await?
-        .filter(|attestor| !attestor.id.is_builtin())
-        .ok_or_else(|| ApiError::not_found("attestor"))?;
-    state
-        .store()
-        .insert_attestor_key(&attestor_key(&state, attestor.id, &request)?)
-        .await?;
-    state
-        .audit(
-            &principal,
-            "attestor.key.add",
-            format!("{attestor_id}/{}", request.key_id),
-        )
-        .await?;
+    service::add_attestor_key(&state, &principal, attestor_id, request.into()).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -192,20 +115,7 @@ pub(crate) async fn set_attestor_key_revoked(
     Path((attestor_id, key_id)): Path<(AttestorId, String)>,
     Json(request): Json<RevokedRequest>,
 ) -> ApiResult<StatusCode> {
-    state.authorize(&principal, ATTESTORS_MANAGE, Scope::Global)?;
-    if !state
-        .store()
-        .set_attestor_key_revoked(attestor_id, &key_id, request.revoked)
-        .await?
-    {
-        return Err(ApiError::not_found("attestor key"));
-    }
-    state
-        .audit(
-            &principal,
-            "attestor.key.revoke",
-            format!("{attestor_id}/{key_id}"),
-        )
+    service::set_attestor_key_revoked(&state, &principal, attestor_id, &key_id, request.revoked)
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -221,20 +131,9 @@ pub(crate) async fn attestor_reservation(
     Path(reservation_id): Path<ReservationId>,
     attested: Attested,
 ) -> ApiResult<Json<Reservation>> {
-    let reservation = state
-        .store()
-        .reservation(reservation_id)
-        .await?
-        .ok_or_else(|| ApiError::not_found("reservation"))?;
-    let sale = state
-        .store()
-        .sale(reservation.sale_id)
-        .await?
-        .ok_or_else(|| ApiError::not_found("sale"))?;
-    if !sale.accepts(attested.attestor.id) {
-        return Err(ApiError::not_found("reservation"));
-    }
-    Ok(Json(reservation))
+    Ok(Json(
+        service::reservation_for_attestor(&state, &attested.attestor, reservation_id).await?,
+    ))
 }
 
 /// For attestors: report a payment, or confirm a refund Kippu asked for.
@@ -258,28 +157,9 @@ pub(crate) async fn record_attestation(
     attested: Attested,
 ) -> ApiResult<Response> {
     let request: AttestationRequest = attested.json()?;
-    let settlement = match request.outcome {
-        PaymentOutcome::Paid => {
-            let payment = IncomingPayment {
-                attestation_id: request.attestation_id,
-                reservation_id: request.reservation_id.ok_or(ValidationError::new(
-                    "reservation_id",
-                    "is required for a payment",
-                ))?,
-                amount: request
-                    .amount
-                    .ok_or(ValidationError::new("amount", "is required for a payment"))?,
-                occurred_at: request.occurred_at.unwrap_or_else(|| state.now()),
-            };
-            settle(&state, &attested.attestor, payment).await?
-        }
-        PaymentOutcome::Refunded => {
-            confirm_refund(&state, attested.attestor.id, &request.attestation_id).await?
-        }
-    };
-    let mut response = Json(settlement).into_response();
-    response.extensions_mut().insert(IdempotentByDesign);
-    Ok(response)
+    let report = AttestorReport::try_from(request)?;
+    let result = service::record_attestation(&state, &attested.attestor, report).await?;
+    Ok(settlement(result))
 }
 
 /// Record a payment taken in person (e.g. cash at the venue).
@@ -296,46 +176,9 @@ pub(crate) async fn manual_payment(
     Path(reservation_id): Path<ReservationId>,
     Json(request): Json<ManualPaymentRequest>,
 ) -> ApiResult<Response> {
-    let reservation = state
-        .store()
-        .reservation(reservation_id)
-        .await?
-        .ok_or_else(|| ApiError::not_found("reservation"))?;
-    let event = state
-        .store()
-        .event(reservation.event_id)
-        .await?
-        .ok_or_else(|| ApiError::not_found("event"))?;
-    state.authorize(
-        &principal,
-        PAYMENTS_MANUAL,
-        Scope::Organization(event.organization_id),
-    )?;
-    let manual = state
-        .store()
-        .attestor(AttestorId::MANUAL)
-        .await?
-        .ok_or_else(|| ApiError::internal("the built-in manual attestor is missing"))?;
-    let payment = IncomingPayment {
-        attestation_id: request.attestation_id,
-        reservation_id,
-        amount: request.amount,
-        occurred_at: state.now(),
-    };
-    let settlement = settle(&state, &manual, payment).await?;
-    state
-        .audit(&principal, "payment.manual", reservation_id)
-        .await?;
-    let mut response = Json(settlement).into_response();
-    response.extensions_mut().insert(IdempotentByDesign);
-    Ok(response)
-}
-
-fn page(query: &FeedQuery) -> (i64, u32) {
-    (
-        query.after.unwrap_or(0),
-        query.limit.unwrap_or(100).clamp(1, 500),
-    )
+    let result =
+        service::manual_payment(&state, &principal, reservation_id, request.into()).await?;
+    Ok(settlement(result))
 }
 
 /// For attestors: integration events addressed to you (`payment.requested`, `refund.required`).
@@ -350,23 +193,9 @@ pub(crate) async fn attestor_feed(
     Query(query): Query<FeedQuery>,
     attested: Attested,
 ) -> ApiResult<Json<Vec<FeedEvent>>> {
-    let (after, limit) = page(&query);
-    let me = attested.attestor.id;
-    let records = state.store().outbox_after(after, limit).await?;
-    Ok(Json(
-        records
-            .into_iter()
-            .filter(|record| match &record.event {
-                IntegrationEvent::PaymentRequested { attestor_id, .. }
-                | IntegrationEvent::RefundRequired { attestor_id, .. } => *attestor_id == me,
-                _ => false,
-            })
-            .map(|record| FeedEvent {
-                sequence: record.sequence,
-                created_at: record.created_at,
-                event: record.event,
-            })
-            .collect(),
+    let (after, limit) = query.page();
+    Ok(feed(
+        service::attestor_feed(&state, &attested.attestor, after, limit).await?,
     ))
 }
 
@@ -382,17 +211,8 @@ pub(crate) async fn admin_feed(
     principal: Principal,
     Query(query): Query<FeedQuery>,
 ) -> ApiResult<Json<Vec<FeedEvent>>> {
-    state.authorize(&principal, FEED_READ, Scope::Global)?;
-    let (after, limit) = page(&query);
-    let records = state.store().outbox_after(after, limit).await?;
-    Ok(Json(
-        records
-            .into_iter()
-            .map(|record| FeedEvent {
-                sequence: record.sequence,
-                created_at: record.created_at,
-                event: record.event,
-            })
-            .collect(),
+    let (after, limit) = query.page();
+    Ok(feed(
+        service::full_feed(&state, &principal, after, limit).await?,
     ))
 }

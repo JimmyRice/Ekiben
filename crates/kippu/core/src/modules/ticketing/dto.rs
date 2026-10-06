@@ -5,6 +5,7 @@ use kippu_domain::{EventId, ReservationId, TicketId, TicketTypeId, Timestamp};
 use serde::Serialize;
 use utoipa::ToSchema;
 
+use super::service::GateKeys;
 use crate::keys::PublishedKey;
 
 /// A ticket and its signed bytes.
@@ -56,4 +57,13 @@ pub struct TicketKeys {
     pub issuer: String,
     /// The active key first, then retired keys still valid for older tickets.
     pub keys: Vec<PublishedKey>,
+}
+
+impl From<GateKeys> for TicketKeys {
+    fn from(keys: GateKeys) -> Self {
+        Self {
+            issuer: keys.issuer,
+            keys: keys.keys,
+        }
+    }
 }

@@ -14,18 +14,57 @@ use kippu_domain::reservation::{Reservation, Settlement};
 use kippu_domain::{AttestorId, Money, ReservationId, TicketId, Timestamp};
 use kippu_store::{Hold, Insertion, StoreTx};
 
-use super::dto::SettlementView;
 use crate::app::AppState;
-use crate::error::{ApiError, ApiResult};
+use crate::auth::{Principal, Scope};
+use crate::error::{ApiError, ApiResult, StatusCode};
+use crate::modules::payments::permissions::PAYMENTS_MANUAL;
 use crate::modules::ticketing::service::issue_tickets;
+
+/// What an attestor reports.
+#[derive(Debug, Clone)]
+pub enum AttestorReport {
+    /// The buyer paid.
+    Paid(IncomingPayment),
+    /// The attestor returned a payment Kippu reported as `refund.required`.
+    Refunded {
+        /// The attestor's reference for the payment.
+        attestation_id: String,
+    },
+}
+
+/// A payment taken in person, e.g. cash at the venue.
+#[derive(Debug, Clone)]
+pub struct ManualPayment {
+    /// The organizer's reference for the payment, e.g. a receipt number. Unique.
+    pub attestation_id: String,
+    /// The amount received; must equal the reservation total.
+    pub amount: Money,
+}
 
 /// An attested payment as received.
 #[derive(Debug, Clone)]
-pub(crate) struct IncomingPayment {
-    pub(crate) attestation_id: String,
-    pub(crate) reservation_id: ReservationId,
-    pub(crate) amount: Money,
-    pub(crate) occurred_at: Timestamp,
+pub struct IncomingPayment {
+    /// The attestor's own reference for the payment, unique per attestor.
+    pub attestation_id: String,
+    /// The reservation paid for.
+    pub reservation_id: ReservationId,
+    /// The amount paid; must equal the reservation total.
+    pub amount: Money,
+    /// When the payment happened; now if unknown.
+    pub occurred_at: Option<Timestamp>,
+}
+
+/// What recording a payment (or a refund) did.
+#[derive(Debug, Clone)]
+pub struct PaymentResult {
+    /// What became of the money.
+    pub disposition: PaymentDisposition,
+    /// The reservation afterwards.
+    pub reservation: Reservation,
+    /// Tickets issued for the reservation.
+    pub ticket_ids: Vec<TicketId>,
+    /// Whether the attestation had already been recorded, so nothing changed.
+    pub replayed: bool,
 }
 
 /// The reserved items as inventory line items.
@@ -56,14 +95,93 @@ pub(crate) fn holds(reservation: &Reservation, ticket_types: &[TicketType]) -> V
         .collect()
 }
 
+/// A reservation an attestor may charge for: one of a sale that accepts it. Others look
+/// missing.
+pub async fn reservation_for_attestor(
+    state: &AppState,
+    attestor: &Attestor,
+    reservation_id: ReservationId,
+) -> ApiResult<Reservation> {
+    let reservation = state
+        .store()
+        .reservation(reservation_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("reservation"))?;
+    let sale = state
+        .store()
+        .sale(reservation.sale_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("sale"))?;
+    if sale.accepts(attestor.id) {
+        Ok(reservation)
+    } else {
+        Err(ApiError::not_found("reservation"))
+    }
+}
+
+/// Records what an attestor reports: a payment, or a refund Kippu asked for. Safe to retry:
+/// a report is recorded once per `attestation_id`, and every delivery gets the same answer.
+pub async fn record_attestation(
+    state: &AppState,
+    attestor: &Attestor,
+    report: AttestorReport,
+) -> ApiResult<PaymentResult> {
+    match report {
+        AttestorReport::Paid(payment) => settle(state, attestor, payment).await,
+        AttestorReport::Refunded { attestation_id } => {
+            confirm_refund(state, attestor.id, &attestation_id).await
+        }
+    }
+}
+
+/// Records a payment an organizer took in person, through the built-in `manual` attestor.
+pub async fn manual_payment(
+    state: &AppState,
+    principal: &Principal,
+    reservation_id: ReservationId,
+    payment: ManualPayment,
+) -> ApiResult<PaymentResult> {
+    let reservation = state
+        .store()
+        .reservation(reservation_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("reservation"))?;
+    let event = state
+        .store()
+        .event(reservation.event_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("event"))?;
+    state.authorize(
+        principal,
+        PAYMENTS_MANUAL,
+        Scope::Organization(event.organization_id),
+    )?;
+    let manual = state
+        .store()
+        .attestor(AttestorId::MANUAL)
+        .await?
+        .ok_or_else(|| ApiError::internal("the built-in manual attestor is missing"))?;
+    let payment = IncomingPayment {
+        attestation_id: payment.attestation_id,
+        reservation_id,
+        amount: payment.amount,
+        occurred_at: None,
+    };
+    let result = settle(state, &manual, payment).await?;
+    state
+        .audit(principal, "payment.manual", reservation_id)
+        .await?;
+    Ok(result)
+}
+
 /// Records an attested payment and settles the reservation it pays for. Idempotent: the same
 /// `(attestor, attestation_id)` delivered any number of times settles once and always yields
 /// the same answer.
-pub(crate) async fn settle(
+pub async fn settle(
     state: &AppState,
     attestor: &Attestor,
     payment: IncomingPayment,
-) -> ApiResult<SettlementView> {
+) -> ApiResult<PaymentResult> {
     validate_attestation_id(&payment.attestation_id)?;
     let store = state.store();
     if let Some(existing) = store
@@ -83,7 +201,7 @@ pub(crate) async fn settle(
         .ok_or_else(|| ApiError::not_found("sale"))?;
     if !attestor.id.is_builtin() && !sale.accepts(attestor.id) {
         return Err(ApiError::new(
-            axum::http::StatusCode::FORBIDDEN,
+            StatusCode::FORBIDDEN,
             "attestor-not-accepted",
             "this sale does not accept payments from this attestor",
         ));
@@ -91,14 +209,14 @@ pub(crate) async fn settle(
     if attestor.environment == Environment::Sandbox && reservation.environment == Environment::Live
     {
         return Err(ApiError::new(
-            axum::http::StatusCode::FORBIDDEN,
+            StatusCode::FORBIDDEN,
             "environment-mismatch",
             "a sandbox attestor cannot settle a live sale",
         ));
     }
     if payment.amount != reservation.total {
         return Err(ApiError::new(
-            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            StatusCode::UNPROCESSABLE_ENTITY,
             "amount-mismatch",
             format!(
                 "the reservation costs {}, not {}",
@@ -114,7 +232,7 @@ pub(crate) async fn settle(
         attestation_id: payment.attestation_id,
         reservation_id: payment.reservation_id,
         amount: payment.amount,
-        occurred_at: payment.occurred_at,
+        occurred_at: payment.occurred_at.unwrap_or(now),
         received_at: now,
         disposition: PaymentDisposition::Applied,
     };
@@ -163,7 +281,7 @@ pub(crate) async fn settle(
     Ok(view)
 }
 
-fn log_settlement(attestor: &Attestor, view: &SettlementView) {
+fn log_settlement(attestor: &Attestor, view: &PaymentResult) {
     tracing::info!(
         reservation = %view.reservation.id,
         attestor = %attestor.id,
@@ -179,7 +297,7 @@ async fn issue(
     mut reservation: Reservation,
     ticket_types: &[TicketType],
     now: Timestamp,
-) -> ApiResult<SettlementView> {
+) -> ApiResult<PaymentResult> {
     let tickets = issue_tickets(state, &reservation, ticket_types, now)?;
     tx.tickets().insert_tickets(&tickets).await?;
     reservation.status = reservation.status.issue()?;
@@ -192,7 +310,7 @@ async fn issue(
         ticket_ids: ticket_ids.clone(),
     };
     tx.outbox().append_event(&event, now).await?;
-    Ok(SettlementView {
+    Ok(PaymentResult {
         disposition: PaymentDisposition::Applied,
         reservation,
         ticket_ids,
@@ -205,7 +323,7 @@ async fn require_refund(
     attestation: &PaymentAttestation,
     reservation: Reservation,
     now: Timestamp,
-) -> ApiResult<SettlementView> {
+) -> ApiResult<PaymentResult> {
     tx.payments()
         .set_disposition(
             attestation.attestor_id,
@@ -220,7 +338,7 @@ async fn require_refund(
         amount: attestation.amount,
     };
     tx.outbox().append_event(&event, now).await?;
-    Ok(SettlementView {
+    Ok(PaymentResult {
         disposition: PaymentDisposition::RefundRequired,
         reservation,
         ticket_ids: Vec::new(),
@@ -229,7 +347,7 @@ async fn require_refund(
 }
 
 /// The answer to an attestation that was already recorded.
-async fn replay(state: &AppState, attestation: PaymentAttestation) -> ApiResult<SettlementView> {
+async fn replay(state: &AppState, attestation: PaymentAttestation) -> ApiResult<PaymentResult> {
     let reservation = state
         .store()
         .reservation(attestation.reservation_id)
@@ -244,7 +362,7 @@ async fn replay(state: &AppState, attestation: PaymentAttestation) -> ApiResult<
     } else {
         Vec::new()
     };
-    Ok(SettlementView {
+    Ok(PaymentResult {
         disposition: attestation.disposition,
         reservation,
         ticket_ids,
@@ -253,11 +371,11 @@ async fn replay(state: &AppState, attestation: PaymentAttestation) -> ApiResult<
 }
 
 /// The attestor confirms it returned a payment that required a refund. Idempotent.
-pub(crate) async fn confirm_refund(
+pub async fn confirm_refund(
     state: &AppState,
     attestor: AttestorId,
     attestation_id: &str,
-) -> ApiResult<SettlementView> {
+) -> ApiResult<PaymentResult> {
     let store = state.store();
     let attestation = store
         .attestation(attestor, attestation_id)
@@ -267,7 +385,7 @@ pub(crate) async fn confirm_refund(
         PaymentDisposition::Refunded => return replay(state, attestation).await,
         PaymentDisposition::Applied => {
             return Err(ApiError::new(
-                axum::http::StatusCode::CONFLICT,
+                StatusCode::CONFLICT,
                 "payment-applied",
                 "this payment paid for issued tickets and cannot be marked refunded",
             ));
@@ -290,7 +408,7 @@ pub(crate) async fn confirm_refund(
         tx.reservations().update_reservation(&reservation).await?;
     }
     tx.commit().await?;
-    Ok(SettlementView {
+    Ok(PaymentResult {
         disposition: PaymentDisposition::Refunded,
         reservation,
         ticket_ids: Vec::new(),

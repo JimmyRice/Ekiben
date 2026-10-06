@@ -1,9 +1,16 @@
 use kippu_domain::outbox::IntegrationEvent;
 use kippu_domain::payment::{Attestor, Environment, PaymentDisposition};
 use kippu_domain::reservation::Reservation;
-use kippu_domain::{Money, ReservationId, TicketId, Timestamp};
+use kippu_domain::{Money, ReservationId, TicketId, Timestamp, ValidationError};
+use kippu_store::OutboxRecord;
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
+
+use super::service::{
+    AttestorReport, AttestorWithKeys, IncomingPayment, ManualPayment, NewAttestor, NewAttestorKey,
+    PaymentResult,
+};
+use crate::keys::encode_key;
 
 /// Register an attestor and its first keys.
 #[derive(Debug, Deserialize, ToSchema)]
@@ -119,4 +126,103 @@ pub struct FeedEvent {
     pub created_at: Timestamp,
     /// What happened.
     pub event: IntegrationEvent,
+}
+
+impl From<CreateAttestorRequest> for NewAttestor {
+    fn from(request: CreateAttestorRequest) -> Self {
+        Self {
+            name: request.name,
+            environment: request.environment,
+            keys: request.keys.into_iter().map(NewAttestorKey::from).collect(),
+        }
+    }
+}
+
+impl From<AttestorKeyRequest> for NewAttestorKey {
+    fn from(request: AttestorKeyRequest) -> Self {
+        Self {
+            key_id: request.key_id,
+            public_key: request.public_key,
+        }
+    }
+}
+
+impl From<AttestorWithKeys> for AttestorView {
+    fn from(attestor: AttestorWithKeys) -> Self {
+        Self {
+            attestor: attestor.attestor,
+            keys: attestor
+                .keys
+                .into_iter()
+                .map(|key| AttestorKeyView {
+                    key_id: key.key_id,
+                    public_key: encode_key(&key.public_key),
+                    revoked: key.revoked,
+                })
+                .collect(),
+        }
+    }
+}
+
+impl TryFrom<AttestationRequest> for AttestorReport {
+    type Error = ValidationError;
+
+    fn try_from(request: AttestationRequest) -> Result<Self, ValidationError> {
+        Ok(match request.outcome {
+            PaymentOutcome::Paid => Self::Paid(IncomingPayment {
+                attestation_id: request.attestation_id,
+                reservation_id: request.reservation_id.ok_or(ValidationError::new(
+                    "reservation_id",
+                    "is required for a payment",
+                ))?,
+                amount: request
+                    .amount
+                    .ok_or(ValidationError::new("amount", "is required for a payment"))?,
+                occurred_at: request.occurred_at,
+            }),
+            PaymentOutcome::Refunded => Self::Refunded {
+                attestation_id: request.attestation_id,
+            },
+        })
+    }
+}
+
+impl From<ManualPaymentRequest> for ManualPayment {
+    fn from(request: ManualPaymentRequest) -> Self {
+        Self {
+            attestation_id: request.attestation_id,
+            amount: request.amount,
+        }
+    }
+}
+
+impl From<PaymentResult> for SettlementView {
+    fn from(result: PaymentResult) -> Self {
+        Self {
+            disposition: result.disposition,
+            reservation: result.reservation,
+            ticket_ids: result.ticket_ids,
+            replayed: result.replayed,
+        }
+    }
+}
+
+impl FeedQuery {
+    /// Where to start, and how many events to read at most.
+    pub(crate) fn page(&self) -> (i64, u32) {
+        (
+            self.after.unwrap_or(0),
+            self.limit.unwrap_or(100).clamp(1, 500),
+        )
+    }
+}
+
+impl From<OutboxRecord> for FeedEvent {
+    fn from(record: OutboxRecord) -> Self {
+        Self {
+            sequence: record.sequence,
+            created_at: record.created_at,
+            event: record.event,
+        }
+    }
 }

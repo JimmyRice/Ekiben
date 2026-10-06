@@ -10,6 +10,27 @@ Kippu::new()
     .build(config, store, clock)?              // → App { router, background tasks }
 ```
 
-Every built-in feature is a [`Module`] laid out the same way — `mod.rs` (permissions and
-wiring), `routes.rs` (thin handlers with OpenAPI annotations), `service.rs` (use cases),
-`dto.rs` (request and response bodies) — so a new module is a copy of an existing one.
+Every built-in feature is a [`Module`] laid out the same way, so a new module is a copy of an
+existing one:
+
+| File | Holds | Never |
+|---|---|---|
+| `mod.rs` | the `Module` impl: permissions, grants, routes, background tasks | logic |
+| `service.rs` or `service/` | the use cases: who may do what (`authorize`), validation, store calls, audit, events | `axum`, `dto` |
+| `routes.rs` | thin handlers: extractors and headers → one service call → status, body, headers | store calls, `authorize`, business rules |
+| `dto.rs` | the API's request and response bodies (`ToSchema`), and `From` conversions to and from the service's types | rules |
+
+A service function takes the [`AppState`], the caller (`&Principal`, or
+`Option<&Principal>` for public reads), ids and a plain input struct of its own (`NewEvent`,
+`EventChanges`, …), and returns domain types or its own output structs; errors are
+[`ApiError`]s (problem kinds are part of the API). Services are public, so your own modules
+can reuse them — for example `catalog::service::writable_event` to check that the caller may
+edit an event.
+
+- **Changing a rule** (who may publish, a new limit, another event on the outbox): edit the
+  service; routes and API types stay as they are.
+- **Changing the API** (a field name, a new header, another status code): edit `dto.rs` and
+  `routes.rs`; the service stays as it is.
+- **Adding a feature**: write the use case in `service`, then a handler in `routes.rs`, its
+  bodies in `dto.rs`, and register the handler in `mod.rs`. In a separate crate, the same
+  files make up your own `Module`.

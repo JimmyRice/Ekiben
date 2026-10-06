@@ -10,7 +10,7 @@
 
 mod dto;
 mod routes;
-mod service;
+pub mod service;
 
 use std::time::Duration;
 

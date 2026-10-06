@@ -1421,6 +1421,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.23.1",
+ "bytes",
  "ed25519-dalek 3.0.0",
  "getrandom 0.4.3",
  "hex",

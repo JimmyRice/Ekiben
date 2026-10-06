@@ -15,9 +15,9 @@ use kippu_domain::{Duration, OrganizationId, ReservationId};
 use kippu_store::{BoxError, Lease, OutboxRecord, WebhookRun};
 use serde_json::json;
 
-use super::signature::{DELIVERY_HEADER, SIGNATURE_HEADER, sign};
 use crate::app::AppState;
 use crate::module::Progress;
+use crate::modules::webhooks::signature::{DELIVERY_HEADER, SIGNATURE_HEADER, sign};
 
 /// Which organization an event belongs to, via its reservation's event; `None` if that can no
 /// longer be told (the records are gone), in which case only global webhooks receive it.

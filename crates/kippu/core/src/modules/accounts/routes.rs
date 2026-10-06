@@ -1,52 +1,22 @@
-//! HTTP handlers. Each one authenticates, authorizes, validates, then calls the store or a
-//! service function — nothing more.
+//! HTTP handlers: each turns a request into one [`service`](super::service) call (or a
+//! [`sessions`] call) and its result into a response. Rules live in the service, not here.
 
-use crate::http::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use kippu_domain::account::{Account, Identity, Organization, Role};
-use kippu_domain::validation::{Email, ProviderName, Slug, Subject, non_empty};
+use kippu_domain::account::{Account, Identity, Organization};
 use kippu_domain::{AccountId, OrganizationId};
-use kippu_store::Unlink;
 
 use super::dto::{
     AuditEntryResponse, CreateAccountRequest, CreateOrganizationRequest, LoginRequest, Me,
     RefreshRequest, RegisterRequest, SessionResponse, SetEmailRequest, SetPasswordRequest,
 };
-use super::permissions::{ACCOUNTS_MANAGE, AUDIT_READ, ORGANIZATIONS_MANAGE, PROFILE_MANAGE};
-use super::service::{set_password, validate_display_name};
+use super::service;
 use crate::app::AppState;
-use crate::auth::password::{DUMMY_HASH, hash_password, validate_password, verify_password};
-use crate::auth::{Principal, Scope, sessions};
-use crate::error::{ApiError, ApiResult, Problem};
-use crate::http::PageQuery;
+use crate::auth::{Principal, sessions};
+use crate::error::{ApiResult, Problem};
+use crate::http::{Json, PageQuery};
 
 const TAG: &str = "accounts";
-
-async fn insert_account(
-    state: &AppState,
-    email: String,
-    password: String,
-    display_name: String,
-    role: Role,
-) -> ApiResult<Account> {
-    let email = Email::new(email)?;
-    validate_password(&password)?;
-    validate_display_name(&display_name)?;
-    let account = Account {
-        id: AccountId::generate(),
-        email: Some(email),
-        display_name,
-        role,
-        created_at: state.now(),
-    };
-    let password_hash = hash_password(password).await?;
-    state
-        .store()
-        .insert_account(&account, Some(&password_hash))
-        .await?;
-    Ok(account)
-}
 
 /// Sign up as a user.
 #[utoipa::path(
@@ -62,14 +32,7 @@ pub(crate) async fn register(
     State(state): State<AppState>,
     Json(request): Json<RegisterRequest>,
 ) -> ApiResult<(StatusCode, Json<Account>)> {
-    let account = insert_account(
-        &state,
-        request.email,
-        request.password,
-        request.display_name,
-        Role::User,
-    )
-    .await?;
+    let account = service::register(&state, request.into()).await?;
     Ok((StatusCode::CREATED, Json(account)))
 }
 
@@ -83,22 +46,9 @@ pub(crate) async fn login(
     State(state): State<AppState>,
     Json(request): Json<LoginRequest>,
 ) -> ApiResult<Json<SessionResponse>> {
-    let invalid = || ApiError::unauthenticated("wrong email or password");
-    let credentials = match Email::new(request.email) {
-        Ok(email) => state.store().account_credentials(&email).await?,
-        Err(_) => None,
-    };
-    // Verify against a dummy hash when there is no account or it has no password (it signs
-    // in through an external provider), so timing reveals nothing.
-    let (account, hash) = match credentials {
-        Some((account, Some(hash))) => (Some(account), hash),
-        _ => (None, DUMMY_HASH.clone()),
-    };
-    let password_matches = verify_password(request.password, hash).await?;
-    match account {
-        Some(account) if password_matches => Ok(Json(sessions::issue(&state, account).await?)),
-        _ => Err(invalid()),
-    }
+    Ok(Json(
+        service::login(&state, request.email, request.password).await?,
+    ))
 }
 
 /// Exchange a refresh token for new tokens.
@@ -137,28 +87,7 @@ pub(crate) async fn logout(
     responses((status = 200, body = Me), (status = 401, body = Problem))
 )]
 pub(crate) async fn me(State(state): State<AppState>, principal: Principal) -> ApiResult<Json<Me>> {
-    match principal {
-        Principal::Root { key_name } => Ok(Json(Me::Root { key_name })),
-        Principal::Account { id, .. } => {
-            let account = state
-                .store()
-                .account(id)
-                .await?
-                .ok_or_else(|| ApiError::not_found("account"))?;
-            let organizations = state.store().memberships(id).await?;
-            Ok(Json(Me::Account {
-                account,
-                organizations,
-            }))
-        }
-    }
-}
-
-/// The caller's own account, after checking they may manage it.
-fn own_account(state: &AppState, principal: &Principal) -> ApiResult<AccountId> {
-    let account = principal.require_account()?;
-    state.authorize(principal, PROFILE_MANAGE, Scope::Account(account))?;
-    Ok(account)
+    Ok(Json(service::whoami(&state, &principal).await?.into()))
 }
 
 /// Set your email address, e.g. after signing up through a provider that shared none.
@@ -173,17 +102,9 @@ pub(crate) async fn set_email(
     principal: Principal,
     Json(request): Json<SetEmailRequest>,
 ) -> ApiResult<Json<Account>> {
-    let account = own_account(&state, &principal)?;
-    let email = Email::new(request.email)?;
-    if !state.store().set_email(account, &email).await? {
-        return Err(ApiError::not_found("account"));
-    }
-    let account = state
-        .store()
-        .account(account)
-        .await?
-        .ok_or_else(|| ApiError::not_found("account"))?;
-    Ok(Json(account))
+    Ok(Json(
+        service::set_email(&state, &principal, request.email).await?,
+    ))
 }
 
 /// Set or change your password.
@@ -198,17 +119,13 @@ pub(crate) async fn change_password(
     principal: Principal,
     Json(request): Json<SetPasswordRequest>,
 ) -> ApiResult<StatusCode> {
-    let account = own_account(&state, &principal)?;
-    set_password(
+    service::change_password(
         &state,
-        account,
+        &principal,
         request.current_password,
         request.new_password,
     )
     .await?;
-    state
-        .audit(&principal, "account.password.set", account)
-        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -222,8 +139,7 @@ pub(crate) async fn list_identities(
     State(state): State<AppState>,
     principal: Principal,
 ) -> ApiResult<Json<Vec<Identity>>> {
-    let account = own_account(&state, &principal)?;
-    Ok(Json(state.store().identities(account).await?))
+    Ok(Json(service::identities(&state, &principal).await?))
 }
 
 /// Unlink an external sign-in. An account always keeps a way to sign in: the last one cannot
@@ -243,32 +159,8 @@ pub(crate) async fn unlink_identity(
     principal: Principal,
     Path((provider, subject)): Path<(String, String)>,
 ) -> ApiResult<StatusCode> {
-    let account = own_account(&state, &principal)?;
-    let not_found = || ApiError::not_found("identity");
-    let provider = ProviderName::new(provider).map_err(|_| not_found())?;
-    let subject = Subject::new(subject).map_err(|_| not_found())?;
-    match state
-        .store()
-        .unlink_identity(account, &provider, &subject)
-        .await?
-    {
-        Unlink::Unlinked => {
-            state
-                .audit(
-                    &principal,
-                    "identity.unlink",
-                    format!("{account}/{provider}"),
-                )
-                .await?;
-            Ok(StatusCode::NO_CONTENT)
-        }
-        Unlink::NotLinked => Err(not_found()),
-        Unlink::LastSignInMethod => Err(ApiError::new(
-            StatusCode::CONFLICT,
-            "last-sign-in-method",
-            "this is the account's only way to sign in; set a password first",
-        )),
-    }
+    service::unlink_identity(&state, &principal, provider, subject).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Create an account of a role below your own.
@@ -283,21 +175,8 @@ pub(crate) async fn create_account(
     principal: Principal,
     Json(request): Json<CreateAccountRequest>,
 ) -> ApiResult<(StatusCode, Json<Account>)> {
-    state.authorize(&principal, ACCOUNTS_MANAGE, Scope::Global)?;
-    if !request.role.is_assignable() || !principal.role().can_manage(request.role) {
-        return Err(ApiError::forbidden());
-    }
-    let account = insert_account(
-        &state,
-        request.email,
-        request.password,
-        request.display_name,
-        request.role,
-    )
-    .await?;
-    state
-        .audit(&principal, "account.create", account.id)
-        .await?;
+    let (new, role) = request.into_parts();
+    let account = service::create_account(&state, &principal, new, role).await?;
     Ok((StatusCode::CREATED, Json(account)))
 }
 
@@ -313,8 +192,9 @@ pub(crate) async fn list_accounts(
     principal: Principal,
     Query(query): Query<PageQuery>,
 ) -> ApiResult<Json<Vec<Account>>> {
-    state.authorize(&principal, ACCOUNTS_MANAGE, Scope::Global)?;
-    Ok(Json(state.store().list_accounts(query.page()).await?))
+    Ok(Json(
+        service::accounts(&state, &principal, query.page()).await?,
+    ))
 }
 
 /// Delete an account of a role below your own.
@@ -329,19 +209,7 @@ pub(crate) async fn delete_account(
     principal: Principal,
     Path(account_id): Path<AccountId>,
 ) -> ApiResult<StatusCode> {
-    state.authorize(&principal, ACCOUNTS_MANAGE, Scope::Global)?;
-    let account = state
-        .store()
-        .account(account_id)
-        .await?
-        .ok_or_else(|| ApiError::not_found("account"))?;
-    if !principal.role().can_manage(account.role) {
-        return Err(ApiError::forbidden());
-    }
-    state.store().delete_account(account_id).await?;
-    state
-        .audit(&principal, "account.delete", account_id)
-        .await?;
+    service::delete_account(&state, &principal, account_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -357,18 +225,7 @@ pub(crate) async fn create_organization(
     principal: Principal,
     Json(request): Json<CreateOrganizationRequest>,
 ) -> ApiResult<(StatusCode, Json<Organization>)> {
-    state.authorize(&principal, ORGANIZATIONS_MANAGE, Scope::Global)?;
-    non_empty("name", &request.name, 200)?;
-    let organization = Organization {
-        id: OrganizationId::generate(),
-        slug: Slug::new(request.slug)?,
-        name: request.name,
-        created_at: state.now(),
-    };
-    state.store().insert_organization(&organization).await?;
-    state
-        .audit(&principal, "organization.create", organization.id)
-        .await?;
+    let organization = service::create_organization(&state, &principal, request.into()).await?;
     Ok((StatusCode::CREATED, Json(organization)))
 }
 
@@ -384,8 +241,9 @@ pub(crate) async fn list_organizations(
     principal: Principal,
     Query(query): Query<PageQuery>,
 ) -> ApiResult<Json<Vec<Organization>>> {
-    state.authorize(&principal, ORGANIZATIONS_MANAGE, Scope::Global)?;
-    Ok(Json(state.store().list_organizations(query.page()).await?))
+    Ok(Json(
+        service::organizations(&state, &principal, query.page()).await?,
+    ))
 }
 
 /// Make an account a member of an organization.
@@ -400,28 +258,7 @@ pub(crate) async fn add_member(
     principal: Principal,
     Path((organization_id, account_id)): Path<(OrganizationId, AccountId)>,
 ) -> ApiResult<StatusCode> {
-    state.authorize(&principal, ORGANIZATIONS_MANAGE, Scope::Global)?;
-    state
-        .store()
-        .organization(organization_id)
-        .await?
-        .ok_or_else(|| ApiError::not_found("organization"))?;
-    state
-        .store()
-        .account(account_id)
-        .await?
-        .ok_or_else(|| ApiError::not_found("account"))?;
-    state
-        .store()
-        .add_member(organization_id, account_id)
-        .await?;
-    state
-        .audit(
-            &principal,
-            "organization.member.add",
-            format!("{organization_id}/{account_id}"),
-        )
-        .await?;
+    service::add_member(&state, &principal, organization_id, account_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -437,18 +274,7 @@ pub(crate) async fn remove_member(
     principal: Principal,
     Path((organization_id, account_id)): Path<(OrganizationId, AccountId)>,
 ) -> ApiResult<StatusCode> {
-    state.authorize(&principal, ORGANIZATIONS_MANAGE, Scope::Global)?;
-    state
-        .store()
-        .remove_member(organization_id, account_id)
-        .await?;
-    state
-        .audit(
-            &principal,
-            "organization.member.remove",
-            format!("{organization_id}/{account_id}"),
-        )
-        .await?;
+    service::remove_member(&state, &principal, organization_id, account_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -464,17 +290,8 @@ pub(crate) async fn audit_log(
     principal: Principal,
     Query(query): Query<PageQuery>,
 ) -> ApiResult<Json<Vec<AuditEntryResponse>>> {
-    state.authorize(&principal, AUDIT_READ, Scope::Global)?;
-    let entries = state.store().audit_log(query.page().limit).await?;
+    let entries = service::audit_log(&state, &principal, query.page().limit).await?;
     Ok(Json(
-        entries
-            .into_iter()
-            .map(|entry| AuditEntryResponse {
-                at: entry.at,
-                actor: entry.actor,
-                action: entry.action,
-                target: entry.target,
-            })
-            .collect(),
+        entries.into_iter().map(AuditEntryResponse::from).collect(),
     ))
 }

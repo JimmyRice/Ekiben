@@ -1,4 +1,5 @@
-//! Turning a paid reservation into signed tickets.
+//! Ticket use cases, independent of HTTP: signing tickets for a paid reservation, and
+//! handing them to their holders.
 
 use std::collections::BTreeMap;
 
@@ -7,8 +8,51 @@ use kippu_domain::reservation::Reservation;
 use kippu_domain::ticket::{Ticket, TicketStatus};
 use kippu_domain::{TicketId, Timestamp};
 
+use super::permissions::TICKETS_READ;
 use crate::app::AppState;
+use crate::auth::{Principal, Scope};
 use crate::error::{ApiError, ApiResult};
+use crate::keys::PublishedKey;
+
+/// What a gate needs to verify this deployment's tickets.
+#[derive(Debug, Clone)]
+pub struct GateKeys {
+    /// The `issuer` claim tickets carry.
+    pub issuer: String,
+    /// The active key first, then retired keys still valid for older tickets.
+    pub keys: Vec<PublishedKey>,
+}
+
+/// The keys tickets are signed with.
+pub fn gate_keys(state: &AppState) -> GateKeys {
+    GateKeys {
+        issuer: state.config().issuer.id.clone(),
+        keys: state.tickets().published(),
+    }
+}
+
+/// The caller's tickets, newest first.
+pub async fn tickets(state: &AppState, principal: &Principal) -> ApiResult<Vec<Ticket>> {
+    let account = principal.require_account()?;
+    state.authorize(principal, TICKETS_READ, Scope::Account(account))?;
+    Ok(state.store().tickets_for_account(account).await?)
+}
+
+/// A ticket of the caller's. Other people's tickets are reported as missing.
+pub async fn ticket(state: &AppState, principal: &Principal, id: TicketId) -> ApiResult<Ticket> {
+    let ticket = state
+        .store()
+        .ticket(id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("ticket"))?;
+    if !state
+        .policy()
+        .permits(principal, TICKETS_READ, Scope::Account(ticket.account_id))
+    {
+        return Err(ApiError::not_found("ticket"));
+    }
+    Ok(ticket)
+}
 
 fn unix_seconds(instant: Timestamp) -> u64 {
     u64::try_from(instant.unix_seconds()).unwrap_or(0)

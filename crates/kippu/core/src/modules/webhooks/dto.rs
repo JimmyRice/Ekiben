@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+use super::service::{NewWebhook, SigningKey, WebhookChanges};
+use crate::keys::encode_key;
+
 /// A new webhook. It receives events from now on, not those recorded before.
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -43,4 +46,33 @@ pub struct WebhookKey {
 pub struct WebhookKeys {
     /// Currently one key; receivers should look keys up by id so rotation needs no change.
     pub keys: Vec<WebhookKey>,
+}
+
+impl From<CreateWebhookRequest> for NewWebhook {
+    fn from(request: CreateWebhookRequest) -> Self {
+        Self {
+            url: request.url,
+            topics: request.topics,
+        }
+    }
+}
+
+impl From<WebhookPatch> for WebhookChanges {
+    fn from(patch: WebhookPatch) -> Self {
+        Self {
+            url: patch.url,
+            topics: patch.topics,
+            active: patch.active,
+        }
+    }
+}
+
+impl From<SigningKey> for WebhookKey {
+    fn from(key: SigningKey) -> Self {
+        Self {
+            key_id: key.key_id,
+            algorithm: "Ed25519",
+            public_key: encode_key(&key.public_key),
+        }
+    }
 }

@@ -71,8 +71,17 @@ as `shop`, `attestor`, `reserve`, `drain`); the full journey over real TCP is
   a new case in `crates/kippu/store/src/conformance.rs`; every adapter runs the suite via
   `kippu_store::conformance_tests!`.
 - **Module layout** (copy an existing module): `mod.rs` (Module impl, permission constants,
-  grants, tasks), `routes.rs` (thin handlers with `#[utoipa::path]`), `service.rs` (use cases),
-  `dto.rs` (request/response types with `ToSchema`). Paths are absolute (`/v1/...`).
+  grants, tasks), `service.rs` or `service/` (public use cases), `routes.rs` (thin handlers with
+  `#[utoipa::path]`), `dto.rs` (request/response types with `ToSchema` + `From` conversions to
+  and from the service's types). Paths are absolute (`/v1/...`).
+- **Services own the logic, routes own HTTP.** A service fn takes `(&AppState, &Principal |
+  Option<&Principal>, ids, its own input struct)` and does authorization, validation, store
+  calls, audit and outbox events; it never imports `axum` or `dto` (build errors with
+  `crate::error::StatusCode`). A handler extracts, converts with `dto`, calls **one** service
+  fn and shapes the response (status, headers, `IdempotentByDesign`); it never calls
+  `state.store()`, `authorize` or `audit`. Only failures of HTTP itself (an unreadable body)
+  are raised in routes. PUT and PATCH map to the same `update_*(…, version, Changes)` service
+  fn.
 - **Authorization:** `state.authorize(&principal, PERMISSION, Scope::…)`. Grants inherit
   upward; organizers are confined to their organizations, users to their own records. Hide
   other people's records as 404, not 403.

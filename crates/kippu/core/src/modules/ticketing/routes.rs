@@ -1,16 +1,17 @@
-use crate::http::Json;
+//! HTTP handlers: each turns a request into one [`service`](super::service) call.
+
 use axum::extract::{Path, State};
 use axum::http::HeaderValue;
 use axum::http::header::CONTENT_TYPE;
 use axum::response::IntoResponse;
 use kippu_domain::TicketId;
-use kippu_domain::ticket::Ticket;
 
 use super::dto::{TicketKeys, TicketView};
-use super::permissions::TICKETS_READ;
+use super::service;
 use crate::app::AppState;
-use crate::auth::{Principal, Scope};
-use crate::error::{ApiError, ApiResult, Problem};
+use crate::auth::Principal;
+use crate::error::{ApiResult, Problem};
+use crate::http::Json;
 
 const TAG: &str = "ticketing";
 
@@ -20,10 +21,7 @@ const TAG: &str = "ticketing";
     responses((status = 200, body = TicketKeys))
 )]
 pub(crate) async fn ticket_keys(State(state): State<AppState>) -> Json<TicketKeys> {
-    Json(TicketKeys {
-        issuer: state.config().issuer.id.clone(),
-        keys: state.tickets().published(),
-    })
+    Json(service::gate_keys(&state).into())
 }
 
 /// Your tickets, newest first.
@@ -36,9 +34,7 @@ pub(crate) async fn my_tickets(
     State(state): State<AppState>,
     principal: Principal,
 ) -> ApiResult<Json<Vec<TicketView>>> {
-    let account = principal.require_account()?;
-    state.authorize(&principal, TICKETS_READ, Scope::Account(account))?;
-    let tickets = state.store().tickets_for_account(account).await?;
+    let tickets = service::tickets(&state, &principal).await?;
     Ok(Json(tickets.into_iter().map(TicketView::from).collect()))
 }
 
@@ -55,7 +51,7 @@ pub(crate) async fn get_ticket(
     Path(ticket_id): Path<TicketId>,
 ) -> ApiResult<Json<TicketView>> {
     Ok(Json(TicketView::from(
-        own_ticket(&state, &principal, ticket_id).await?,
+        service::ticket(&state, &principal, ticket_id).await?,
     )))
 }
 
@@ -74,7 +70,7 @@ pub(crate) async fn get_ticket_raw(
     principal: Principal,
     Path(ticket_id): Path<TicketId>,
 ) -> ApiResult<impl IntoResponse> {
-    let ticket = own_ticket(&state, &principal, ticket_id).await?;
+    let ticket = service::ticket(&state, &principal, ticket_id).await?;
     Ok((
         [(
             CONTENT_TYPE,
@@ -82,24 +78,4 @@ pub(crate) async fn get_ticket_raw(
         )],
         ticket.encoded,
     ))
-}
-
-/// A ticket of the caller's. Other people's tickets are reported as missing.
-async fn own_ticket(
-    state: &AppState,
-    principal: &Principal,
-    ticket_id: TicketId,
-) -> ApiResult<Ticket> {
-    let ticket = state
-        .store()
-        .ticket(ticket_id)
-        .await?
-        .ok_or_else(|| ApiError::not_found("ticket"))?;
-    if !state
-        .policy()
-        .permits(principal, TICKETS_READ, Scope::Account(ticket.account_id))
-    {
-        return Err(ApiError::not_found("ticket"));
-    }
-    Ok(ticket)
 }

@@ -1,27 +1,19 @@
-//! The purchase pipeline.
-//!
-//! ```text
-//! submit ──▶ Queued (durable) ──worker──▶ Reserved (inventory held) ──checkout──▶ PaymentPending
-//!                                  └────▶ Rejected (sold out, limit, …)
-//! ```
-//!
-//! Submitting only records intent, so the front door stays fast under any load; workers drain
-//! the queue at a steady pace, and the database alone decides who gets a ticket.
+//! The pipeline behind the front door: workers turn queued requests into reservations or
+//! rejections, and expire reservations left unpaid.
 
 use kippu_domain::catalog::{Sale, TicketType};
 use kippu_domain::outbox::IntegrationEvent;
-use kippu_domain::payment::Environment;
 use kippu_domain::purchase::{Basket, PurchaseRequest, PurchaseStatus, RejectionReason};
 use kippu_domain::reservation::{Reservation, ReservationStatus, ReservedItem};
 use kippu_domain::validation::IdempotencyKey;
-use kippu_domain::{AccountId, AttestorId, Duration, Money, PurchaseRequestId, ReservationId};
+use kippu_domain::{AccountId, Duration, Money, PurchaseRequestId, ReservationId};
 use kippu_store::{BoxError, Hold, Insertion, Lease, StoreTx};
 use tracing::Instrument;
 
 use crate::app::AppState;
-use crate::error::{ApiError, ApiResult};
+use crate::error::{ApiError, ApiResult, StatusCode};
 use crate::module::Progress;
-use crate::modules::payments::service::{IncomingPayment, line_items, settle};
+use crate::modules::payments::service::line_items;
 
 /// The answer to resubmitting a key: the same purchase again, or a different one.
 fn resubmitted(existing: PurchaseRequest, basket: &Basket) -> ApiResult<PurchaseRequest> {
@@ -30,7 +22,7 @@ fn resubmitted(existing: PurchaseRequest, basket: &Basket) -> ApiResult<Purchase
         Ok(existing)
     } else {
         Err(ApiError::new(
-            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            StatusCode::UNPROCESSABLE_ENTITY,
             "idempotency-key-reused",
             "this Idempotency-Key was already used for a different purchase",
         ))
@@ -42,7 +34,7 @@ fn resubmitted(existing: PurchaseRequest, basket: &Basket) -> ApiResult<Purchase
 /// With an inbox the request is accepted into it and persisted by a worker later, unless the
 /// database already has it. A retry while the first attempt is still in the inbox is
 /// dropped by the inbox's deduplication; if its basket differed, the first one wins.
-pub(crate) async fn submit(
+pub(super) async fn submit(
     state: &AppState,
     account: AccountId,
     sale: &Sale,
@@ -302,7 +294,7 @@ pub(crate) async fn process_batch(state: AppState) -> Result<Progress, BoxError>
 }
 
 /// Releases what a reservation holds and records its new status.
-async fn release(tx: &mut dyn StoreTx, reservation: &Reservation) -> ApiResult<()> {
+pub(super) async fn release(tx: &mut dyn StoreTx, reservation: &Reservation) -> ApiResult<()> {
     let items = line_items(reservation);
     tx.inventory().release_held(&items).await?;
     tx.inventory()
@@ -353,99 +345,6 @@ pub(crate) async fn expire_batch(state: AppState) -> Result<Progress, BoxError> 
     } else {
         Progress::Idle
     })
-}
-
-/// The buyer gives a reservation up. Idempotent.
-pub(crate) async fn cancel(state: &AppState, reservation: &Reservation) -> ApiResult<Reservation> {
-    let now = state.now();
-    let mut tx = state.store().begin().await?;
-    let mut current = tx
-        .reservations()
-        .lock_reservation(reservation.id)
-        .await?
-        .ok_or_else(|| ApiError::not_found("reservation"))?;
-    let was_holding = current.status.holds_inventory();
-    current.status = current.status.cancel()?;
-    if was_holding {
-        current.updated_at = now;
-        release(&mut *tx, &current).await?;
-    }
-    tx.commit().await?;
-    tracing::info!(reservation = %current.id, "reservation cancelled");
-    Ok(current)
-}
-
-/// The buyer chooses how to pay. Free reservations are settled on the spot.
-pub(crate) async fn checkout(
-    state: &AppState,
-    reservation: &Reservation,
-    attestor_id: Option<AttestorId>,
-) -> ApiResult<Reservation> {
-    let store = state.store();
-    if reservation.total.is_zero() {
-        let free = store
-            .attestor(AttestorId::FREE)
-            .await?
-            .ok_or_else(|| ApiError::internal("the built-in free attestor is missing"))?;
-        let payment = IncomingPayment {
-            attestation_id: format!("free:{}", reservation.id),
-            reservation_id: reservation.id,
-            amount: reservation.total,
-            occurred_at: state.now(),
-        };
-        return Ok(settle(state, &free, payment).await?.reservation);
-    }
-
-    let attestor_id = attestor_id.ok_or_else(|| {
-        kippu_domain::ValidationError::new(
-            "attestor_id",
-            "is required for a reservation that costs money",
-        )
-    })?;
-    let sale = store
-        .sale(reservation.sale_id)
-        .await?
-        .ok_or_else(|| ApiError::not_found("sale"))?;
-    let attestor = store
-        .attestor(attestor_id)
-        .await?
-        .filter(|attestor| !attestor.revoked && sale.accepts(attestor.id))
-        .ok_or_else(|| {
-            ApiError::new(
-                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
-                "attestor-not-accepted",
-                "this sale does not accept that payment method",
-            )
-        })?;
-    if attestor.environment == Environment::Sandbox && reservation.environment == Environment::Live
-    {
-        return Err(ApiError::new(
-            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
-            "environment-mismatch",
-            "a sandbox payment method cannot pay for a live sale",
-        ));
-    }
-
-    let now = state.now();
-    let mut tx = store.begin().await?;
-    let mut current = tx
-        .reservations()
-        .lock_reservation(reservation.id)
-        .await?
-        .ok_or_else(|| ApiError::not_found("reservation"))?;
-    current.status = current.status.checkout()?;
-    current.attestor_id = Some(attestor.id);
-    current.updated_at = now;
-    tx.reservations().update_reservation(&current).await?;
-    let event = IntegrationEvent::PaymentRequested {
-        reservation_id: current.id,
-        attestor_id: attestor.id,
-        amount: current.total,
-        expires_at: current.expires_at,
-    };
-    tx.outbox().append_event(&event, now).await?;
-    tx.commit().await?;
-    Ok(current)
 }
 
 #[cfg(test)]

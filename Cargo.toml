@@ -50,6 +50,7 @@ kippu-server = { path = "crates/kippu/server", default-features = false }
 # ── Async runtime & HTTP ────────────────────────────────────────────────────────
 async-trait = "0.1.92"
 axum = "0.8.9"
+bytes = "1.12"
 http-body-util = "0.1"
 tokio = "1.53"
 tokio-util = "0.7.19"

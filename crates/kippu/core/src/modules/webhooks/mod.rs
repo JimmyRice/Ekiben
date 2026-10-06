@@ -11,7 +11,7 @@
 mod delivery;
 mod dto;
 mod routes;
-mod service;
+pub mod service;
 pub mod signature;
 
 use std::time::Duration;

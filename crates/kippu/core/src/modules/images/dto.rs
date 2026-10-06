@@ -3,6 +3,8 @@ use kippu_domain::image::EventImage;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+use super::service::PublishedImage;
+
 /// An event image and where to get it.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct EventImageView {
@@ -20,4 +22,13 @@ pub struct EventImageView {
 pub struct ImageOrder {
     /// Every image of the event, exactly once, first to last.
     pub image_ids: Vec<ImageId>,
+}
+
+impl From<PublishedImage> for EventImageView {
+    fn from(published: PublishedImage) -> Self {
+        Self {
+            image: published.image,
+            url: published.url,
+        }
+    }
 }
