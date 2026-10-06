@@ -24,7 +24,8 @@ crates/kippu/adapters/objects-* object storage for event images: `-common` (obje
                                `-s3`, `-gcs`, `-azure`, one crate per provider (port in kippu-store)
 crates/kaisatsu                KP1 encode/verify, no_std; `issuer` feature for signing; fuzz/
 crates/ffi/c                   C ABI (the only crate with `unsafe`), generated include/kaisatsu.h
-crates/xtask                   `cargo xtask vectors|header [--check] | c-example | size`
+crates/ffi/uniffi              UniFFI (proc-macro, no UDL) for Swift, Kotlin and C#; safe Rust only
+crates/xtask                   `cargo xtask vectors|header [--check] | c-example | uniffi | size`
 ```
 
 New crates go into the matching partition under `crates/`, are listed explicitly in the root
@@ -42,6 +43,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features --workspace --excl
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features -p kaisatsu-ffi  # same lib name as kaisatsu
 cargo xtask vectors --check && cargo xtask header --check               # generated files up to date
 cargo xtask c-example                                                   # C ABI against all 15 vectors
+cargo xtask uniffi                                                      # generate Swift/Kotlin/C# into target/uniffi, run the vectors in Swift
 cargo build -p kaisatsu --target thumbv7em-none-eabihf                  # proves no_std
 cargo run -- serve --config <file>                                      # see kippu.example.toml
 cargo build --profile dist                                              # server distribution build (~13 MB vs ~21 MB)
@@ -142,6 +144,9 @@ as `shop`, `attestor`, `reserve`, `drain`); the full journey over real TCP is
   (`/v1/tickets/{id}/raw`); how they reach a gate is the integrator's choice. Base45 is an
   optional `base45` feature (kaisatsu, kaisatsu-ffi with `KAISATSU_BASE45`, kippu-server);
   default builds must not contain it (`cargo xtask c-example` checks the C library).
+- **UniFFI:** one `Verifier` object, one `verify(ticket, now)` call per scan; keep the API this
+  small. `uniffi` is pinned (`=0.31.0`) to the version `uniffi-bindgen-cs` is built on, and the
+  generated sources must come from the library they are shipped with. C and C++ stay on the C ABI.
 - **FFI:** every `unsafe` block has a `// SAFETY:` comment; regenerate the header with
   `cargo xtask header`; ship builds with `--no-default-features --profile release-small`.
 

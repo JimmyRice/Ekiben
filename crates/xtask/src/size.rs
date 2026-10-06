@@ -1,5 +1,5 @@
-//! Reports the size of the Kaisatsu C library as it ships: without `std`, built with the
-//! `release-small` profile.
+//! Reports the size of the Kaisatsu C library as it ships (without `std`) and of the `UniFFI`
+//! one (which needs `std`), both built with the `release-small` profile.
 //!
 //! Static archives contain every object file; the linker drops what an application does not
 //! use, so the shared library is the more representative number for apps. Bare-metal sizes
@@ -36,6 +36,22 @@ pub(crate) fn run() -> Result {
         "libkaisatsu.so",
         "kaisatsu.dll",
         "libkaisatsu.a",
+    ] {
+        report(&host.join(file));
+    }
+
+    // The UniFFI library carries the standard library, so it is bigger than the C one.
+    run_command(Command::new(env!("CARGO")).current_dir(&root).args([
+        "build",
+        "--package",
+        "kaisatsu-uniffi",
+        "--profile",
+        "release-small",
+    ]))?;
+    for file in [
+        "libkaisatsu_uniffi.dylib",
+        "libkaisatsu_uniffi.so",
+        "kaisatsu_uniffi.dll",
     ] {
         report(&host.join(file));
     }

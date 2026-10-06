@@ -1,6 +1,6 @@
 [package]
 name = "kaisatsu-ffi"
-description = "C ABI for Kaisatsu: verify Kippu tickets from C, C++, C#, Swift or firmware."
+description = "C ABI for Kaisatsu: verify Kippu tickets from C, C++, Zig, Go or firmware."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -29,6 +29,7 @@ members = [
     "crates/kaisatsu",
     # Bindings
     "crates/ffi/c",
+    "crates/ffi/uniffi",
     # Tooling
     "crates/xtask",
 ]
@@ -110,6 +111,11 @@ tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
 utoipa = "6.0"
 utoipa-axum = "0.3"
+
+# ── Language bindings ───────────────────────────────────────────────────────────
+# Pinned to the release the C# generator (uniffi-bindgen-cs) is built on: generated sources
+# and the library must come from the same UniFFI contract version.
+uniffi = { version = "=0.31.0", default-features = false }
 
 # ── Binary ──────────────────────────────────────────────────────────────────────
 mimalloc = "0.1.52"

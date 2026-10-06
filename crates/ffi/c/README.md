@@ -1,8 +1,9 @@
 # kaisatsu-ffi
 
-C ABI for [Kaisatsu](../../kaisatsu), usable from C, C++, C# (P/Invoke), Swift, Zig, Go (cgo)
-and firmware. No heap allocation, no handles to free, no global state: pass the trusted public
-keys and the scanned bytes, get the claims back.
+C ABI for [Kaisatsu](../../kaisatsu), usable from C, C++, Zig, Go (cgo) and firmware (Swift,
+Kotlin and C# have idiomatic bindings in [`kaisatsu-uniffi`](../uniffi)). No heap allocation,
+no handles to free, no global state: pass the trusted public keys and the scanned bytes, get
+the claims back.
 
 ```c
 #include "kaisatsu.h"

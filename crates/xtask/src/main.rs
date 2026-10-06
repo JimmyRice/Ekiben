@@ -5,6 +5,7 @@
 //! | `vectors [--check]` | (Re)generate `spec/test-vectors/v1/vectors.json`. |
 //! | `header [--check]` | (Re)generate `crates/ffi/c/include/kaisatsu.h` with cbindgen. |
 //! | `c-example` | Build the C ABI, compile `crates/ffi/c/examples/verify.c` and run it on every vector. |
+//! | `uniffi` | Build the `UniFFI` library, generate Swift/Kotlin (and C#) sources into `target/uniffi/`, run every vector through the Swift example. |
 //! | `size` | Report the size of the Kaisatsu C library built with the `release-small` profile. |
 //!
 //! `--check` fails instead of writing when the generated file is out of date, for CI.
@@ -17,6 +18,7 @@ use std::process::{Command, ExitCode};
 mod c_example;
 mod header;
 mod size;
+mod uniffi;
 mod vectors;
 
 type Result<T = (), E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
@@ -28,9 +30,10 @@ fn main() -> ExitCode {
         Some("vectors") => vectors::run(check),
         Some("header") => header::run(check),
         Some("c-example") => c_example::run(),
+        Some("uniffi") => uniffi::run(),
         Some("size") => size::run(),
         _ => {
-            eprintln!("usage: cargo xtask <vectors|header|c-example|size> [--check]");
+            eprintln!("usage: cargo xtask <vectors|header|c-example|uniffi|size> [--check]");
             return ExitCode::FAILURE;
         }
     };
