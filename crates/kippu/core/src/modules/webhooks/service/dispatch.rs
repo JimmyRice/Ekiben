@@ -148,8 +148,12 @@ pub(crate) async fn deliver(
                 }
             };
         if relevant {
-            if let Err(error) =
-                post(&client, &key, &webhook, record, state.now().unix_seconds()).await
+            if let Err(error) = kippu_telemetry::call(
+                "webhook",
+                "deliver",
+                post(&client, &key, &webhook, record, state.now().unix_seconds()),
+            )
+            .await
             {
                 failure = Some(error);
                 break;

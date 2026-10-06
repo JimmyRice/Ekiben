@@ -8,6 +8,7 @@ use axum::response::{IntoResponse, Response};
 use kippu_domain::ValidationError;
 use kippu_domain::reservation::IllegalTransition;
 use kippu_store::{BoxError, StoreError};
+use kippu_telemetry::Origin;
 use serde::Serialize;
 
 /// The status codes problems are reported with, re-exported so services build their errors
@@ -31,14 +32,6 @@ pub struct ApiError {
     origin: Origin,
 }
 
-/// Where an [`ApiError`] was raised: the source line and the innermost step (an instrumented
-/// service function) that was running. Logged, never returned to clients.
-#[derive(Debug, Clone, Copy)]
-struct Origin {
-    location: &'static std::panic::Location<'static>,
-    step: Option<&'static str>,
-}
-
 impl ApiError {
     /// An error with a custom problem kind.
     #[track_caller]
@@ -52,18 +45,7 @@ impl ApiError {
             kind,
             detail: detail.into(),
             source: None,
-            origin: Origin {
-                location: std::panic::Location::caller(),
-                step: tracing::Span::current()
-                    .metadata()
-                    .map(tracing::Metadata::name)
-                    .filter(|name| {
-                        !matches!(
-                            *name,
-                            crate::http::trace::REQUEST_SPAN | crate::http::trace::TASK_SPAN
-                        )
-                    }),
-            },
+            origin: Origin::capture(),
         }
     }
 
@@ -162,13 +144,9 @@ impl ApiError {
         self.kind
     }
 
-    /// Where the error was raised, for logs: `step @ file:line`, or just `file:line`.
-    pub fn origin(&self) -> String {
-        let Origin { location, step } = self.origin;
-        match step {
-            Some(step) => format!("{step} @ {}:{}", location.file(), location.line()),
-            None => format!("{}:{}", location.file(), location.line()),
-        }
+    /// Where the error was raised, for logs.
+    pub const fn origin(&self) -> Origin {
+        self.origin
     }
 
     /// The human-readable explanation.
@@ -242,7 +220,7 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         crate::http::trace::record_problem(&self);
         if self.status.is_server_error() {
-            tracing::error!(error = %self, source = ?self.source, origin = %self.origin(), "request failed");
+            tracing::error!(error = %self, source = ?self.source, origin = %self.origin, "request failed");
         }
         let problem = Problem {
             kind: format!("urn:kippu:problem:{}", self.kind),

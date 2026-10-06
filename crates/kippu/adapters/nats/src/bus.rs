@@ -12,6 +12,16 @@ pub const SEQUENCE_HEADER: &str = "Kippu-Sequence";
 #[async_trait]
 impl EventBus for NatsQueue {
     async fn last_published(&self) -> StoreResult<i64> {
+        kippu_telemetry::call("nats", "last published", self.last_sequence()).await
+    }
+
+    async fn publish(&self, record: &OutboxRecord) -> StoreResult<()> {
+        self.relay(record).await
+    }
+}
+
+impl NatsQueue {
+    async fn last_sequence(&self) -> StoreResult<i64> {
         let mut events = self.events.clone();
         let last = events
             .info()
@@ -30,7 +40,8 @@ impl EventBus for NatsQueue {
             .ok_or_else(|| StoreError::backend("the last event on the bus has no Kippu-Sequence"))
     }
 
-    async fn publish(&self, record: &OutboxRecord) -> StoreResult<()> {
+    /// Publishes one outbox record to its topic; [`NatsQueue::publish`] traces the call.
+    async fn relay(&self, record: &OutboxRecord) -> StoreResult<()> {
         let payload = serde_json::to_vec(&serde_json::json!({
             "sequence": record.sequence,
             "created_at": record.created_at,

@@ -12,6 +12,7 @@ async-trait.workspace = true
 futures-util.workspace = true
 kippu-domain.workspace = true
 kippu-store.workspace = true
+kippu-telemetry.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]

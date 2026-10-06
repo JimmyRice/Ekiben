@@ -13,6 +13,7 @@ spec/                          normative protocols (KP1 tickets, attestors, webh
 docs/                          walkthrough.md/.http, external-login.md (writing a sign-in module)
 crates/kippu/domain            pure domain: ids, money, timestamps, state machines — no I/O, no clock
 crates/kippu/store             storage ports, consistency contract, `conformance` test suite
+crates/kippu/telemetry         span contract + log layer (feature `layer`): one call chain per request
 crates/kippu/core              Module system, auth/RBAC, HTTP, background tasks, built-in modules
 crates/kippu/server            launcher: CLI (`kippu …`), config sources, adapter wiring
 crates/kippu/adapters/sqlite   SQLite adapter (single writer)
@@ -31,7 +32,7 @@ Keep the repository root uncluttered and do not add speculative `.gitignore` ent
 ## Commands
 
 ```bash
-cargo test --workspace --all-features                                   # 195 tests incl. e2e over TCP
+cargo test --workspace --all-features                                   # 198 tests incl. e2e over TCP
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets           # default features too
 cargo fmt --all
@@ -102,10 +103,17 @@ as `shop`, `attestor`, `reserve`, `drain`); the full journey over real TCP is
   The wire format is defined only in `kaisatsu` (`issuer` feature) — never duplicate it.
   Changing the format means regenerating vectors (`cargo xtask vectors`) and updating
   `spec/ticket-protocol.md`.
-- **Logging:** requests run in a `request` span and task runs in a `task` span, defined with
-  their fields in `crates/kippu/core/src/http/trace.rs`; `crates/kippu/server/src/telemetry.rs`
-  renders them (pretty blocks, compact lines, JSON). Log business milestones with
-  `tracing::info!` and they land in the right block. Never record headers, bodies or tokens.
+- **Logging goes through `kippu-telemetry`.** Libraries (core, adapters) depend on the crate
+  without its `layer` feature: span names, `request_span`, `Origin` and `call`. Only the launcher
+  enables `layer` and installs `kippu_telemetry::layer::init`. Never format log output elsewhere.
+  Every request and task run is one unit; what runs inside it becomes its call chain:
+  service functions carry `#[tracing::instrument(skip_all)]`, a call to anything outside the
+  process (NATS, object storage, a webhook receiver — any new adapter) is wrapped in
+  `kippu_telemetry::call("system", "operation", future)`, and database statements are counted
+  from sqlx's own events (nothing to add). Errors capture where they were raised through
+  `#[track_caller]` constructors and `Origin::capture()`; a new error type that reaches a
+  response does the same. Log business milestones with `tracing::info!`. Never record headers,
+  bodies or tokens.
 - **Environment variables named `KIPPU_*` are configuration** and unknown keys are rejected:
   test settings use `EKIBEN_TEST_*` so a test run cannot break the config it loads.
 - **Messaging is optional:** `PurchaseInbox`/`EventBus` (kippu-store) are injected with

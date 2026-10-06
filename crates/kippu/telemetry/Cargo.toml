@@ -1,0 +1,22 @@
+[package]
+name = "kippu-telemetry"
+description = "Kippu's observability: the span contract every layer logs through, and the log layer that turns it into one call chain per request."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+## The log layer and its formats (pretty, compact, json); everything a launcher needs.
+## Without it the crate is only the span contract, which is all a library has to depend on.
+layer = ["dep:http", "dep:serde_json", "dep:time", "dep:tracing-subscriber"]
+
+[dependencies]
+http = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+time = { workspace = true, optional = true, features = ["formatting"] }
+tracing.workspace = true
+tracing-subscriber = { workspace = true, optional = true, features = ["env-filter"] }
+
+[lints]
+workspace = true

@@ -19,6 +19,7 @@ http-body-util.workspace = true
 kaisatsu = { workspace = true, features = ["issuer"] }
 kippu-domain = { workspace = true, features = ["openapi"] }
 kippu-store.workspace = true
+kippu-telemetry.workspace = true
 object_store.workspace = true
 reqwest.workspace = true
 rustls.workspace = true

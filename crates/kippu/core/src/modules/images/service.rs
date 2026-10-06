@@ -145,13 +145,23 @@ pub async fn upload_image(
         attributes,
         ..PutOptions::default()
     };
-    storage
-        .store
-        .put_opts(&object_path(&image), PutPayload::from_bytes(bytes), options)
-        .await
-        .map_err(storage_failed)?;
+    kippu_telemetry::call(
+        "object storage",
+        "put",
+        storage
+            .store
+            .put_opts(&object_path(&image), PutPayload::from_bytes(bytes), options),
+    )
+    .await
+    .map_err(storage_failed)?;
     if let Err(error) = state.store().insert_event_image(&image).await {
-        if let Err(cleanup) = storage.store.delete(&object_path(&image)).await {
+        if let Err(cleanup) = kippu_telemetry::call(
+            "object storage",
+            "delete",
+            storage.store.delete(&object_path(&image)),
+        )
+        .await
+        {
             tracing::warn!(image = %image.id, %cleanup, "could not remove an orphaned image");
         }
         return Err(error.into());
@@ -193,14 +203,18 @@ pub async fn image_content(
             image.object_key()
         )));
     }
-    let object = storage
-        .store
-        .get_opts(&object_path(&image), GetOptions::default())
-        .await
-        .map_err(|error| match error {
-            object_store::Error::NotFound { .. } => ApiError::not_found("image"),
-            other => storage_failed(other),
-        })?;
+    let object = kippu_telemetry::call(
+        "object storage",
+        "get",
+        storage
+            .store
+            .get_opts(&object_path(&image), GetOptions::default()),
+    )
+    .await
+    .map_err(|error| match error {
+        object_store::Error::NotFound { .. } => ApiError::not_found("image"),
+        other => storage_failed(other),
+    })?;
     Ok(ImageContent::Stored {
         format: image.format,
         public: event.is_public(),
@@ -221,7 +235,13 @@ pub async fn delete_image(
     let image = image_of(state, event.id, image_id).await?;
     // The record first, so the image disappears from the API even if the object lingers.
     state.store().delete_event_image(image.id).await?;
-    if let Err(error) = storage.store.delete(&object_path(&image)).await {
+    if let Err(error) = kippu_telemetry::call(
+        "object storage",
+        "delete",
+        storage.store.delete(&object_path(&image)),
+    )
+    .await
+    {
         tracing::warn!(image = %image.id, %error, "image forgotten, but its object remains");
     }
     Ok(())

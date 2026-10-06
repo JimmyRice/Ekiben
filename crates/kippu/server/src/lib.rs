@@ -7,7 +7,6 @@ mod commands;
 pub mod config;
 mod launcher;
 mod serving;
-mod telemetry;
 mod verify;
 
 pub use launcher::Launcher;

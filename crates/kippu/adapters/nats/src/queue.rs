@@ -118,12 +118,15 @@ impl NatsQueue {
     ) -> StoreResult<()> {
         let mut headers = headers;
         headers.insert("Nats-Msg-Id", id.as_str());
-        self.jetstream
-            .publish_with_headers(subject, headers, payload.into())
-            .await
-            .map_err(unavailable)?
-            .await
-            .map_err(unavailable)?;
-        Ok(())
+        kippu_telemetry::call("nats", "publish", async {
+            self.jetstream
+                .publish_with_headers(subject, headers, payload.into())
+                .await
+                .map_err(unavailable)?
+                .await
+                .map_err(unavailable)?;
+            Ok(())
+        })
+        .await
     }
 }

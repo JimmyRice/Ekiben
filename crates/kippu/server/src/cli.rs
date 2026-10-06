@@ -39,6 +39,16 @@ pub enum LogFormat {
     Json,
 }
 
+impl From<LogFormat> for kippu_telemetry::layer::Format {
+    fn from(format: LogFormat) -> Self {
+        match format {
+            LogFormat::Pretty => Self::Pretty,
+            LogFormat::Compact => Self::Compact,
+            LogFormat::Json => Self::Json,
+        }
+    }
+}
+
 /// Subcommands.
 #[derive(Debug, Subcommand)]
 pub enum Command {

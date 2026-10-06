@@ -8,7 +8,7 @@ use kippu_core::Module;
 use kippu_store::BoxError;
 
 use crate::cli::{Cli, Command, ConfigCommand, LogFormat};
-use crate::{commands, telemetry, verify};
+use crate::{commands, verify};
 
 /// Builds and runs a Kippu instance from the command line.
 ///
@@ -45,7 +45,7 @@ impl Launcher {
     /// Parses the command line, runs the chosen command and returns the exit code.
     pub fn run(self) -> ExitCode {
         let cli = Cli::parse();
-        telemetry::init(cli.log_format);
+        kippu_telemetry::layer::init(cli.log_format.into());
         let runtime = match tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()

@@ -24,10 +24,13 @@ impl InboxDelivery for NatsDelivery {
     async fn ack(self: Box<Self>) -> StoreResult<()> {
         // A double ack waits for the server to confirm, so a crash right after cannot
         // leave the message to be delivered again silently.
-        self.message
-            .double_ack()
-            .await
-            .map_err(|error| StoreError::Unavailable(error.to_string().into()))
+        kippu_telemetry::call("nats", "ack", async {
+            self.message
+                .double_ack()
+                .await
+                .map_err(|error| StoreError::Unavailable(error.to_string().into()))
+        })
+        .await
     }
 }
 
@@ -45,6 +48,13 @@ impl PurchaseInbox for NatsQueue {
     }
 
     async fn receive(&self, limit: usize) -> StoreResult<Vec<Box<dyn InboxDelivery>>> {
+        kippu_telemetry::call("nats", "receive", self.pull(limit)).await
+    }
+}
+
+impl NatsQueue {
+    /// Pulls up to `limit` requests from the inbox consumer.
+    async fn pull(&self, limit: usize) -> StoreResult<Vec<Box<dyn InboxDelivery>>> {
         let mut batch = self
             .consumer
             .fetch()

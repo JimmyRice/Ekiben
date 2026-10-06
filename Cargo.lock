@@ -1432,6 +1432,7 @@ dependencies = [
  "kippu-store-mysql",
  "kippu-store-postgres",
  "kippu-store-sqlite",
+ "kippu-telemetry",
  "object_store",
  "reqwest",
  "rustls",
@@ -1478,6 +1479,7 @@ dependencies = [
  "futures-util",
  "kippu-domain",
  "kippu-store",
+ "kippu-telemetry",
  "serde_json",
  "tokio",
  "uuid",
@@ -1502,6 +1504,7 @@ dependencies = [
  "kippu-store-mysql",
  "kippu-store-postgres",
  "kippu-store-sqlite",
+ "kippu-telemetry",
  "secrecy",
  "serde",
  "serde_json",
@@ -1569,6 +1572,17 @@ dependencies = [
  "tempfile",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "kippu-telemetry"
+version = "0.1.0"
+dependencies = [
+ "http",
+ "serde_json",
+ "time",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
