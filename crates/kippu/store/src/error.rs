@@ -24,3 +24,6 @@ impl StoreError {
         Self::Backend(error.into())
     }
 }
+
+/// Result of a storage operation.
+pub type StoreResult<T> = Result<T, StoreError>;

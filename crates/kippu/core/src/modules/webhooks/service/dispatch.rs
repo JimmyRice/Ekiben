@@ -16,7 +16,9 @@ use kippu_store::{BoxError, Lease, OutboxRecord, WebhookRun};
 use serde_json::json;
 
 use crate::app::AppState;
-use crate::module::Progress;
+use crate::config::Config;
+use crate::module::{BackgroundTask, Progress};
+use crate::modules::webhooks::delivery::client;
 use crate::modules::webhooks::signature::{DELIVERY_HEADER, SIGNATURE_HEADER, sign};
 
 /// Which organization an event belongs to, via its reservation's event; `None` if that can no
@@ -195,4 +197,22 @@ pub(crate) async fn deliver(
         );
     }
     Ok(Progress::MoreWork)
+}
+
+/// The background task that delivers events, if the deployment can sign them and has an HTTP
+/// client for it.
+pub(crate) fn delivery_task(config: &Config) -> Option<BackgroundTask> {
+    config.keys.webhook_signing_key.as_ref()?;
+    let client = match client(&config.webhooks) {
+        Ok(client) => client,
+        Err(error) => {
+            tracing::error!(%error, "webhook delivery is disabled: no HTTP client");
+            return None;
+        }
+    };
+    Some(BackgroundTask::every(
+        "webhooks",
+        StdDuration::from_millis(config.webhooks.interval_ms),
+        move |state| deliver(state, client.clone()),
+    ))
 }

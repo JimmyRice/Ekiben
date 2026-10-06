@@ -130,6 +130,13 @@ as `shop`, `attestor`, `reserve`, `drain`); the full journey over real TCP is
   warnings. Tests may unwrap inside `#[test]` fns; integration-test helper files need a
   file-level `#![allow(clippy::unwrap_used, …, reason = "…")]`. Prefer `#[expect(…, reason)]`
   over `#[allow]` in production code.
+- **Thin `lib.rs` / `mod.rs`.** They hold only module docs (what this layer does, which file
+  holds what), crate attributes, `mod` declarations and `pub use` / `pub(crate) use`
+  re-exports. Everything else — functions, types, constants, trait impls, tests — lives in a
+  file named after its content (`store.rs`, `errors.rs`, `buying.rs`, …). The one exception is
+  a feature module's `mod.rs`: its `Module` impl, the unit struct and the `permissions`
+  constants (pure wiring; setup code such as building a task goes in the service).
+  `tests/support/mod.rs` is exempt. Directory modules keep the `foo/mod.rs` form.
 - Every public item has rustdoc; each crate's README is its crate docs (doctests run).
 - Confirm design questions that change APIs or storage with the user before implementing.
 

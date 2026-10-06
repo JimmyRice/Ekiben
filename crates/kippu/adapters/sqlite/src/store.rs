@@ -1,0 +1,109 @@
+//! Connecting to SQLite, and the store itself.
+
+use std::str::FromStr;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use kippu_store::{Store, StoreCapabilities, StoreError, StoreResult, StoreTx};
+use sqlx::SqlitePool;
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
+
+use crate::errors::error;
+use crate::tx;
+
+static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+
+/// How many connections serve reads when the database is a file.
+const READ_CONNECTIONS: u32 = 8;
+
+/// Kippu's storage on SQLite.
+///
+/// SQLite allows one writer at a time, so every write — transactional or not — goes through a
+/// single-connection *writer* pool, which serializes them in the application instead of
+/// letting them collide on `SQLITE_BUSY`. In WAL mode readers never block the writer, so reads
+/// use a separate pool. An in-memory database has one connection for everything.
+#[derive(Debug, Clone)]
+pub struct SqliteStore {
+    pub(crate) writer: SqlitePool,
+    pub(crate) reader: SqlitePool,
+}
+
+impl SqliteStore {
+    /// Opens (creating if needed) the database at `url`, e.g. `sqlite:///var/lib/kippu.db`
+    /// or `sqlite::memory:`.
+    pub async fn connect(url: &str) -> StoreResult<Self> {
+        let options = SqliteConnectOptions::from_str(url)
+            .map_err(StoreError::backend)?
+            .create_if_missing(true)
+            .foreign_keys(true)
+            .busy_timeout(Duration::from_secs(5));
+
+        if url.contains(":memory:") || url.contains("mode=memory") {
+            let pool = pool(1).connect_with(options).await.map_err(error)?;
+            return Ok(Self {
+                writer: pool.clone(),
+                reader: pool,
+            });
+        }
+
+        let options = options
+            .journal_mode(SqliteJournalMode::Wal)
+            .synchronous(SqliteSynchronous::Normal);
+        let writer = pool(1).connect_with(options.clone()).await.map_err(error)?;
+        let reader = pool(READ_CONNECTIONS)
+            .connect_with(options.read_only(true))
+            .await
+            .map_err(error)?;
+        Ok(Self { writer, reader })
+    }
+
+    /// The pool that serializes writes. Extension modules may use it for their own tables.
+    pub fn writer(&self) -> &SqlitePool {
+        &self.writer
+    }
+
+    /// The pool for reads. Extension modules may use it for their own tables.
+    pub fn reader(&self) -> &SqlitePool {
+        &self.reader
+    }
+}
+
+fn pool(max_connections: u32) -> SqlitePoolOptions {
+    SqlitePoolOptions::new()
+        .max_connections(max_connections)
+        .acquire_timeout(Duration::from_secs(30))
+}
+
+#[async_trait]
+impl Store for SqliteStore {
+    fn capabilities(&self) -> StoreCapabilities {
+        StoreCapabilities {
+            backend: "sqlite",
+            concurrent_writers: false,
+        }
+    }
+
+    async fn migrate(&self) -> StoreResult<()> {
+        MIGRATOR
+            .run(&self.writer)
+            .await
+            .map_err(StoreError::backend)
+    }
+
+    async fn ping(&self) -> StoreResult<()> {
+        sqlx::query("SELECT 1")
+            .execute(&self.reader)
+            .await
+            .map_err(error)?;
+        Ok(())
+    }
+
+    async fn begin(&self) -> StoreResult<Box<dyn StoreTx>> {
+        let tx = self
+            .writer
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(error)?;
+        Ok(Box::new(tx::SqliteTx::new(tx)))
+    }
+}

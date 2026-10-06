@@ -4,6 +4,9 @@ use utoipa::ToSchema;
 use super::service::{Admission, QueueTicket};
 use crate::auth::tokens::IssuedToken;
 
+/// The request header carrying an admission pass when submitting a purchase request.
+pub const ADMISSION_PASS: &str = "kippu-admission-pass";
+
 /// Your place in the waiting room.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct QueuePlace {

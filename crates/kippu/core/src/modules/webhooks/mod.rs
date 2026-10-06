@@ -14,8 +14,6 @@ mod routes;
 pub mod service;
 pub mod signature;
 
-use std::time::Duration;
-
 use kippu_domain::account::Role;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -72,20 +70,6 @@ impl Module for Webhooks {
     }
 
     fn tasks(&self, config: &Config) -> Vec<BackgroundTask> {
-        if config.keys.webhook_signing_key.is_none() {
-            return Vec::new();
-        }
-        let client = match delivery::client(&config.webhooks) {
-            Ok(client) => client,
-            Err(error) => {
-                tracing::error!(%error, "webhook delivery is disabled: no HTTP client");
-                return Vec::new();
-            }
-        };
-        vec![BackgroundTask::every(
-            "webhooks",
-            Duration::from_millis(config.webhooks.interval_ms),
-            move |state| service::deliver(state, client.clone()),
-        )]
+        service::delivery_task(config).into_iter().collect()
     }
 }

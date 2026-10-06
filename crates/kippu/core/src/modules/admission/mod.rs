@@ -23,9 +23,6 @@ use crate::module::{BackgroundTask, Module};
 
 pub use dto::*;
 
-/// The request header carrying an admission pass when submitting a purchase request.
-pub const ADMISSION_PASS: &str = "kippu-admission-pass";
-
 /// The admission module.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Admission;
