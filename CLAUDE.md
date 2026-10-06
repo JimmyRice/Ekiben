@@ -42,6 +42,8 @@ cargo xtask vectors --check && cargo xtask header --check               # genera
 cargo xtask c-example                                                   # C ABI against all 15 vectors
 cargo build -p kaisatsu --target thumbv7em-none-eabihf                  # proves no_std
 cargo run -- serve --config <file>                                      # see kippu.example.toml
+cargo build --profile dist                                              # server distribution build (~13 MB vs ~21 MB)
+cargo build --profile dist --no-default-features --features sqlite,mimalloc   # only what you use
 ```
 
 Adapters that need a server run their conformance suite only when a URL is set, and the HTTP
