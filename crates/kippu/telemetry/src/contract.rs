@@ -67,11 +67,14 @@ pub fn record_caller(caller: impl Display) {
     Span::current().record("caller", display(caller));
 }
 
-/// Records an error response's problem and where it was raised, on the current request's span.
-pub fn record_problem(kind: &str, detail: &str, origin: Origin) {
+/// Records an error response's problem on the current request's span, and where it was raised
+/// when that is known (a response the framework made, such as an unknown route, has no origin).
+pub fn record_problem(kind: &str, detail: &str, origin: Option<Origin>) {
     let span = Span::current();
     span.record("problem", display(format_args!("{kind}: {detail}")));
-    span.record("origin", display(origin));
+    if let Some(origin) = origin {
+        span.record("origin", display(origin));
+    }
 }
 
 /// A background task's span. `outcome` is recorded with [`record_outcome`].

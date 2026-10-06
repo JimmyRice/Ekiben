@@ -46,6 +46,7 @@ pub(crate) fn router(state: &AppState, modules: &[Arc<dyn Module>]) -> Router {
                 // Error responses are logged where they are created, with their cause.
                 .on_failure(()),
         )
+        .layer(middleware::from_fn(trace::explain_rejections))
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(CatchPanicLayer::new())
         .layer(TimeoutLayer::with_status_code(
