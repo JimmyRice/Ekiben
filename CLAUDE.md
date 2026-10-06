@@ -35,6 +35,8 @@ cargo test --workspace --all-features                                   # 195 te
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets           # default features too
 cargo fmt --all
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features --workspace --exclude kaisatsu-ffi
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features -p kaisatsu-ffi  # same lib name as kaisatsu
 cargo xtask vectors --check && cargo xtask header --check               # generated files up to date
 cargo xtask c-example                                                   # C ABI against all 15 vectors
 cargo build -p kaisatsu --target thumbv7em-none-eabihf                  # proves no_std

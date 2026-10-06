@@ -12,7 +12,7 @@ heavy contention. PostgreSQL 13 or newer.
 - **Outbox order.** Appends take a transaction-scoped advisory lock, so sequence numbers are
   assigned in commit order and consumers that remember the last sequence never skip an event
   that committed late.
-- **Schema** in [`migrations/`](migrations): native UUIDs, `TIMESTAMPTZ` (microseconds, like
+- **Schema** in `migrations/`: native UUIDs, `TIMESTAMPTZ` (microseconds, like
   Kippu's timestamps), `JSONB` for small structured values, indexes on every foreign key that
   is used for lookups.
 - **Conformance:** `EKIBEN_TEST_POSTGRES_URL=postgres://… cargo test -p kippu-store-postgres`

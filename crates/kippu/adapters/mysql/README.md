@@ -15,7 +15,7 @@ MySQL adapter for [`kippu-store`](../../store). MySQL 8.0.16 or newer, InnoDB.
 - **No `RETURNING`, no `ON CONFLICT DO NOTHING`.** Inserts that may collide run plainly and
   treat a duplicate-key error as "already there"; claims lock, update and re-read in one
   transaction; waiting-room positions come back through `LAST_INSERT_ID(expr)`.
-- **Schema** in [`migrations/`](migrations): `BINARY(16)` UUIDs and `BIGINT` microseconds (MySQL's
+- **Schema** in `migrations/`: `BINARY(16)` UUIDs and `BIGINT` microseconds (MySQL's
   `TIMESTAMP` ends in 2038 and `DATETIME` has no zone), JSON as text.
 - **Conformance:** `EKIBEN_TEST_MYSQL_URL=mysql://… cargo test -p kippu-store-mysql` runs the
   shared suite, each case in a database of its own (the user needs `CREATE`); without the

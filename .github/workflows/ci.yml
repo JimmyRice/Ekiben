@@ -43,6 +43,14 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features
       # Default features too: optional ones (e.g. `base45`) must not be load-bearing.
       - run: cargo clippy --workspace --all-targets
+      # Rustdoc too: crate READMEs are crate docs, so their links must resolve. kaisatsu-ffi's
+      # library is also named `kaisatsu`, so it is documented on its own.
+      - run: cargo doc --no-deps --all-features --workspace --exclude kaisatsu-ffi
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - run: cargo doc --no-deps --all-features --package kaisatsu-ffi
+        env:
+          RUSTDOCFLAGS: -D warnings
       # Service containers cannot take arguments, and NATS needs `-js` for JetStream.
       - run: docker run -d -p 4222:4222 nats:2.11-alpine -js
       - run: cargo test --workspace --all-features
