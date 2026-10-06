@@ -17,7 +17,7 @@ MySQL adapter for [`kippu-store`](../../store). MySQL 8.0.16 or newer, InnoDB.
   transaction; waiting-room positions come back through `LAST_INSERT_ID(expr)`.
 - **Schema** in [`migrations/`](migrations): `BINARY(16)` UUIDs and `BIGINT` microseconds (MySQL's
   `TIMESTAMP` ends in 2038 and `DATETIME` has no zone), JSON as text.
-- **Conformance:** `KIPPU_TEST_MYSQL_URL=mysql://… cargo test -p kippu-store-mysql` runs the
+- **Conformance:** `EKIBEN_TEST_MYSQL_URL=mysql://… cargo test -p kippu-store-mysql` runs the
   shared suite, each case in a database of its own (the user needs `CREATE`); without the
   variable the cases are skipped.
 

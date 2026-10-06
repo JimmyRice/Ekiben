@@ -14,6 +14,8 @@ sqlite = ["dep:kippu-store-sqlite"]
 postgres = ["dep:kippu-store-postgres"]
 ## MySQL storage adapter.
 mysql = ["dep:kippu-store-mysql"]
+## NATS JetStream as purchase inbox and event bus.
+nats = ["dep:kippu-nats"]
 ## Let `kippu verify` read tickets carried as Base45 text.
 base45 = ["kaisatsu/base45"]
 
@@ -29,6 +31,7 @@ kaisatsu.workspace = true
 kippu-core.workspace = true
 kippu-domain.workspace = true
 kippu-store.workspace = true
+kippu-nats = { workspace = true, optional = true }
 kippu-store-mysql = { workspace = true, optional = true }
 kippu-store-postgres = { workspace = true, optional = true }
 kippu-store-sqlite = { workspace = true, optional = true }

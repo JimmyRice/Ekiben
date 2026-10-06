@@ -23,7 +23,25 @@ use crate::error::{ApiError, ApiResult};
 use crate::module::Progress;
 use crate::modules::payments::service::{IncomingPayment, line_items, settle};
 
+/// The answer to resubmitting a key: the same purchase again, or a different one.
+fn resubmitted(existing: PurchaseRequest, basket: &Basket) -> ApiResult<PurchaseRequest> {
+    if existing.basket == *basket {
+        tracing::info!(id = %existing.id, "purchase request already queued");
+        Ok(existing)
+    } else {
+        Err(ApiError::new(
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            "idempotency-key-reused",
+            "this Idempotency-Key was already used for a different purchase",
+        ))
+    }
+}
+
 /// Records a purchase request. Submitting the same key again returns the same request.
+///
+/// With an inbox the request is accepted into it and persisted by a worker later, unless the
+/// database already has it. A retry while the first attempt is still in the inbox is
+/// dropped by the inbox's deduplication; if its basket differed, the first one wins.
 pub(crate) async fn submit(
     state: &AppState,
     account: AccountId,
@@ -41,20 +59,20 @@ pub(crate) async fn submit(
         created_at: now,
         updated_at: now,
     };
+    if let Some(inbox) = state.inbox() {
+        if let Some(existing) = state.store().purchase_request(request.id).await? {
+            return resubmitted(existing, &request.basket);
+        }
+        inbox.enqueue(&request).await?;
+        tracing::info!(id = %request.id, "purchase request accepted into the inbox");
+        return Ok(request);
+    }
     match state.store().insert_purchase_request(&request).await? {
         Insertion::Inserted => {
             tracing::info!(id = %request.id, "purchase request queued");
             Ok(request)
         }
-        Insertion::Existing(existing) if existing.basket == request.basket => {
-            tracing::info!(id = %existing.id, "purchase request already queued");
-            Ok(existing)
-        }
-        Insertion::Existing(_) => Err(ApiError::new(
-            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
-            "idempotency-key-reused",
-            "this Idempotency-Key was already used for a different purchase",
-        )),
+        Insertion::Existing(existing) => resubmitted(existing, &request.basket),
     }
 }
 

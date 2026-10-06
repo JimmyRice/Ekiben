@@ -1,5 +1,5 @@
 use crate::http::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::header::LOCATION;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -9,7 +9,7 @@ use kippu_domain::reservation::Reservation;
 use kippu_domain::validation::IdempotencyKey;
 use kippu_domain::{PurchaseRequestId, ReservationId, SaleId, ValidationError};
 
-use super::dto::{CheckoutRequest, PurchaseRequestBody};
+use super::dto::{CheckoutRequest, PollQuery, PurchaseRequestBody};
 use super::permissions::{PURCHASES_CREATE, RESERVATIONS_READ};
 use super::service::{cancel, checkout, submit};
 use crate::app::AppState;
@@ -108,7 +108,14 @@ pub(crate) async fn create_purchase_request(
     let basket = Basket::new(body.items)?;
 
     let request = submit(&state, account, &sale, &key, basket).await?;
-    let location = format!("/v1/purchase-requests/{}", request.id);
+    let mut location = format!("/v1/purchase-requests/{}", request.id);
+    if state.inbox().is_some() {
+        // The database may not have it yet; the receipt answers polls until it does.
+        location = format!(
+            "{location}?receipt={}",
+            state.tokens().issue_purchase_receipt(&request)
+        );
+    }
     let mut response = (StatusCode::ACCEPTED, Json(request)).into_response();
     if let Ok(location) = HeaderValue::from_str(&location) {
         response.headers_mut().insert(LOCATION, location);
@@ -118,29 +125,40 @@ pub(crate) async fn create_purchase_request(
 }
 
 /// Poll a purchase request: `queued`, `reserved` (with the reservation) or `rejected`.
+/// Use the `Location` from submitting it as is.
 #[utoipa::path(
     get, path = "/v1/purchase-requests/{purchase_request_id}", tag = TAG,
     security(("bearer" = [])),
-    params(("purchase_request_id" = PurchaseRequestId, Path)),
+    params(("purchase_request_id" = PurchaseRequestId, Path), PollQuery),
     responses((status = 200, body = PurchaseRequest), (status = 404, body = Problem))
 )]
 pub(crate) async fn get_purchase_request(
     State(state): State<AppState>,
     principal: Principal,
     Path(id): Path<PurchaseRequestId>,
+    Query(query): Query<PollQuery>,
 ) -> ApiResult<Json<PurchaseRequest>> {
-    let request = state
-        .store()
-        .purchase_request(id)
-        .await?
-        .filter(|request| {
-            state.policy().permits(
-                &principal,
-                RESERVATIONS_READ,
-                Scope::Account(request.account_id),
-            )
-        })
-        .ok_or_else(|| ApiError::not_found("purchase request"))?;
+    let not_found = || ApiError::not_found("purchase request");
+    let Some(request) = state.store().purchase_request(id).await? else {
+        // Accepted into the inbox but not persisted yet: the receipt vouches for it.
+        let account = principal.account_id().ok_or_else(not_found)?;
+        return query
+            .receipt
+            .and_then(|receipt| {
+                state
+                    .tokens()
+                    .verify_purchase_receipt(&receipt, id, account, state.now())
+            })
+            .map(Json)
+            .ok_or_else(not_found);
+    };
+    if !state.policy().permits(
+        &principal,
+        RESERVATIONS_READ,
+        Scope::Account(request.account_id),
+    ) {
+        return Err(not_found());
+    }
     Ok(Json(request))
 }
 

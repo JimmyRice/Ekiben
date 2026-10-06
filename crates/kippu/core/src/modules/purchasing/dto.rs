@@ -17,3 +17,11 @@ pub struct CheckoutRequest {
     /// settled immediately.
     pub attestor_id: Option<AttestorId>,
 }
+
+/// Where a purchase request is polled; carries a receipt when the deployment queues requests
+/// before persisting them.
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct PollQuery {
+    /// The receipt from the `Location` the request was accepted with.
+    pub receipt: Option<String>,
+}

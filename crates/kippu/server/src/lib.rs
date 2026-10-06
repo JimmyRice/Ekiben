@@ -100,9 +100,22 @@ pub async fn assemble(config: Config, modules: Vec<Arc<dyn Module>>) -> Result<A
         store.migrate().await?;
     }
     tracing::info!(backend = store.capabilities().backend, "database ready");
-    Ok(Kippu::new()
-        .modules(modules)
-        .build(config, store, Arc::new(SystemClock))?)
+    let mut kippu = Kippu::new().modules(modules);
+    if let Some(url) = &config.queue.url {
+        let queue = adapters::connect_queue(url.expose_secret()).await?;
+        tracing::info!(
+            inbox = config.queue.purchase_inbox,
+            relay = config.queue.relay_events,
+            "queue ready"
+        );
+        if config.queue.purchase_inbox {
+            kippu = kippu.inbox(queue.inbox);
+        }
+        if config.queue.relay_events {
+            kippu = kippu.event_bus(queue.bus);
+        }
+    }
+    Ok(kippu.build(config, store, Arc::new(SystemClock))?)
 }
 
 /// Serves `app` on `listener` until `shutdown` is cancelled, running background tasks too if

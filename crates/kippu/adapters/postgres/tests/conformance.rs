@@ -1,6 +1,6 @@
 //! Runs the `kippu-store` conformance suite against PostgreSQL, each case in a fresh schema.
 //!
-//! Set `KIPPU_TEST_POSTGRES_URL` (e.g. `postgres://kippu:kippu@localhost:5432/kippu`) to run
+//! Set `EKIBEN_TEST_POSTGRES_URL` (e.g. `postgres://kippu:kippu@localhost:5432/kippu`) to run
 //! it; without it every case is skipped.
 #![allow(
     clippy::unwrap_used,
@@ -15,7 +15,7 @@ use kippu_store_postgres::PostgresStore;
 use sqlx::postgres::PgConnectOptions;
 
 async fn fresh() -> Option<Harness> {
-    let url = std::env::var("KIPPU_TEST_POSTGRES_URL").ok()?;
+    let url = std::env::var("EKIBEN_TEST_POSTGRES_URL").ok()?;
     let schema = format!("conformance_{}", uuid::Uuid::now_v7().simple());
     let admin = PostgresStore::connect(&url).await.unwrap();
     sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))

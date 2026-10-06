@@ -19,6 +19,7 @@ members = [
     "crates/kippu/adapters/sqlite",
     "crates/kippu/adapters/postgres",
     "crates/kippu/adapters/mysql",
+    "crates/kippu/adapters/nats",
     # Ticket verification core
     "crates/kaisatsu",
     # Bindings
@@ -42,6 +43,7 @@ kippu-store = { path = "crates/kippu/store" }
 kippu-store-sqlite = { path = "crates/kippu/adapters/sqlite" }
 kippu-store-postgres = { path = "crates/kippu/adapters/postgres" }
 kippu-store-mysql = { path = "crates/kippu/adapters/mysql" }
+kippu-nats = { path = "crates/kippu/adapters/nats" }
 kippu-core = { path = "crates/kippu/core" }
 kippu-server = { path = "crates/kippu/server", default-features = false }
 
@@ -81,6 +83,10 @@ sha2 = { version = "0.11", default-features = false }
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "http2"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-native-certs = "0.8"
+
+# ── Messaging ───────────────────────────────────────────────────────────────────
+async-nats = { version = "0.50", default-features = false }
+futures-util = "0.3"
 
 # ── Object storage (event images) ───────────────────────────────────────────────
 # Real object stores only (no `fs`): Kippu keeps no state on its own disks.
@@ -136,11 +142,12 @@ name = "kippu"
 path = "src/main.rs"
 
 [features]
-default = ["sqlite", "postgres", "mysql", "mimalloc"]
+default = ["sqlite", "postgres", "mysql", "nats", "mimalloc"]
 ## Storage adapters compiled into the binary.
 sqlite = ["kippu-server/sqlite"]
 postgres = ["kippu-server/postgres"]
 mysql = ["kippu-server/mysql"]
+nats = ["kippu-server/nats"]
 ## Use mimalloc as the global allocator.
 mimalloc = ["dep:mimalloc"]
 ## Let `kippu verify` read tickets carried as Base45 text.

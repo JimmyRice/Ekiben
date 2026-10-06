@@ -11,6 +11,7 @@ mod images;
 mod outbox;
 mod payments;
 mod purchasing;
+mod queue;
 mod ticketing;
 mod webhooks;
 
@@ -25,6 +26,7 @@ pub use images::ImageStore;
 pub use outbox::{OutboxRecord, OutboxStore, OutboxTx};
 pub use payments::{PaymentStore, PaymentsTx};
 pub use purchasing::{Hold, InventoryTx, PurchaseStore, PurchasesTx, ReservationsTx};
+pub use queue::{EventBus, InboxDelivery, PurchaseInbox};
 pub use ticketing::{TicketStore, TicketsTx};
 pub use webhooks::{WebhookRun, WebhookStore};
 

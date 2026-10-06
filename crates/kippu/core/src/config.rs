@@ -35,6 +35,9 @@ pub struct Config {
     /// Event images in object storage.
     #[serde(default)]
     pub images: ImagesConfig,
+    /// An optional message queue in front of the database, and bus for integration events.
+    #[serde(default)]
+    pub queue: QueueConfig,
 }
 
 /// HTTP server settings.
@@ -171,6 +174,39 @@ impl Default for AuthConfig {
             queue_ticket_ttl_seconds: 6 * 60 * 60,
             admission_pass_ttl_seconds: 10 * 60,
             link_by_verified_email: false,
+        }
+    }
+}
+
+/// A message queue (NATS JetStream). Without one, purchase requests go straight to the
+/// database, which is then the durable queue, and events are read from the outbox feed.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct QueueConfig {
+    /// The queue's URL, e.g. `nats://nats.internal:4222`; its scheme selects the adapter.
+    pub url: Option<SecretString>,
+    /// Absorb purchase bursts: requests are accepted into the queue and persisted by
+    /// workers. Off, the queue only carries integration events.
+    pub purchase_inbox: bool,
+    /// Publish integration events from the outbox to the queue.
+    pub relay_events: bool,
+    /// Requests moved from the queue to the database per run, at most.
+    pub inbox_batch_size: u32,
+    /// Events published per run, at most.
+    pub relay_batch_size: u32,
+    /// How often both look for work when idle.
+    pub interval_ms: u64,
+}
+
+impl Default for QueueConfig {
+    fn default() -> Self {
+        Self {
+            url: None,
+            purchase_inbox: true,
+            relay_events: true,
+            inbox_batch_size: 200,
+            relay_batch_size: 200,
+            interval_ms: 200,
         }
     }
 }

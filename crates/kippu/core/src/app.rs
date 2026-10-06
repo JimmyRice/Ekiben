@@ -7,7 +7,7 @@ use std::sync::Arc;
 use axum::Router;
 use ed25519_dalek::SigningKey;
 use kippu_domain::Timestamp;
-use kippu_store::{AuditEntry, Store};
+use kippu_store::{AuditEntry, EventBus, PurchaseInbox, Store};
 use object_store::ObjectStore;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -39,6 +39,8 @@ struct Inner {
     tickets: TicketKeys,
     webhook_key: Option<SigningKey>,
     images: Option<ImageStorage>,
+    inbox: Option<Arc<dyn PurchaseInbox>>,
+    event_bus: Option<Arc<dyn EventBus>>,
     policy: Policy,
 }
 
@@ -76,6 +78,16 @@ impl AppState {
     /// Where event images are kept, if the deployment has an object store.
     pub fn images(&self) -> Option<&ImageStorage> {
         self.inner.images.as_ref()
+    }
+
+    /// The queue purchase requests pass through before the database, if any.
+    pub fn inbox(&self) -> Option<&dyn PurchaseInbox> {
+        self.inner.inbox.as_deref()
+    }
+
+    /// Where integration events are published, if anywhere.
+    pub fn event_bus(&self) -> Option<&dyn EventBus> {
+        self.inner.event_bus.as_deref()
     }
 
     /// Which roles hold which permissions.
@@ -119,6 +131,8 @@ impl AppState {
 pub struct Kippu {
     modules: Vec<Arc<dyn Module>>,
     object_store: Option<Arc<dyn ObjectStore>>,
+    inbox: Option<Arc<dyn PurchaseInbox>>,
+    event_bus: Option<Arc<dyn EventBus>>,
 }
 
 impl Kippu {
@@ -146,6 +160,21 @@ impl Kippu {
     #[must_use]
     pub fn object_store(mut self, store: Arc<dyn ObjectStore>) -> Self {
         self.object_store = Some(store);
+        self
+    }
+
+    /// Passes purchase requests through `inbox` before the database (see
+    /// [`kippu_store::PurchaseInbox`]). Adds the `purchase-inbox` task that persists them.
+    #[must_use]
+    pub fn inbox(mut self, inbox: Arc<dyn PurchaseInbox>) -> Self {
+        self.inbox = Some(inbox);
+        self
+    }
+
+    /// Publishes integration events from the outbox to `bus`. Adds the `event-relay` task.
+    #[must_use]
+    pub fn event_bus(mut self, bus: Arc<dyn EventBus>) -> Self {
+        self.event_bus = Some(bus);
         self
     }
 
@@ -197,11 +226,16 @@ impl Kippu {
                 }
             })?,
         };
-        let tasks = self
+        let mut tasks: Vec<BackgroundTask> = self
             .modules
             .iter()
             .flat_map(|module| module.tasks(&config))
             .collect();
+        tasks.extend(crate::messaging::tasks(
+            &config,
+            self.inbox.is_some(),
+            self.event_bus.is_some(),
+        ));
 
         let state = AppState {
             inner: Arc::new(Inner {
@@ -209,6 +243,8 @@ impl Kippu {
                 tickets: TicketKeys::new(&ticket_key, retired),
                 webhook_key,
                 images,
+                inbox: self.inbox,
+                event_bus: self.event_bus,
                 config,
                 store,
                 clock,

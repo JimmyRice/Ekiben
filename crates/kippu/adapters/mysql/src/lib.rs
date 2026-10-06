@@ -137,8 +137,14 @@ pub(crate) fn error(error: sqlx::Error) -> StoreError {
             ErrorKind::UniqueViolation => StoreError::Conflict("unique"),
             ErrorKind::ForeignKeyViolation => StoreError::Conflict("reference"),
             ErrorKind::CheckViolation => StoreError::Conflict("constraint"),
-            // Lock wait timeout and deadlock: safe to retry.
-            _ if matches!(database.code().as_deref(), Some("1205" | "1213" | "40001")) => {
+            // Lock wait timeout, deadlock, and a cached statement invalidated by the server
+            // (1615, e.g. when its table definition cache overflows): safe to retry.
+            _ if matches!(database.code().as_deref(), Some("1205" | "1213" | "40001"))
+                || matches!(
+                    database.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>(),
+                    Some(mysql) if matches!(mysql.number(), 1205 | 1213 | 1615)
+                ) =>
+            {
                 StoreError::Unavailable(Box::new(error))
             }
             _ => StoreError::backend(error),

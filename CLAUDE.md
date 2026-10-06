@@ -18,6 +18,7 @@ crates/kippu/server            launcher: CLI (`kippu …`), config sources, adap
 crates/kippu/adapters/sqlite   SQLite adapter (single writer)
 crates/kippu/adapters/postgres PostgreSQL adapter (concurrent writers, SKIP LOCKED, advisory-locked outbox)
 crates/kippu/adapters/mysql    MySQL 8 adapter (READ COMMITTED, no RETURNING/ON CONFLICT, row-locked outbox)
+crates/kippu/adapters/nats     NATS JetStream: purchase inbox + event bus (messaging ports in kippu-store)
 crates/kaisatsu                KP1 encode/verify, no_std; `issuer` feature for signing; fuzz/
 crates/ffi/c                   C ABI (the only crate with `unsafe`), generated include/kaisatsu.h
 crates/xtask                   `cargo xtask vectors|header [--check] | c-example | size`
@@ -30,7 +31,7 @@ Keep the repository root uncluttered and do not add speculative `.gitignore` ent
 ## Commands
 
 ```bash
-cargo test --workspace --all-features                                   # 186 tests incl. e2e over TCP
+cargo test --workspace --all-features                                   # 191 tests incl. e2e over TCP
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets           # default features too
 cargo fmt --all
@@ -46,11 +47,13 @@ tests can run on PostgreSQL too; locally:
 ```bash
 docker run -d --rm --name kippu-test-postgres -e POSTGRES_USER=kippu -e POSTGRES_PASSWORD=kippu -p 55432:5432 postgres:17-alpine
 docker run -d --rm --name kippu-test-mysql -e MYSQL_ROOT_PASSWORD=kippu -p 53306:3306 mysql:8.4
-export KIPPU_TEST_POSTGRES_URL=postgres://kippu:kippu@localhost:55432/kippu
-export KIPPU_TEST_MYSQL_URL=mysql://root:kippu@127.0.0.1:53306/mysql
-cargo test -p kippu-store-postgres -p kippu-store-mysql                 # conformance on both
-KIPPU_TEST_BACKEND=postgres cargo test -p kippu-core                    # HTTP tests on PostgreSQL
-KIPPU_TEST_BACKEND=mysql cargo test -p kippu-core                       # … and on MySQL
+docker run -d --rm --name kippu-test-nats -p 54222:4222 nats:2.11-alpine -js
+export EKIBEN_TEST_POSTGRES_URL=postgres://kippu:kippu@localhost:55432/kippu
+export EKIBEN_TEST_MYSQL_URL=mysql://root:kippu@127.0.0.1:53306/mysql
+export EKIBEN_TEST_NATS_URL=nats://127.0.0.1:54222
+cargo test -p kippu-store-postgres -p kippu-store-mysql -p kippu-nats   # against real servers
+EKIBEN_TEST_BACKEND=postgres cargo test -p kippu-core                    # HTTP tests on PostgreSQL
+EKIBEN_TEST_BACKEND=mysql cargo test -p kippu-core                       # … and on MySQL
 ```
 
 Run all of the checks before every commit. Tests for HTTP behaviour live in
@@ -92,6 +95,11 @@ as `shop`, `attestor`, `reserve`, `drain`); the full journey over real TCP is
   their fields in `crates/kippu/core/src/http/trace.rs`; `crates/kippu/server/src/telemetry.rs`
   renders them (pretty blocks, compact lines, JSON). Log business milestones with
   `tracing::info!` and they land in the right block. Never record headers, bodies or tokens.
+- **Environment variables named `KIPPU_*` are configuration** and unknown keys are rejected:
+  test settings use `EKIBEN_TEST_*` so a test run cannot break the config it loads.
+- **Messaging is optional:** `PurchaseInbox`/`EventBus` (kippu-store) are injected with
+  `Kippu::inbox`/`Kippu::event_bus`; without them the database is the queue. With an inbox,
+  the database may not have a submitted request yet — poll with the receipt in `Location`.
 - **Object storage** (event images): `object_store` with the `*-base` features and `ring`
   (no `fs`, no aws-lc). Deployments configure `images.url`; tests inject `InMemory` through
   `Kippu::object_store` (`TestApp::start_custom`). Never add a local-disk backend.

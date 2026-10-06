@@ -32,8 +32,9 @@ jobs:
           --health-cmd "mysqladmin ping -pkippu" --health-interval 2s --health-timeout 5s
           --health-retries 60
     env:
-      KIPPU_TEST_POSTGRES_URL: postgres://kippu:kippu@localhost:5432/kippu
-      KIPPU_TEST_MYSQL_URL: mysql://root:kippu@127.0.0.1:3306/mysql
+      EKIBEN_TEST_POSTGRES_URL: postgres://kippu:kippu@localhost:5432/kippu
+      EKIBEN_TEST_MYSQL_URL: mysql://root:kippu@127.0.0.1:3306/mysql
+      EKIBEN_TEST_NATS_URL: nats://127.0.0.1:4222
     steps:
       - uses: actions/checkout@v4
       - run: rustup show active-toolchain
@@ -42,14 +43,16 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features
       # Default features too: optional ones (e.g. `base45`) must not be load-bearing.
       - run: cargo clippy --workspace --all-targets
+      # Service containers cannot take arguments, and NATS needs `-js` for JetStream.
+      - run: docker run -d -p 4222:4222 nats:2.11-alpine -js
       - run: cargo test --workspace --all-features
       # The HTTP tests again, on a database with concurrent writers.
       - run: cargo test --package kippu-core
         env:
-          KIPPU_TEST_BACKEND: postgres
+          EKIBEN_TEST_BACKEND: postgres
       - run: cargo test --package kippu-core
         env:
-          KIPPU_TEST_BACKEND: mysql
+          EKIBEN_TEST_BACKEND: mysql
 
   kaisatsu:
     name: kaisatsu · no_std · C ABI

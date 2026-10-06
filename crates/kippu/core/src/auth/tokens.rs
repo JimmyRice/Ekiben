@@ -6,13 +6,15 @@
 //! | access token | the instance's token key | `auth.access_token_ttl_seconds` | the account's role |
 //! | queue ticket | the instance's token key | `auth.queue_ticket_ttl_seconds` | a waiting-room position |
 //! | admission pass | the instance's token key | `auth.admission_pass_ttl_seconds` | submitting purchases to one sale |
+//! | purchase receipt | the instance's token key | 24 hours | reading one queued purchase request before it is persisted |
 //!
 //! All are EdDSA JWTs verified without any database lookup, so every instance can verify every
 //! token. A `token_use` claim keeps one kind from being replayed as another.
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use kippu_domain::account::{Account, Role};
-use kippu_domain::{AccountId, Duration, OrganizationId, SaleId, Timestamp};
+use kippu_domain::purchase::{Basket, PurchaseRequest, PurchaseStatus};
+use kippu_domain::{AccountId, Duration, OrganizationId, PurchaseRequestId, SaleId, Timestamp};
 use serde::{Deserialize, Serialize};
 
 use super::Principal;
@@ -25,6 +27,8 @@ use crate::keys::{ConfigError, parse_signing_key, parse_verifying_key};
 const INSTANCE_KID: &str = "kippu";
 /// Key ids of root tokens are `root:<key name>`.
 const ROOT_KID_PREFIX: &str = "root:";
+/// How long a purchase receipt stays valid: far longer than any queue should take.
+const RECEIPT_TTL: Duration = Duration::hours(24);
 /// Tolerated clock difference between a root token's minter and this server.
 const CLOCK_SKEW_SECONDS: i64 = 60;
 
@@ -64,6 +68,17 @@ enum InstanceClaims {
         iat: i64,
         exp: i64,
     },
+    PurchaseReceipt {
+        iss: String,
+        sub: AccountId,
+        request: PurchaseRequestId,
+        sale: SaleId,
+        basket: Basket,
+        /// When the request was accepted, Unix microseconds.
+        at: i64,
+        iat: i64,
+        exp: i64,
+    },
 }
 
 impl InstanceClaims {
@@ -71,7 +86,8 @@ impl InstanceClaims {
         match self {
             Self::Access { exp, .. }
             | Self::QueueTicket { exp, .. }
-            | Self::AdmissionPass { exp, .. } => *exp,
+            | Self::AdmissionPass { exp, .. }
+            | Self::PurchaseReceipt { exp, .. } => *exp,
         }
     }
 
@@ -79,7 +95,8 @@ impl InstanceClaims {
         match self {
             Self::Access { iss, .. }
             | Self::QueueTicket { iss, .. }
-            | Self::AdmissionPass { iss, .. } => iss,
+            | Self::AdmissionPass { iss, .. }
+            | Self::PurchaseReceipt { iss, .. } => iss,
         }
     }
 }
@@ -202,6 +219,57 @@ impl Tokens {
             exp: expires_at.unix_seconds(),
         };
         self.issue(&claims, expires_at)
+    }
+
+    /// Issues a receipt for a purchase request accepted into the inbox but perhaps not yet
+    /// persisted, so that polling it can answer `queued` until the database has it.
+    pub fn issue_purchase_receipt(&self, request: &PurchaseRequest) -> String {
+        let expires_at = request.created_at + RECEIPT_TTL;
+        let claims = InstanceClaims::PurchaseReceipt {
+            iss: self.issuer.clone(),
+            sub: request.account_id,
+            request: request.id,
+            sale: request.sale_id,
+            basket: request.basket.clone(),
+            at: request.created_at.unix_micros(),
+            iat: request.created_at.unix_seconds(),
+            exp: expires_at.unix_seconds(),
+        };
+        self.issue(&claims, expires_at).token
+    }
+
+    /// The queued request a receipt vouches for, if it is valid, for `request` and by
+    /// `account`.
+    pub fn verify_purchase_receipt(
+        &self,
+        token: &str,
+        request: PurchaseRequestId,
+        account: AccountId,
+        now: Timestamp,
+    ) -> Option<PurchaseRequest> {
+        let unverified = jwt::parse(token).ok()?;
+        match self.verify_instance(&unverified, now).ok()? {
+            InstanceClaims::PurchaseReceipt {
+                sub,
+                request: id,
+                sale,
+                basket,
+                at,
+                ..
+            } if id == request && sub == account => {
+                let created_at = Timestamp::from_unix_micros(at);
+                Some(PurchaseRequest {
+                    id,
+                    account_id: sub,
+                    sale_id: sale,
+                    basket,
+                    status: PurchaseStatus::Queued,
+                    created_at,
+                    updated_at: created_at,
+                })
+            }
+            _ => None,
+        }
     }
 
     /// Turns a bearer token into the principal it proves.

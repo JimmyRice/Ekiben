@@ -8,6 +8,7 @@ pub mod config;
 pub mod error;
 pub mod http;
 pub mod keys;
+mod messaging;
 pub mod module;
 pub mod modules;
 mod workers;

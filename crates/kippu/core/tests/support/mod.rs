@@ -1,5 +1,5 @@
 //! An in-process Kippu instance on a temporary SQLite database (or, with
-//! `KIPPU_TEST_BACKEND=postgres` or `mysql`, a fresh schema or database), driven through its
+//! `EKIBEN_TEST_BACKEND=postgres` or `mysql`, a fresh schema or database), driven through its
 //! router.
 #![allow(
     dead_code,
@@ -19,8 +19,8 @@ use base64::engine::general_purpose::STANDARD;
 use ed25519_dalek::SigningKey;
 use kippu_core::auth::tokens::mint_root_token;
 use kippu_core::config::{
-    AuthConfig, Config, DatabaseConfig, ImagesConfig, IssuerConfig, KeysConfig, RootConfig,
-    RootKey, ServerConfig, WebhooksConfig, WorkersConfig,
+    AuthConfig, Config, DatabaseConfig, ImagesConfig, IssuerConfig, KeysConfig, QueueConfig,
+    RootConfig, RootKey, ServerConfig, WebhooksConfig, WorkersConfig,
 };
 use kippu_core::{App, Kippu, ManualClock, Module};
 use kippu_domain::{Duration, Timestamp};
@@ -41,6 +41,57 @@ pub struct TestApp {
     pub clock: Arc<ManualClock>,
     root_key: SigningKey,
     _dir: tempfile::TempDir,
+    /// Cleans the test database up; declared last so it runs after the app is gone.
+    _cleanup: Option<DropDatabase>,
+}
+
+/// Drops a MySQL test database when the test ends: a run would otherwise fill the server with
+/// tables until it fails prepared statements (error 1615).
+pub struct DropDatabase {
+    url: String,
+    name: String,
+}
+
+impl Drop for DropDatabase {
+    fn drop(&mut self) {
+        let (url, name) = (self.url.clone(), self.name.clone());
+        // Drop runs inside the test's runtime, which must not be blocked: use a thread.
+        let _ = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let Ok(admin) = MySqlStore::connect(&url).await else {
+                    return;
+                };
+                // Connections of the test may still hold an unfinished transaction (sqlx
+                // rolls back lazily), whose metadata locks would block the drop forever.
+                let holders = sqlx::query_scalar::<_, u64>(
+                    "SELECT id FROM information_schema.processlist WHERE db = ?",
+                )
+                .bind(&name)
+                .fetch_all(admin.pool())
+                .await
+                .unwrap_or_default();
+                for id in holders {
+                    let kill = format!("KILL {id}");
+                    let _ = sqlx::query(sqlx::AssertSqlSafe(kill))
+                        .execute(admin.pool())
+                        .await;
+                }
+                let mut connection = admin.pool().acquire().await.unwrap();
+                let _ = sqlx::query("SET SESSION lock_wait_timeout = 10")
+                    .execute(&mut *connection)
+                    .await;
+                let drop = format!("DROP DATABASE IF EXISTS {name}");
+                let _ = sqlx::query(sqlx::AssertSqlSafe(drop))
+                    .execute(&mut *connection)
+                    .await;
+            });
+        })
+        .join();
+    }
 }
 
 pub struct Reply {
@@ -51,14 +102,14 @@ pub struct Reply {
     pub bytes: Vec<u8>,
 }
 
-/// The database the tests run on: SQLite in `dir`, unless `KIPPU_TEST_BACKEND` selects a fresh
-/// schema on the server at `KIPPU_TEST_POSTGRES_URL` (`postgres`) or a fresh database on the
-/// server at `KIPPU_TEST_MYSQL_URL` (`mysql`).
-async fn test_store(dir: &tempfile::TempDir) -> (Arc<dyn Store>, String) {
-    let backend = std::env::var("KIPPU_TEST_BACKEND").unwrap_or_default();
+/// The database the tests run on: SQLite in `dir`, unless `EKIBEN_TEST_BACKEND` selects a fresh
+/// schema on the server at `EKIBEN_TEST_POSTGRES_URL` (`postgres`) or a fresh database on the
+/// server at `EKIBEN_TEST_MYSQL_URL` (`mysql`).
+async fn test_store(dir: &tempfile::TempDir) -> (Arc<dyn Store>, String, Option<DropDatabase>) {
+    let backend = std::env::var("EKIBEN_TEST_BACKEND").unwrap_or_default();
     if backend == "mysql" {
-        let url = std::env::var("KIPPU_TEST_MYSQL_URL")
-            .expect("KIPPU_TEST_BACKEND=mysql needs KIPPU_TEST_MYSQL_URL");
+        let url = std::env::var("EKIBEN_TEST_MYSQL_URL")
+            .expect("EKIBEN_TEST_BACKEND=mysql needs EKIBEN_TEST_MYSQL_URL");
         let database = format!("core_{}", uuid_suffix());
         let admin = MySqlStore::connect(&url).await.unwrap();
         sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {database}")))
@@ -70,11 +121,15 @@ async fn test_store(dir: &tempfile::TempDir) -> (Arc<dyn Store>, String) {
             .database(&database);
         let store = MySqlStore::connect_with(options, 16).await.unwrap();
         store.migrate().await.unwrap();
-        return (Arc::new(store), url);
+        let cleanup = DropDatabase {
+            url: url.clone(),
+            name: database,
+        };
+        return (Arc::new(store), url, Some(cleanup));
     }
     if backend == "postgres" {
-        let url = std::env::var("KIPPU_TEST_POSTGRES_URL")
-            .expect("KIPPU_TEST_BACKEND=postgres needs KIPPU_TEST_POSTGRES_URL");
+        let url = std::env::var("EKIBEN_TEST_POSTGRES_URL")
+            .expect("EKIBEN_TEST_BACKEND=postgres needs EKIBEN_TEST_POSTGRES_URL");
         let schema = format!("core_{}", uuid_suffix());
         let admin = PostgresStore::connect(&url).await.unwrap();
         sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
@@ -86,12 +141,12 @@ async fn test_store(dir: &tempfile::TempDir) -> (Arc<dyn Store>, String) {
             .options([("search_path", schema.as_str())]);
         let store = PostgresStore::connect_with(options, 16).await.unwrap();
         store.migrate().await.unwrap();
-        return (Arc::new(store), url);
+        return (Arc::new(store), url, None);
     }
     let url = format!("sqlite://{}", dir.path().join("kippu.db").display());
     let store = SqliteStore::connect(&url).await.unwrap();
     store.migrate().await.unwrap();
-    (Arc::new(store), url)
+    (Arc::new(store), url, None)
 }
 
 impl TestApp {
@@ -116,7 +171,7 @@ impl TestApp {
         customize: impl FnOnce(Kippu) -> Kippu,
     ) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let (store, url) = test_store(&dir).await;
+        let (store, url, cleanup) = test_store(&dir).await;
 
         let root_key = SigningKey::from_bytes(&[42; 32]);
         let mut config = Config {
@@ -145,6 +200,7 @@ impl TestApp {
             workers: WorkersConfig::default(),
             webhooks: WebhooksConfig::default(),
             images: ImagesConfig::default(),
+            queue: QueueConfig::default(),
         };
         let clock = Arc::new(ManualClock::new(Timestamp::from_unix_seconds(
             1_798_761_600,
@@ -160,6 +216,7 @@ impl TestApp {
             clock,
             root_key,
             _dir: dir,
+            _cleanup: cleanup,
         }
     }
 
@@ -523,6 +580,9 @@ impl TestApp {
             "{:?}",
             submitted.body
         );
+        if self.app.task("purchase-inbox").is_some() {
+            self.drain("purchase-inbox").await;
+        }
         self.drain("purchases").await;
         let id = submitted.body["id"].as_str().unwrap();
         let request = self

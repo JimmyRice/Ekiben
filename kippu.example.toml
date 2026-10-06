@@ -53,6 +53,16 @@ admission_pass_ttl_seconds = 600
 # this on if every account's email is known to be verified.
 link_by_verified_email = false
 
+[queue]
+# Optional NATS JetStream in front of the database (KIPPU_QUEUE__URL). Without it the database
+# is the durable queue and integration events are read from the outbox feed.
+# url = "nats://nats.internal:4222"
+purchase_inbox = true   # absorb purchase bursts in JetStream; workers persist them
+relay_events = true     # publish outbox events to kippu.events.<topic>
+inbox_batch_size = 200
+relay_batch_size = 200
+interval_ms = 200
+
 [images]
 # Event images live in an object store, never on an instance's disk. Without `url`, uploads
 # answer 501. Credentials come from the provider's environment variables (AWS_ACCESS_KEY_ID,

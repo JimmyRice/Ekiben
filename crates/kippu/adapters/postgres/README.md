@@ -15,7 +15,7 @@ heavy contention. PostgreSQL 13 or newer.
 - **Schema** in [`migrations/`](migrations): native UUIDs, `TIMESTAMPTZ` (microseconds, like
   Kippu's timestamps), `JSONB` for small structured values, indexes on every foreign key that
   is used for lookups.
-- **Conformance:** `KIPPU_TEST_POSTGRES_URL=postgres://… cargo test -p kippu-store-postgres`
+- **Conformance:** `EKIBEN_TEST_POSTGRES_URL=postgres://… cargo test -p kippu-store-postgres`
   runs the shared suite, each case in a schema of its own; without the variable the cases are
   skipped.
 
