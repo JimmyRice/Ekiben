@@ -38,7 +38,7 @@ Keep the repository root uncluttered and do not add speculative `.gitignore` ent
 ## Commands
 
 ```bash
-cargo test --workspace --all-features                                   # 224 tests incl. e2e over TCP
+cargo test --workspace --all-features                                   # 251 tests incl. e2e over TCP
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets           # default features too
 cargo fmt --all
@@ -109,6 +109,14 @@ as `shop`, `attestor`, `reserve`, `drain`); the full journey over real TCP is
 - **Money / time:** `Money` is integer minor units; `Timestamp` is UTC microseconds. Domain
   functions take `now` as an argument; only `Clock` reads time.
 - **Updates** use optimistic concurrency: the client sends the `version` it read; stale → 412.
+- **Listings** answer `http::Listing` (`{items, next_cursor}`), never a bare array, even when
+  they fit one page (`Listing::all`). Paged ones are keyset-paged: the store reads
+  `PageRequest<P>` in index order resuming after a position (an id, a `Keyset` of time + id,
+  or a sequence number), the service reads `page.plus_one()` and returns
+  `Page::from_lookahead`, the route turns positions into opaque cursors named by a
+  `ListingTag`. Every order is total (ties by id), every filter and order has an index in all
+  three adapters, and there is no `total` count. Query structs carry
+  `#[into_params(parameter_in = Query)]` and `#[serde(deny_unknown_fields)]`.
 - **Kaisatsu:** verify path is `no_std`, allocation-free and panic-free (crate-level `deny` on
   indexing, arithmetic side effects, unwrap…). Header first, then signature, then claims.
   The wire format is defined only in `kaisatsu` (`issuer` feature) — never duplicate it.
@@ -234,6 +242,14 @@ Do not change these unless the user explicitly asks.
   Accounts may have no password and no email; merging by email requires a verified email and is
   off by default (`auth.link_by_verified_email`). External bearer tokens are deliberately *not*
   accepted directly: Kippu could not revoke sessions or record roles.
+- **Event location:** `venue` is the human name of the place (required); `address` is optional
+  and structured (ISO country code, region, locality, postal code, street, WGS 84
+  latitude/longitude given together), stored as columns so listings can filter by country.
+  PATCH replaces it as a whole; `null` removes it.
+- **Listings:** `{items, next_cursor}` envelope for lists only; single resources stay bare and
+  errors stay problem+json. Cursors are opaque keyset positions, not offsets; filters and
+  sorts are a whitelisted, indexed set per listing (no generic filter language). The outbox
+  feeds keep `after=<sequence>` and a bare array: that is the attestor protocol.
 - **Event `content`** is an opaque string up to 256 KiB, returned only by `GET /v1/events/{id}`;
   listings return `EventSummary`. Per-person sensitive data (e.g. real-name IDs) is the
   integrator's job to encrypt, not the backend's.
@@ -250,6 +266,7 @@ Do not change these unless the user explicitly asks.
 - `kaisatsu-wasm` published as an npm package.
 - Cortex-M (embassy) firmware example to measure real size; add the budget to CI. Static library
   size is meaningless (the linker prunes).
+- Event search by text (needs a full-text index per database) and by region or city.
 - Later: passkeys as a second Admin credential; refunds/reversals after issue and a revocation
   feed for gates; inventory buckets for extremely hot sessions; OpenTelemetry; per-module
   migrations with their own version tracking.

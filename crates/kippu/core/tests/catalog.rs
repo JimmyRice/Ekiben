@@ -179,7 +179,7 @@ async fn event_content_is_stored_as_is_and_left_out_of_listings() {
     );
 
     let listed = app.call(Method::GET, "/v1/events", None, None).await.body;
-    let summary = listed
+    let summary = listed["items"]
         .as_array()
         .unwrap()
         .iter()
@@ -208,4 +208,108 @@ async fn event_content_is_stored_as_is_and_left_out_of_listings() {
         "{:?}",
         too_long.body
     );
+}
+
+#[tokio::test]
+async fn events_carry_a_structured_address_besides_the_venue() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let path = format!("/v1/events/{}", shop.event_id);
+    let event = app.call(Method::GET, &path, None, None).await.body;
+    assert_eq!(event["address"], json!(null));
+
+    let big_sight = json!({
+        "country": "jp",
+        "region": "東京都",
+        "locality": "江東区",
+        "postal_code": "135-0063",
+        "street": "有明3-11-1",
+        "latitude": 35.6298,
+        "longitude": 139.7942,
+    });
+    let located = app
+        .call(
+            Method::PATCH,
+            &path,
+            Some(&shop.organizer),
+            Some(json!({ "version": event["version"], "address": big_sight })),
+        )
+        .await;
+    assert_eq!(located.status, StatusCode::OK, "{:?}", located.body);
+    assert_eq!(located.body["venue"], event["venue"]);
+    assert_eq!(located.body["address"]["country"], "JP");
+    assert_eq!(located.body["address"]["street"], "有明3-11-1");
+    assert_eq!(located.body["address"]["latitude"], 35.6298);
+    assert_eq!(
+        app.call(Method::GET, &path, None, None).await.body,
+        located.body
+    );
+
+    // A patch without `address` keeps it.
+    let retitled = app
+        .call(
+            Method::PATCH,
+            &path,
+            Some(&shop.organizer),
+            Some(json!({ "version": located.body["version"], "title": "C111" })),
+        )
+        .await;
+    assert_eq!(retitled.body["address"], located.body["address"]);
+
+    let half_a_point = app
+        .call(
+            Method::PATCH,
+            &path,
+            Some(&shop.organizer),
+            Some(json!({
+                "version": retitled.body["version"],
+                "address": { "country": "JP", "street": "有明3-11-1", "latitude": 35.6 },
+            })),
+        )
+        .await;
+    assert_eq!(half_a_point.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        half_a_point.body["type"],
+        "urn:kippu:problem:invalid-request"
+    );
+    let misspelt = app
+        .call(
+            Method::PATCH,
+            &path,
+            Some(&shop.organizer),
+            Some(json!({
+                "version": retitled.body["version"],
+                "address": { "country": "JP", "street": "有明3-11-1", "zip": "135-0063" },
+            })),
+        )
+        .await;
+    assert_eq!(misspelt.body["type"], "urn:kippu:problem:invalid-json");
+
+    // `null` removes the address: the event went online.
+    let online = app
+        .call(
+            Method::PATCH,
+            &path,
+            Some(&shop.organizer),
+            Some(json!({
+                "version": retitled.body["version"],
+                "venue": "Online",
+                "address": null,
+            })),
+        )
+        .await;
+    assert_eq!(online.status, StatusCode::OK, "{:?}", online.body);
+    assert_eq!(online.body["address"], json!(null));
+
+    // A full update states the address too; leaving it out means none.
+    let mut moved = online.body.clone();
+    moved["venue"] = json!("Makuhari Messe");
+    moved["address"] = json!({ "country": "JP", "street": "中瀬2-1" });
+    let moved = app
+        .call(Method::PUT, &path, Some(&shop.organizer), Some(moved))
+        .await;
+    assert_eq!(moved.status, StatusCode::OK, "{:?}", moved.body);
+    assert_eq!(moved.body["address"]["region"], json!(null));
+    let listed = app.call(Method::GET, "/v1/events", None, None).await.body;
+    assert_eq!(listed["items"][0]["address"], moved.body["address"]);
 }

@@ -95,8 +95,10 @@ Content-Type: application/json
 ```
 
 `access_token.token` is `{{organizer_token}}`. Create the event — it starts as a draft.
-`content` is the event's page in any form your clients render (HTML here; Markdown or your own
-JSON work as well); Kippu stores it as is, and listings of events leave it out:
+`venue` is what people call the place; `address` is where it is, precisely enough for a map
+app (leave it out for an online event). `content` is the event's page in any form your clients
+render (HTML here; Markdown or your own JSON work as well); Kippu stores it as is, and
+listings of events leave it out:
 
 ```http
 POST /v1/organizations/{{organization_id}}/events HTTP/1.1
@@ -108,6 +110,15 @@ Content-Type: application/json
   "slug": "c110",
   "title": "Comic Market 110",
   "venue": "Tokyo Big Sight",
+  "address": {
+    "country": "JP",
+    "region": "東京都",
+    "locality": "江東区",
+    "postal_code": "135-0063",
+    "street": "有明3-11-1",
+    "latitude": 35.6298,
+    "longitude": 139.7942
+  },
   "starts_at": "2027-08-16T10:00:00+09:00",
   "ends_at": "2027-08-17T16:00:00+09:00",
   "content": "<h1>Comic Market 110</h1><p>Two days at Tokyo Big Sight.</p>"
@@ -210,12 +221,20 @@ Content-Type: application/json
 { "email": "miku@example.org", "password": "correct horse battery" }
 ```
 
-`access_token.token` is `{{buyer_token}}`. The event is now public:
+`access_token.token` is `{{buyer_token}}`. The event is now public. Every listing answers
+`{"items": [...], "next_cursor": ...}`; the event listing also filters (`status`, `country`,
+`starts_from`, `starts_before`, `ends_from`, `ends_before`) and sorts (`sort=starts_at`, the
+default, `-starts_at`, `created_at`, `-created_at`). Events that are on or still to come in
+Japan, twenty at a time:
 
 ```http
-GET /v1/events HTTP/1.1
+GET /v1/events?country=JP&ends_from=2026-10-01T00:00:00Z&limit=20 HTTP/1.1
 Host: localhost:8080
 ```
+
+While `next_cursor` is not `null`, more follow: send the same request with
+`&cursor=<next_cursor>` for the next page. Cursors are opaque and resume exactly where the
+page ended, however many events were added meanwhile.
 
 Ask for two tickets. The request is queued durably and answered with `202 Accepted` and a
 `Location`; sending it again with the same `Idempotency-Key` returns the same request instead
@@ -272,8 +291,8 @@ Host: localhost:8080
 Authorization: Bearer {{buyer_token}}
 ```
 
-Each ticket's `ticket` is the signed ticket in Base64. The same bytes are available raw,
-`application/octet-stream`, from the ticket's `/raw` endpoint:
+Each ticket in `items` carries `ticket`, the signed ticket in Base64. The same bytes are
+available raw, `application/octet-stream`, from the ticket's `/raw` endpoint:
 
 ```http
 GET /v1/tickets/{{ticket_id}}/raw HTTP/1.1

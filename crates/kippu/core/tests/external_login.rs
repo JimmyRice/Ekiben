@@ -125,8 +125,8 @@ async fn a_first_sign_in_creates_an_account_without_email_or_password() {
     let identities = app
         .call(Method::GET, "/v1/me/identities", Some(&token(&again)), None)
         .await;
-    assert_eq!(identities.body[0]["provider"], "pretend");
-    assert_eq!(identities.body[0]["subject"], subject);
+    assert_eq!(identities.body["items"][0]["provider"], "pretend");
+    assert_eq!(identities.body["items"][0]["subject"], subject);
 
     let audit = app
         .call(
@@ -137,8 +137,7 @@ async fn a_first_sign_in_creates_an_account_without_email_or_password() {
         )
         .await;
     assert!(
-        audit
-            .body
+        audit.body["items"]
             .as_array()
             .unwrap()
             .iter()

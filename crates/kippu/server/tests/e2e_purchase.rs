@@ -468,7 +468,7 @@ async fn a_ticket_bought_through_the_whole_pipeline_passes_the_gate() {
     let tickets = client
         .call("GET", "/v1/me/tickets", Some(&buyer), None)
         .await;
-    let tickets = tickets.body.as_array().unwrap().clone();
+    let tickets = tickets.body["items"].as_array().unwrap().clone();
     assert_eq!(tickets.len(), 2);
     let keys = client
         .call("GET", "/.well-known/kippu/ticket-keys", None, None)

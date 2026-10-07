@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use kippu_store::{
-    AuditEntry, HousekeepingStore, IdempotencyRecord, Insertion, StoreError, StoreResult,
+    AuditEntry, AuditRecord, HousekeepingStore, IdempotencyRecord, Insertion, PageRequest,
+    StoreError, StoreResult,
 };
 use time::OffsetDateTime;
 
@@ -74,21 +75,26 @@ impl HousekeepingStore for PostgresStore {
         Ok(())
     }
 
-    async fn audit_log(&self, limit: u32) -> StoreResult<Vec<AuditEntry>> {
-        let rows = sqlx::query_as::<_, (OffsetDateTime, String, String, String)>(
-            "SELECT at, actor, action, target FROM audit_log ORDER BY id DESC LIMIT $1",
+    async fn audit_log(&self, page: PageRequest<i64>) -> StoreResult<Vec<AuditRecord>> {
+        let rows = sqlx::query_as::<_, (i64, OffsetDateTime, String, String, String)>(
+            "SELECT id, at, actor, action, target FROM audit_log
+             WHERE $1 IS NULL OR id < $1 ORDER BY id DESC LIMIT $2",
         )
-        .bind(i64::from(limit))
+        .bind(page.after)
+        .bind(i64::from(page.limit))
         .fetch_all(&self.pool)
         .await
         .map_err(error)?;
         Ok(rows
             .into_iter()
-            .map(|(at, actor, action, target)| AuditEntry {
-                at: instant(at),
-                actor,
-                action,
-                target,
+            .map(|(sequence, at, actor, action, target)| AuditRecord {
+                sequence,
+                entry: AuditEntry {
+                    at: instant(at),
+                    actor,
+                    action,
+                    target,
+                },
             })
             .collect())
     }

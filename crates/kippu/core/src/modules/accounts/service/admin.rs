@@ -3,7 +3,7 @@
 use kippu_domain::account::{Account, Organization, Role};
 use kippu_domain::validation::{Slug, non_empty};
 use kippu_domain::{AccountId, OrganizationId};
-use kippu_store::{AuditEntry, PageRequest};
+use kippu_store::{AuditRecord, Page, PageRequest};
 
 use super::{NewAccount, insert_account};
 use crate::app::AppState;
@@ -43,9 +43,12 @@ pub async fn accounts(
     state: &AppState,
     principal: &Principal,
     page: PageRequest,
-) -> ApiResult<Vec<Account>> {
+) -> ApiResult<Page<Account, uuid::Uuid>> {
     state.authorize(principal, ACCOUNTS_MANAGE, Scope::Global)?;
-    Ok(state.store().list_accounts(page).await?)
+    let accounts = state.store().list_accounts(page.plus_one()).await?;
+    Ok(Page::from_lookahead(accounts, page.limit, |account| {
+        account.id.as_uuid()
+    }))
 }
 
 /// Deletes an account of a role below the caller's own.
@@ -96,9 +99,14 @@ pub async fn organizations(
     state: &AppState,
     principal: &Principal,
     page: PageRequest,
-) -> ApiResult<Vec<Organization>> {
+) -> ApiResult<Page<Organization, uuid::Uuid>> {
     state.authorize(principal, ORGANIZATIONS_MANAGE, Scope::Global)?;
-    Ok(state.store().list_organizations(page).await?)
+    let organizations = state.store().list_organizations(page.plus_one()).await?;
+    Ok(Page::from_lookahead(
+        organizations,
+        page.limit,
+        |organization| organization.id.as_uuid(),
+    ))
 }
 
 /// Makes an account a member of an organization.
@@ -155,13 +163,16 @@ pub async fn remove_member(
         .await
 }
 
-/// The most recent audit log entries, newest first.
+/// The audit log, newest first.
 #[tracing::instrument(skip_all)]
 pub async fn audit_log(
     state: &AppState,
     principal: &Principal,
-    limit: u32,
-) -> ApiResult<Vec<AuditEntry>> {
+    page: PageRequest<i64>,
+) -> ApiResult<Page<AuditRecord, i64>> {
     state.authorize(principal, AUDIT_READ, Scope::Global)?;
-    Ok(state.store().audit_log(limit).await?)
+    let records = state.store().audit_log(page.plus_one()).await?;
+    Ok(Page::from_lookahead(records, page.limit, |record| {
+        record.sequence
+    }))
 }

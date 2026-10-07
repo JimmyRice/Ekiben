@@ -14,7 +14,7 @@ use super::service;
 use crate::app::AppState;
 use crate::auth::{Principal, sessions};
 use crate::error::{ApiResult, Problem};
-use crate::http::{Json, PageQuery};
+use crate::http::{Json, Listing, ListingTag, PageQuery};
 
 const TAG: &str = "accounts";
 
@@ -133,13 +133,15 @@ pub(crate) async fn change_password(
 #[utoipa::path(
     get, path = "/v1/me/identities", tag = TAG,
     security(("bearer" = [])),
-    responses((status = 200, body = Vec<Identity>))
+    responses((status = 200, body = Listing<Identity>))
 )]
 pub(crate) async fn list_identities(
     State(state): State<AppState>,
     principal: Principal,
-) -> ApiResult<Json<Vec<Identity>>> {
-    Ok(Json(service::identities(&state, &principal).await?))
+) -> ApiResult<Json<Listing<Identity>>> {
+    Ok(Json(Listing::all(
+        service::identities(&state, &principal).await?,
+    )))
 }
 
 /// Unlink an external sign-in. An account always keeps a way to sign in: the last one cannot
@@ -185,16 +187,24 @@ pub(crate) async fn create_account(
     get, path = "/v1/admin/accounts", tag = TAG,
     security(("bearer" = [])),
     params(PageQuery),
-    responses((status = 200, body = Vec<Account>), (status = 403, body = Problem))
+    responses(
+        (status = 200, body = Listing<Account>),
+        (status = 400, body = Problem),
+        (status = 403, body = Problem)
+    )
 )]
 pub(crate) async fn list_accounts(
     State(state): State<AppState>,
     principal: Principal,
     Query(query): Query<PageQuery>,
-) -> ApiResult<Json<Vec<Account>>> {
-    Ok(Json(
-        service::accounts(&state, &principal, query.page()).await?,
-    ))
+) -> ApiResult<Json<Listing<Account>>> {
+    let page = query.page(ListingTag::ACCOUNTS)?;
+    let accounts = service::accounts(&state, &principal, page).await?;
+    Ok(Json(Listing::page(
+        accounts,
+        ListingTag::ACCOUNTS,
+        |account| account,
+    )))
 }
 
 /// Delete an account of a role below your own.
@@ -234,16 +244,24 @@ pub(crate) async fn create_organization(
     get, path = "/v1/admin/organizations", tag = TAG,
     security(("bearer" = [])),
     params(PageQuery),
-    responses((status = 200, body = Vec<Organization>), (status = 403, body = Problem))
+    responses(
+        (status = 200, body = Listing<Organization>),
+        (status = 400, body = Problem),
+        (status = 403, body = Problem)
+    )
 )]
 pub(crate) async fn list_organizations(
     State(state): State<AppState>,
     principal: Principal,
     Query(query): Query<PageQuery>,
-) -> ApiResult<Json<Vec<Organization>>> {
-    Ok(Json(
-        service::organizations(&state, &principal, query.page()).await?,
-    ))
+) -> ApiResult<Json<Listing<Organization>>> {
+    let page = query.page(ListingTag::ORGANIZATIONS)?;
+    let organizations = service::organizations(&state, &principal, page).await?;
+    Ok(Json(Listing::page(
+        organizations,
+        ListingTag::ORGANIZATIONS,
+        |organization| organization,
+    )))
 }
 
 /// Make an account a member of an organization.
@@ -278,20 +296,27 @@ pub(crate) async fn remove_member(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Read the most recent audit log entries.
+/// Read the audit log, newest first.
 #[utoipa::path(
     get, path = "/v1/admin/audit-log", tag = TAG,
     security(("bearer" = [])),
     params(PageQuery),
-    responses((status = 200, body = Vec<AuditEntryResponse>), (status = 403, body = Problem))
+    responses(
+        (status = 200, body = Listing<AuditEntryResponse>),
+        (status = 400, body = Problem),
+        (status = 403, body = Problem)
+    )
 )]
 pub(crate) async fn audit_log(
     State(state): State<AppState>,
     principal: Principal,
     Query(query): Query<PageQuery>,
-) -> ApiResult<Json<Vec<AuditEntryResponse>>> {
-    let entries = service::audit_log(&state, &principal, query.page().limit).await?;
-    Ok(Json(
-        entries.into_iter().map(AuditEntryResponse::from).collect(),
-    ))
+) -> ApiResult<Json<Listing<AuditEntryResponse>>> {
+    let page = query.page(ListingTag::AUDIT_LOG)?;
+    let records = service::audit_log(&state, &principal, page).await?;
+    Ok(Json(Listing::page(
+        records,
+        ListingTag::AUDIT_LOG,
+        AuditEntryResponse::from,
+    )))
 }

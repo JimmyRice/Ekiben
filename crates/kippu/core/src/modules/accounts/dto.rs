@@ -1,6 +1,6 @@
 use kippu_domain::account::{Account, Role};
 use kippu_domain::{OrganizationId, Timestamp};
-use kippu_store::AuditEntry;
+use kippu_store::AuditRecord;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -150,8 +150,8 @@ impl From<Whoami> for Me {
     }
 }
 
-impl From<AuditEntry> for AuditEntryResponse {
-    fn from(entry: AuditEntry) -> Self {
+impl From<AuditRecord> for AuditEntryResponse {
+    fn from(AuditRecord { entry, .. }: AuditRecord) -> Self {
         Self {
             at: entry.at,
             actor: entry.actor,

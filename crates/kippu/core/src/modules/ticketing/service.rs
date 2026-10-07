@@ -7,6 +7,7 @@ use kippu_domain::catalog::TicketType;
 use kippu_domain::reservation::Reservation;
 use kippu_domain::ticket::{Ticket, TicketStatus};
 use kippu_domain::{TicketId, Timestamp};
+use kippu_store::{Keyset, Page, PageRequest};
 
 use super::permissions::TICKETS_READ;
 use crate::app::AppState;
@@ -31,12 +32,23 @@ pub fn gate_keys(state: &AppState) -> GateKeys {
     }
 }
 
-/// The caller's tickets, newest first.
+/// The caller's tickets, most recently issued first.
 #[tracing::instrument(skip_all)]
-pub async fn tickets(state: &AppState, principal: &Principal) -> ApiResult<Vec<Ticket>> {
+pub async fn tickets(
+    state: &AppState,
+    principal: &Principal,
+    page: PageRequest<Keyset>,
+) -> ApiResult<Page<Ticket, Keyset>> {
     let account = principal.require_account()?;
     state.authorize(principal, TICKETS_READ, Scope::Account(account))?;
-    Ok(state.store().tickets_for_account(account).await?)
+    let tickets = state
+        .store()
+        .tickets_for_account(account, page.plus_one())
+        .await?;
+    Ok(Page::from_lookahead(tickets, page.limit, |ticket| Keyset {
+        at: ticket.issued_at,
+        id: ticket.id.as_uuid(),
+    }))
 }
 
 /// A ticket of the caller's. Other people's tickets are reported as missing.

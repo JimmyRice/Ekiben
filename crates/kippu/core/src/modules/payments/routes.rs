@@ -17,8 +17,8 @@ use super::signature::Attested;
 use crate::app::AppState;
 use crate::auth::Principal;
 use crate::error::{ApiResult, Problem};
-use crate::http::Json;
 use crate::http::idempotency::IdempotentByDesign;
+use crate::http::{Json, Listing};
 
 const TAG: &str = "payments";
 
@@ -53,16 +53,16 @@ pub(crate) async fn create_attestor(
 #[utoipa::path(
     get, path = "/v1/admin/attestors", tag = TAG,
     security(("bearer" = [])),
-    responses((status = 200, body = Vec<AttestorView>), (status = 403, body = Problem))
+    responses((status = 200, body = Listing<AttestorView>), (status = 403, body = Problem))
 )]
 pub(crate) async fn list_attestors(
     State(state): State<AppState>,
     principal: Principal,
-) -> ApiResult<Json<Vec<AttestorView>>> {
+) -> ApiResult<Json<Listing<AttestorView>>> {
     let attestors = service::attestors(&state, &principal).await?;
-    Ok(Json(
+    Ok(Json(Listing::all(
         attestors.into_iter().map(AttestorView::from).collect(),
-    ))
+    )))
 }
 
 /// Revoke or restore an attestor. Takes effect immediately on every instance.

@@ -80,7 +80,7 @@ async fn an_uploaded_image_is_stored_listed_and_served() {
             None,
         )
         .await;
-    assert_eq!(listed.body.as_array().unwrap().len(), 1);
+    assert_eq!(listed.body["items"].as_array().unwrap().len(), 1);
     let served = app.call(Method::GET, &url, None, None).await;
     assert_eq!(served.status, StatusCode::OK);
     assert_eq!(served.headers["content-type"], "image/png");
@@ -164,7 +164,7 @@ async fn images_can_be_reordered_and_deleted() {
         )
         .await;
     assert_eq!(ordered.status, StatusCode::OK, "{:?}", ordered.body);
-    let listed: Vec<Value> = ordered.body.as_array().unwrap().clone();
+    let listed: Vec<Value> = ordered.body["items"].as_array().unwrap().clone();
     let listed_ids: Vec<&str> = listed
         .iter()
         .map(|image| image["id"].as_str().unwrap())

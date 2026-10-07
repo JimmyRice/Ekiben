@@ -28,7 +28,7 @@ async fn ticket_holder(app: &TestApp) -> (String, Value) {
     let tickets = app
         .call(Method::GET, "/v1/me/tickets", Some(&buyer), None)
         .await;
-    (buyer, tickets.body[0].clone())
+    (buyer, tickets.body["items"][0].clone())
 }
 
 #[tokio::test]

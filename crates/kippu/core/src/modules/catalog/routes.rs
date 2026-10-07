@@ -7,46 +7,59 @@ use kippu_domain::catalog::{Event, EventSummary, Sale, TicketType};
 use kippu_domain::{EventId, OrganizationId, SaleId, TicketTypeId};
 
 use super::dto::{
-    CreateEventRequest, EventPatch, SaleDetail, SalePatch, SaleRequest, TicketTypePatch,
-    TicketTypeRequest, UpdateEventRequest, required_version,
+    CreateEventRequest, EventPatch, EventsQuery, SaleDetail, SalePatch, SaleRequest,
+    TicketTypePatch, TicketTypeRequest, UpdateEventRequest, event_listing, required_version,
 };
 use super::service;
 use crate::app::AppState;
 use crate::auth::Principal;
 use crate::error::{ApiResult, Problem};
-use crate::http::{Json, PageQuery};
+use crate::http::{Json, Listing, ListingTag, PageQuery};
 
 const TAG: &str = "catalog";
 
-/// Published events, for everyone. Listings leave out each event's `content`.
+/// Published and cancelled events, for everyone, one page at a time. Listings leave out each
+/// event's `content`.
 #[utoipa::path(
     get, path = "/v1/events", tag = TAG,
-    params(PageQuery),
-    responses((status = 200, body = Vec<EventSummary>))
+    params(EventsQuery),
+    responses((status = 200, body = Listing<EventSummary>), (status = 400, body = Problem))
 )]
 pub(crate) async fn list_events(
     State(state): State<AppState>,
-    Query(query): Query<PageQuery>,
-) -> ApiResult<Json<Vec<EventSummary>>> {
-    Ok(Json(service::public_events(&state, query.page()).await?))
+    Query(query): Query<EventsQuery>,
+) -> ApiResult<Json<Listing<EventSummary>>> {
+    let (filter, order, page) = query.into_parts()?;
+    let events = service::public_events(&state, filter, order, page).await?;
+    Ok(Json(Listing::page(events, event_listing(order), |event| {
+        event
+    })))
 }
 
-/// All events of an organization, drafts included.
+/// All events of an organization, drafts included, one page at a time.
 #[utoipa::path(
     get, path = "/v1/organizations/{organization_id}/events", tag = TAG,
     security(("bearer" = [])),
-    params(("organization_id" = OrganizationId, Path), PageQuery),
-    responses((status = 200, body = Vec<EventSummary>), (status = 403, body = Problem))
+    params(("organization_id" = OrganizationId, Path), EventsQuery),
+    responses(
+        (status = 200, body = Listing<EventSummary>),
+        (status = 400, body = Problem),
+        (status = 403, body = Problem)
+    )
 )]
 pub(crate) async fn list_organization_events(
     State(state): State<AppState>,
     principal: Principal,
     Path(organization_id): Path<OrganizationId>,
-    Query(query): Query<PageQuery>,
-) -> ApiResult<Json<Vec<EventSummary>>> {
-    Ok(Json(
-        service::organization_events(&state, &principal, organization_id, query.page()).await?,
-    ))
+    Query(query): Query<EventsQuery>,
+) -> ApiResult<Json<Listing<EventSummary>>> {
+    let (filter, order, page) = query.into_parts()?;
+    let events =
+        service::organization_events(&state, &principal, organization_id, filter, order, page)
+            .await?;
+    Ok(Json(Listing::page(events, event_listing(order), |event| {
+        event
+    })))
 }
 
 /// Create a draft event.
@@ -127,15 +140,17 @@ pub(crate) async fn patch_event(
 #[utoipa::path(
     get, path = "/v1/events/{event_id}/sales", tag = TAG,
     params(("event_id" = EventId, Path)),
-    responses((status = 200, body = Vec<SaleDetail>), (status = 404, body = Problem))
+    responses((status = 200, body = Listing<SaleDetail>), (status = 404, body = Problem))
 )]
 pub(crate) async fn list_sales(
     State(state): State<AppState>,
     principal: Option<Principal>,
     Path(event_id): Path<EventId>,
-) -> ApiResult<Json<Vec<SaleDetail>>> {
+) -> ApiResult<Json<Listing<SaleDetail>>> {
     let sales = service::event_sales(&state, principal.as_ref(), event_id).await?;
-    Ok(Json(sales.into_iter().map(SaleDetail::from).collect()))
+    Ok(Json(Listing::all(
+        sales.into_iter().map(SaleDetail::from).collect(),
+    )))
 }
 
 /// Create a sale for an event.
@@ -275,17 +290,25 @@ pub(crate) async fn patch_ticket_type(
     ))
 }
 
-/// Your favourite events.
+/// Your favourite events, most recently marked first.
 #[utoipa::path(
     get, path = "/v1/me/favorites", tag = TAG,
     security(("bearer" = [])),
-    responses((status = 200, body = Vec<EventSummary>))
+    params(PageQuery),
+    responses((status = 200, body = Listing<EventSummary>), (status = 400, body = Problem))
 )]
 pub(crate) async fn list_favorites(
     State(state): State<AppState>,
     principal: Principal,
-) -> ApiResult<Json<Vec<EventSummary>>> {
-    Ok(Json(service::favorites(&state, &principal).await?))
+    Query(query): Query<PageQuery>,
+) -> ApiResult<Json<Listing<EventSummary>>> {
+    let page = query.page(ListingTag::FAVORITES)?;
+    let events = service::favorites(&state, &principal, page).await?;
+    Ok(Json(Listing::page(
+        events,
+        ListingTag::FAVORITES,
+        |event| event,
+    )))
 }
 
 /// Mark an event as a favourite.

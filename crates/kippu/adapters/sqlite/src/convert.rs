@@ -8,7 +8,9 @@ use std::collections::BTreeMap;
 use std::str::FromStr;
 
 use kippu_domain::account::{Account, Identity, Organization, Role};
-use kippu_domain::catalog::{Event, EventStatus, EventSummary, Inventory, Sale, TicketType};
+use kippu_domain::catalog::{
+    Address, Event, EventStatus, EventSummary, Inventory, Sale, TicketType,
+};
 use kippu_domain::image::EventImage;
 use kippu_domain::payment::{
     Attestor, AttestorKey, Environment, PaymentAttestation, PaymentDisposition,
@@ -16,7 +18,7 @@ use kippu_domain::payment::{
 use kippu_domain::purchase::{Basket, PurchaseRequest, PurchaseStatus, RejectionReason};
 use kippu_domain::reservation::{Reservation, ReservationStatus};
 use kippu_domain::ticket::{Ticket, TicketStatus};
-use kippu_domain::validation::{Email, ProviderName, Slug, Subject};
+use kippu_domain::validation::{CountryCode, Email, ProviderName, Slug, Subject};
 use kippu_domain::webhook::Webhook;
 use kippu_domain::{Currency, Money, Timestamp};
 use kippu_store::StoreError;
@@ -158,6 +160,65 @@ pub(crate) fn event_status(status: EventStatus) -> &'static str {
     }
 }
 
+/// An event's address columns, all NULL when it has none.
+#[derive(sqlx::FromRow)]
+pub(crate) struct AddressColumns {
+    address_country: Option<String>,
+    address_region: Option<String>,
+    address_locality: Option<String>,
+    address_postal_code: Option<String>,
+    address_street: Option<String>,
+    latitude: Option<f64>,
+    longitude: Option<f64>,
+}
+
+impl AddressColumns {
+    fn into_address(self) -> Result<Option<Address>, StoreError> {
+        let Some(country) = self.address_country else {
+            return Ok(None);
+        };
+        Ok(Some(Address {
+            country: CountryCode::new(country).map_err(StoreError::backend)?,
+            region: self.address_region,
+            locality: self.address_locality,
+            postal_code: self.address_postal_code,
+            street: self
+                .address_street
+                .ok_or_else(|| StoreError::backend("an event address has no street"))?,
+            latitude: self.latitude,
+            longitude: self.longitude,
+        }))
+    }
+}
+
+/// The values of an event's address columns, to bind in the order `address_country,
+/// address_region, address_locality, address_postal_code, address_street, latitude,
+/// longitude`.
+pub(crate) struct AddressValues<'a> {
+    pub(crate) country: Option<&'a str>,
+    pub(crate) region: Option<&'a str>,
+    pub(crate) locality: Option<&'a str>,
+    pub(crate) postal_code: Option<&'a str>,
+    pub(crate) street: Option<&'a str>,
+    pub(crate) latitude: Option<f64>,
+    pub(crate) longitude: Option<f64>,
+}
+
+impl<'a> AddressValues<'a> {
+    /// The column values for `address`; all `None` without one.
+    pub(crate) fn of(address: Option<&'a Address>) -> Self {
+        Self {
+            country: address.map(|address| address.country.as_str()),
+            region: address.and_then(|address| address.region.as_deref()),
+            locality: address.and_then(|address| address.locality.as_deref()),
+            postal_code: address.and_then(|address| address.postal_code.as_deref()),
+            street: address.map(|address| address.street.as_str()),
+            latitude: address.and_then(|address| address.latitude),
+            longitude: address.and_then(|address| address.longitude),
+        }
+    }
+}
+
 #[derive(sqlx::FromRow)]
 pub(crate) struct EventSummaryRow {
     id: Uuid,
@@ -166,6 +227,8 @@ pub(crate) struct EventSummaryRow {
     title: String,
     description: String,
     venue: String,
+    #[sqlx(flatten)]
+    address: AddressColumns,
     starts_at: i64,
     ends_at: i64,
     status: String,
@@ -195,6 +258,7 @@ impl TryFrom<EventSummaryRow> for EventSummary {
             title: row.title,
             description: row.description,
             venue: row.venue,
+            address: row.address.into_address()?,
             starts_at: instant(row.starts_at),
             ends_at: instant(row.ends_at),
             status,
