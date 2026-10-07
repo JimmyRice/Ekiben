@@ -1,5 +1,11 @@
 # Ekiben (駅弁)
 
+> [!WARNING]
+> **Under heavy development.** The backend (Kippu) is still changing rapidly: data schemas,
+> features, APIs and protocols (including the KP1 ticket format, attestor and webhook
+> protocols) may change in breaking ways at any time, without notice or migration path.
+> **Do not use it in production without thorough testing of your own.**
+
 Ticketing infrastructure for conventions. Going to a convention is like passing through the
 ticket gate (改札) into another world — so the pieces are named after a Japanese train journey:
 
