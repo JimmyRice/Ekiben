@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use kippu_domain::catalog::TicketType;
 use kippu_domain::reservation::Reservation;
 use kippu_domain::ticket::{Ticket, TicketStatus};
-use kippu_domain::{TicketId, Timestamp};
+use kippu_domain::{TicketId, TicketTypeId, Timestamp};
 use kippu_store::{Keyset, Page, PageRequest};
 
 use super::permissions::TICKETS_READ;
@@ -24,6 +24,15 @@ pub struct GateKeys {
     pub keys: Vec<PublishedKey>,
 }
 
+/// A ticket as its holder sees it: the ticket, and the name of its type.
+#[derive(Debug, Clone)]
+pub struct TicketDetails {
+    /// The ticket.
+    pub ticket: Ticket,
+    /// The ticket type's current name, e.g. "Day 1".
+    pub ticket_type_name: String,
+}
+
 /// The keys tickets are signed with.
 pub fn gate_keys(state: &AppState) -> GateKeys {
     GateKeys {
@@ -38,17 +47,37 @@ pub async fn tickets(
     state: &AppState,
     principal: &Principal,
     page: PageRequest<Keyset>,
-) -> ApiResult<Page<Ticket, Keyset>> {
+) -> ApiResult<Page<TicketDetails, Keyset>> {
     let account = principal.require_account()?;
     state.authorize(principal, TICKETS_READ, Scope::Account(account))?;
     let tickets = state
         .store()
         .tickets_for_account(account, page.plus_one())
         .await?;
-    Ok(Page::from_lookahead(tickets, page.limit, |ticket| Keyset {
+    let page = Page::from_lookahead(tickets, page.limit, |ticket| Keyset {
         at: ticket.issued_at,
         id: ticket.id.as_uuid(),
-    }))
+    });
+    // A page holds few ticket types: look each up once.
+    let mut names: BTreeMap<TicketTypeId, String> = BTreeMap::new();
+    let mut items = Vec::with_capacity(page.items.len());
+    for ticket in page.items {
+        let name = if let Some(name) = names.get(&ticket.ticket_type_id) {
+            name.clone()
+        } else {
+            let name = ticket_type_name(state, ticket.ticket_type_id).await?;
+            names.insert(ticket.ticket_type_id, name.clone());
+            name
+        };
+        items.push(TicketDetails {
+            ticket,
+            ticket_type_name: name,
+        });
+    }
+    Ok(Page {
+        items,
+        next: page.next,
+    })
 }
 
 /// A ticket of the caller's. Other people's tickets are reported as missing.
@@ -66,6 +95,32 @@ pub async fn ticket(state: &AppState, principal: &Principal, id: TicketId) -> Ap
         return Err(ApiError::not_found("ticket"));
     }
     Ok(ticket)
+}
+
+/// A ticket of the caller's, with the name of its type.
+#[tracing::instrument(skip_all)]
+pub async fn ticket_details(
+    state: &AppState,
+    principal: &Principal,
+    id: TicketId,
+) -> ApiResult<TicketDetails> {
+    let ticket = ticket(state, principal, id).await?;
+    let ticket_type_name = ticket_type_name(state, ticket.ticket_type_id).await?;
+    Ok(TicketDetails {
+        ticket,
+        ticket_type_name,
+    })
+}
+
+/// The current name of a ticket type. Ticket types are never deleted, so an issued ticket's
+/// type always exists.
+async fn ticket_type_name(state: &AppState, id: TicketTypeId) -> ApiResult<String> {
+    state
+        .store()
+        .ticket_type(id)
+        .await?
+        .map(|ticket_type| ticket_type.name)
+        .ok_or_else(|| ApiError::internal("an issued ticket's type no longer exists"))
 }
 
 fn unix_seconds(instant: Timestamp) -> u64 {

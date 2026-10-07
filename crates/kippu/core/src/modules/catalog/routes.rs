@@ -8,7 +8,8 @@ use kippu_domain::{EventId, OrganizationId, SaleId, TicketTypeId};
 
 use super::dto::{
     CreateEventRequest, EventPatch, EventsQuery, SaleDetail, SalePatch, SaleRequest,
-    TicketTypePatch, TicketTypeRequest, UpdateEventRequest, event_listing, required_version,
+    TicketTypeOffer, TicketTypePatch, TicketTypeRequest, UpdateEventRequest, event_listing,
+    required_version,
 };
 use super::service;
 use crate::app::AppState;
@@ -244,6 +245,21 @@ pub(crate) async fn create_ticket_type(
     let ticket_type =
         service::create_ticket_type(&state, &principal, sale_id, request.into()).await?;
     Ok((StatusCode::CREATED, Json(ticket_type)))
+}
+
+/// A ticket type, with its availability. Its `version` is what `PUT` and `PATCH` expect.
+#[utoipa::path(
+    get, path = "/v1/ticket-types/{ticket_type_id}", tag = TAG,
+    params(("ticket_type_id" = TicketTypeId, Path)),
+    responses((status = 200, body = TicketTypeOffer), (status = 404, body = Problem))
+)]
+pub(crate) async fn get_ticket_type(
+    State(state): State<AppState>,
+    principal: Option<Principal>,
+    Path(ticket_type_id): Path<TicketTypeId>,
+) -> ApiResult<Json<TicketTypeOffer>> {
+    let offer = service::ticket_type_offer(&state, principal.as_ref(), ticket_type_id).await?;
+    Ok(Json(offer.into()))
 }
 
 /// Edit a ticket type. Capacity can drop no lower than what is held and sold.

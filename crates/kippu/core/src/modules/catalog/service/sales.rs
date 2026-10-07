@@ -5,7 +5,7 @@ use kippu_domain::catalog::{Event, Sale, TicketType};
 use kippu_domain::payment::Environment;
 use kippu_domain::{AttestorId, EventId, SaleId, Timestamp};
 
-use super::{check_version, visible_event, writable_event};
+use super::{availability, check_version, visible_event, writable_event};
 use crate::app::AppState;
 use crate::auth::Principal;
 use crate::error::{ApiError, ApiResult};
@@ -122,15 +122,7 @@ pub async fn writable_sale(
 async fn offer(state: &AppState, sale: Sale) -> ApiResult<SaleOffer> {
     let mut ticket_types = Vec::new();
     for ticket_type in state.store().list_ticket_types(sale.id).await? {
-        let available = state
-            .store()
-            .inventory(ticket_type.id)
-            .await?
-            .map_or(0, |inventory| inventory.available());
-        ticket_types.push(TicketTypeAvailability {
-            ticket_type,
-            available,
-        });
+        ticket_types.push(availability(state, ticket_type).await?);
     }
     Ok(SaleOffer { sale, ticket_types })
 }
