@@ -290,6 +290,11 @@ Do not change these unless the user explicitly asks.
   organizer tokens, signed lists gates verify themselves. Not needed yet.
 - Webhooks: resuming (`active: true`) does not reset the backoff; no retry-now; the backoff cap
   is hard-coded.
+- When a deployment's auxiliary backend should vet refunds (e.g. against check-ins gates report
+  to it): an attestor-signed `POST /v1/attestor/refunds {attestation_id, ticket_ids, reference}`
+  that revokes at once (refund id derived from the reference; no `refund.required`). Requesting,
+  cooling off and cancelling stay in that backend; Kippu keeps one irreversible step. Until
+  then, leave `refundable_until` unset to keep buyers from refunding at Kippu directly.
 - Later: passkeys as a second Admin credential; inventory buckets for extremely hot sessions;
   OpenTelemetry; per-module migrations with their own version tracking.
 - Request log: a "still processing" line for requests running longer than N seconds (not built).
