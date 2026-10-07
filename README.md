@@ -10,6 +10,19 @@
 > **Issues and pull requests are disabled** on the GitHub repository while the project is
 > unfinished. Contributions, including merging other branches, are not being accepted for now.
 
+## Why Ekiben exists
+
+The idea came from one of the largest anime conventions in China, which managed to fail at both
+ends of the day: the ticketing servers went down when sales opened, and the entrance gates went
+down when the doors did.
+
+Ekiben aims to keep that from happening at large crowd events, conventions in particular. A
+convention crowd is hard to plan for: attendees differ in size, costume and tolerance for heat,
+so a stalled queue at the gate hurts more than it would at most events. The goal is that people
+can always buy a ticket and always get through the gate. That is why Kippu stays stateless and
+scales out under heavy contention, and why Kaisatsu verifies tickets offline, with nothing but
+the ticket and a public key, so a gate keeps working when the network does not.
+
 Ticketing infrastructure for conventions. Going to a convention is like passing through the
 ticket gate (改札) into another world — so the pieces are named after a Japanese train journey:
 
