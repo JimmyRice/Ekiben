@@ -160,6 +160,9 @@ Content-Type: application/json
 }
 ```
 
+`GET /v1/ticket-types/{{ticket_type_id}}` returns it again, with how many tickets are left and
+the `version` an edit expects; anyone may read it once the event is published.
+
 ## 8–10. Accept payments and publish
 
 Kippu talks to no payment provider itself. An *attestor* — a service that wraps one — reports
@@ -291,8 +294,9 @@ Host: localhost:8080
 Authorization: Bearer {{buyer_token}}
 ```
 
-Each ticket in `items` carries `ticket`, the signed ticket in Base64. The same bytes are
-available raw, `application/octet-stream`, from the ticket's `/raw` endpoint:
+Each ticket in `items` carries `ticket_type_name` to show and `ticket`, the signed ticket in
+Base64. The same bytes are available raw, `application/octet-stream`, from the ticket's `/raw`
+endpoint:
 
 ```http
 GET /v1/tickets/{{ticket_id}}/raw HTTP/1.1

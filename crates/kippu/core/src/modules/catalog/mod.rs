@@ -63,6 +63,7 @@ impl Module for Catalog {
             ))
             .routes(routes!(routes::create_ticket_type))
             .routes(routes!(
+                routes::get_ticket_type,
                 routes::update_ticket_type,
                 routes::patch_ticket_type
             ))

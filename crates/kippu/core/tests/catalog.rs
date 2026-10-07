@@ -135,6 +135,68 @@ async fn sales_and_ticket_types_can_be_patched() {
 }
 
 #[tokio::test]
+async fn a_ticket_type_is_visible_wherever_its_event_is() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let path = format!("/v1/ticket-types/{}", shop.ticket_type_id);
+
+    let fetched = app.call(Method::GET, &path, None, None).await;
+    assert_eq!(fetched.status, StatusCode::OK, "{:?}", fetched.body);
+    let sale_path = format!("/v1/sales/{}", shop.sale_id);
+    let sale = app.call(Method::GET, &sale_path, None, None).await.body;
+    assert_eq!(fetched.body, sale["ticket_types"][0]);
+    assert_eq!(fetched.body["available"], 10);
+
+    // Its version is the one an edit expects.
+    let renamed = app
+        .call(
+            Method::PATCH,
+            &path,
+            Some(&shop.organizer),
+            Some(json!({ "version": fetched.body["version"], "name": "Day 1 (East)" })),
+        )
+        .await;
+    assert_eq!(renamed.status, StatusCode::OK, "{:?}", renamed.body);
+    assert_eq!(
+        app.call(Method::GET, &path, None, None).await.body["name"],
+        "Day 1 (East)"
+    );
+
+    let unknown = app
+        .call(
+            Method::GET,
+            "/v1/ticket-types/01994a3c-7d00-7000-8000-000000000001",
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+    assert_eq!(unknown.body["type"], "urn:kippu:problem:not-found");
+
+    // A draft's ticket types are hidden like the draft itself.
+    let event_path = format!("/v1/events/{}", shop.event_id);
+    let event = app.call(Method::GET, &event_path, None, None).await.body;
+    let drafted = app
+        .call(
+            Method::PATCH,
+            &event_path,
+            Some(&shop.organizer),
+            Some(json!({ "version": event["version"], "status": "draft" })),
+        )
+        .await;
+    assert_eq!(drafted.status, StatusCode::OK, "{:?}", drafted.body);
+    let stranger = app.buyer().await;
+    for token in [None, Some(stranger.as_str())] {
+        let hidden = app.call(Method::GET, &path, token, None).await;
+        assert_eq!(hidden.status, StatusCode::NOT_FOUND, "{:?}", hidden.body);
+    }
+    let own = app
+        .call(Method::GET, &path, Some(&shop.organizer), None)
+        .await;
+    assert_eq!(own.status, StatusCode::OK, "{:?}", own.body);
+}
+
+#[tokio::test]
 async fn patch_is_documented_as_merge_patch() {
     let app = TestApp::start().await;
     let openapi = app

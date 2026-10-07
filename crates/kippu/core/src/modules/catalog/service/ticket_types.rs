@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use kippu_domain::catalog::TicketType;
 use kippu_domain::{Money, SaleId, TicketTypeId, Timestamp};
 
-use super::{check_version, writable_sale};
+use super::{TicketTypeAvailability, check_version, visible_sale, writable_sale};
 use crate::app::AppState;
 use crate::auth::Principal;
 use crate::error::{ApiError, ApiResult};
@@ -61,6 +61,49 @@ impl From<TicketTypeSettings> for TicketTypeChanges {
             ticket_extensions: Some(settings.ticket_extensions),
         }
     }
+}
+
+/// A ticket type whose event the caller may see.
+#[tracing::instrument(skip_all)]
+pub async fn visible_ticket_type(
+    state: &AppState,
+    principal: Option<&Principal>,
+    id: TicketTypeId,
+) -> ApiResult<TicketType> {
+    let ticket_type = state
+        .store()
+        .ticket_type(id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("ticket type"))?;
+    visible_sale(state, principal, ticket_type.sale_id).await?;
+    Ok(ticket_type)
+}
+
+/// A ticket type the caller may see, with its availability.
+#[tracing::instrument(skip_all)]
+pub async fn ticket_type_offer(
+    state: &AppState,
+    principal: Option<&Principal>,
+    id: TicketTypeId,
+) -> ApiResult<TicketTypeAvailability> {
+    let ticket_type = visible_ticket_type(state, principal, id).await?;
+    availability(state, ticket_type).await
+}
+
+/// A ticket type and how many of its tickets can still be reserved.
+pub(super) async fn availability(
+    state: &AppState,
+    ticket_type: TicketType,
+) -> ApiResult<TicketTypeAvailability> {
+    let available = state
+        .store()
+        .inventory(ticket_type.id)
+        .await?
+        .map_or(0, |inventory| inventory.available());
+    Ok(TicketTypeAvailability {
+        ticket_type,
+        available,
+    })
 }
 
 /// A ticket type the caller may edit.

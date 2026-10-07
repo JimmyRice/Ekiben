@@ -58,7 +58,7 @@ pub(crate) async fn get_ticket(
     Path(ticket_id): Path<TicketId>,
 ) -> ApiResult<Json<TicketView>> {
     Ok(Json(TicketView::from(
-        service::ticket(&state, &principal, ticket_id).await?,
+        service::ticket_details(&state, &principal, ticket_id).await?,
     )))
 }
 
