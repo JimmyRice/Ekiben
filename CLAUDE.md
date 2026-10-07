@@ -1,7 +1,9 @@
 # CLAUDE.md
 
 Ekiben (駅弁) is ticketing infrastructure for conventions: **Kippu** (切符), a stateless Rust
-backend, and **Kaisatsu** (改札), a `no_std` library that verifies Kippu tickets.
+backend, and **Kaisatsu** (改札), a `no_std` library that verifies Kippu tickets. The initial
+feature set is complete; settled design decisions, open tasks and known limits are at the end of
+this file.
 
 Code, rustdoc, READMEs and `spec/` are written in English.
 
@@ -200,3 +202,62 @@ as `shop`, `attestor`, `reserve`, `drain`); the full journey over real TCP is
   Argon2 makes the test suite ~20× slower.
 - The C example and `xtask size` build the FFI crate without `std`; with `std` the shared
   library is ~4× larger.
+
+## Settled design decisions
+
+Do not change these unless the user explicitly asks.
+
+- **Ticket format:** compact binary **KP1** — 12-byte header + canonical TLV claims + Ed25519
+  signature over `header‖claims` (`spec/ticket-protocol.md`). One signing key for all events;
+  KP1's `key_id` already supports a key ring if an organizer ever needs its own.
+- **Organizers** are isolated per Organization; Admin works across organizations.
+- **Root login:** no separate CLI. Only the root public key is in the config; the private key
+  signs an EdDSA JWT of at most 10 minutes locally (`kippu root-token` or any JWT library).
+- **Payments:** the backend integrates no payment provider. Attestors with registered Ed25519
+  keys report signed results (`spec/attestor-protocol.md`).
+- **Messaging is optional** (database is the queue); the first MQ adapter is NATS JetStream.
+  Known edge: the same idempotency key retried with a *different* cart before it reaches the
+  database is dropped by JetStream dedup; the first cart wins.
+- **Webhooks:** deployment-wide Ed25519 key, public key at `/.well-known/kippu/webhook-keys`,
+  same signature format as attestors; subscriptions per organization (`spec/webhook-protocol.md`).
+- **Bindings:** Swift/Kotlin/C# via UniFFI, C/C++/firmware via the hand-written C ABI. C++ stays
+  on the C ABI: the C++ generator is stuck on UniFFI 0.29 and UniFFI would grow the library from
+  65 KiB to 365 KiB (RustBuffer, std) for no gain.
+- **External interface is HTTP + JSON only** (OpenAPI). No pluggable protocol/codec layer: CDNs,
+  WAFs and edge rate limiting live in the HTTP ecosystem, and semantics lean on HTTP (`202 +
+  Location`, problem+json, attestor signatures over METHOD + path + body hash). If gRPC is ever
+  needed: first make the business layer HTTP-independent (error class separate from status,
+  a `RequestContext`, public `service`), then add `crates/kippu/transports/grpc`. Prefer SSE for
+  push.
+- **External sign-in:** Kippu ships no OAuth client; forks write a `Module` that calls
+  `auth::external::link_or_create` and `auth::sessions::issue` (`docs/external-login.md`).
+  Accounts may have no password and no email; merging by email requires a verified email and is
+  off by default (`auth.link_by_verified_email`). External bearer tokens are deliberately *not*
+  accepted directly: Kippu could not revoke sessions or record roles.
+- **Event `content`** is an opaque string up to 256 KiB, returned only by `GET /v1/events/{id}`;
+  listings return `EventSummary`. Per-person sensitive data (e.g. real-name IDs) is the
+  integrator's job to encrypt, not the backend's.
+- **Event images** need real object storage; no local-disk or in-memory backend outside tests.
+- **PostgreSQL queue numbers** come from a per-sale counter row (`INSERT … ON CONFLICT DO
+  UPDATE`), not a sequence: an admission batch means "the next N people" and needs consecutive
+  numbers.
+
+## Open tasks
+
+- Purchase worker: process in parallel when `StoreCapabilities::concurrent_writers`.
+- CI: run the three UniFFI packaging flows (swift-package, kotlin, nuget) and add size budgets;
+  run the Android AAR on a device or emulator (it has only been built).
+- `kaisatsu-wasm` published as an npm package.
+- Cortex-M (embassy) firmware example to measure real size; add the budget to CI. Static library
+  size is meaningless (the linker prunes).
+- Later: passkeys as a second Admin credential; refunds/reversals after issue and a revocation
+  feed for gates; inventory buckets for extremely hot sessions; OpenTelemetry; per-module
+  migrations with their own version tracking.
+- Request log: a "still processing" line for requests running longer than N seconds (not built).
+
+## Known limitations
+
+- The generic `Idempotency-Key` middleware does not stop two simultaneous first requests with
+  the same key from both running (purchases and payments are idempotent on their own). A strict
+  fix is a "processing" placeholder row.
+- A ticket type belongs to exactly one sale; venue capacity shared across sales is not modelled.
