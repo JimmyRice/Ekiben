@@ -84,8 +84,9 @@ pub struct Hold {
 
 /// Stock and per-account limits inside a transaction.
 ///
-/// Callers pass items sorted by ticket type, which keeps lock order consistent and rules out
-/// deadlocks between concurrent transactions.
+/// Callers pass items sorted by ticket type, and change an account's quota before stock in
+/// the same transaction, which keeps lock order consistent and rules out deadlocks between
+/// concurrent transactions.
 #[async_trait]
 pub trait InventoryTx: Send {
     /// Moves `quantity` tickets of every item from available to held.

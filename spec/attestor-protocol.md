@@ -51,10 +51,18 @@ When a buyer checks out with an attestor, Kippu records a `payment.requested` ev
   "amount": { "amount_minor": 6000, "currency": "JPY" }, "expires_at": "…" }
 ```
 
-An attestor reads its events with `GET /v1/attestor/feed?after=<sequence>` (signed), or looks
-a reservation up directly with `GET /v1/attestor/reservations/{id}` (signed) — for example
-when the buyer's browser hands it a reservation id. **The amount to charge always comes from
-Kippu**, never from the buyer.
+An attestor reads its events with `GET /v1/attestor/feed?after=<sequence>&limit=<n>` (signed),
+or looks a reservation up directly with `GET /v1/attestor/reservations/{id}` (signed) — for
+example when the buyer's browser hands it a reservation id. **The amount to charge always comes
+from Kippu**, never from the buyer.
+
+The feed answers a JSON array of `{sequence, created_at, event}`, in sequence order, holding
+only the events addressed to the attestor (`payment.requested`, `refund.required`). The outbox
+behind it holds every event of the deployment, so Kippu reads on past other attestors' events
+and says how far it read in the `Kippu-Feed-Position` header. Pass that value as the next
+`after`: it never skips an event addressed to you, and it moves on even when an answer is
+empty. (The sequence of the last event processed also works, but can stay behind a long run of
+others' events.)
 
 ## 4. Reporting a payment
 

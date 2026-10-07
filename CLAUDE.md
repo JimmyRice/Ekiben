@@ -38,7 +38,7 @@ Keep the repository root uncluttered and do not add speculative `.gitignore` ent
 ## Commands
 
 ```bash
-cargo test --workspace --all-features                                   # 289 tests incl. e2e over TCP
+cargo test --workspace --all-features                                   # 290 tests incl. e2e over TCP
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets           # default features too
 cargo fmt --all
@@ -249,7 +249,8 @@ Do not change these unless the user explicitly asks.
 - **Listings:** `{items, next_cursor}` envelope for lists only; single resources stay bare and
   errors stay problem+json. Cursors are opaque keyset positions, not offsets; filters and
   sorts are a whitelisted, indexed set per listing (no generic filter language). The outbox
-  feeds keep `after=<sequence>` and a bare array: that is the attestor protocol.
+  feeds keep `after=<sequence>` and a bare array: that is the attestor protocol. The attestor
+  feed reads past other attestors' events and returns how far it read in `Kippu-Feed-Position`.
 - **Event `content`** is an opaque string up to 256 KiB, returned only by `GET /v1/events/{id}`;
   listings return `EventSummary`. Per-person sensitive data (e.g. real-name IDs) is the
   integrator's job to encrypt, not the backend's.
@@ -287,8 +288,6 @@ Do not change these unless the user explicitly asks.
 - Gates, when a snapshot per poll is no longer enough: a per-event numbered log of denial
   changes (deltas, `after=<number>`), a narrow machine credential for venue servers instead of
   organizer tokens, signed lists gates verify themselves. Not needed yet.
-- Attestor feed: `attestor_feed` filters a fixed outbox window in memory, so more than `limit`
-  unrelated events after an attestor's cursor stall it (it gets `[]` and never advances).
 - Webhooks: resuming (`active: true`) does not reset the backoff; no retry-now; the backoff cap
   is hard-coded.
 - Later: passkeys as a second Admin credential; inventory buckets for extremely hot sessions;

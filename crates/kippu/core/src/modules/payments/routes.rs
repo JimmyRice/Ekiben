@@ -2,7 +2,7 @@
 //! result into a response. Rules live in the service, not here.
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use kippu_domain::refund::Refund;
 use kippu_domain::reservation::Reservation;
@@ -22,6 +22,9 @@ use crate::http::idempotency::IdempotentByDesign;
 use crate::http::{Json, Listing};
 
 const TAG: &str = "payments";
+
+/// How far the attestor feed was read: the `after` of the next poll.
+const FEED_POSITION: &str = "kippu-feed-position";
 
 /// A settlement response, marked as safe to repeat without the idempotency middleware.
 fn settlement(result: PaymentResult) -> Response {
@@ -186,21 +189,32 @@ pub(crate) async fn manual_payment(
 }
 
 /// For attestors: integration events addressed to you (`payment.requested`, `refund.required`).
-/// Poll it with the last sequence number you processed.
+///
+/// Poll it with `after` set to the `Kippu-Feed-Position` of the previous answer: how far Kippu
+/// read the feed, past events addressed to others. (The sequence of the last event you
+/// processed also works, but can stay behind other attestors' events.)
 #[utoipa::path(
     get, path = "/v1/attestor/feed", tag = TAG,
     params(FeedQuery, ("Kippu-Signature" = String, Header)),
-    responses((status = 200, body = Vec<FeedEvent>), (status = 401, body = Problem))
+    responses(
+        (status = 200, body = Vec<FeedEvent>, headers(
+            ("Kippu-Feed-Position" = i64, description = "The sequence to poll after next")
+        )),
+        (status = 401, body = Problem),
+    )
 )]
 pub(crate) async fn attestor_feed(
     State(state): State<AppState>,
     Query(query): Query<FeedQuery>,
     attested: Attested,
-) -> ApiResult<Json<Vec<FeedEvent>>> {
+) -> ApiResult<Response> {
     let (after, limit) = query.page();
-    Ok(feed(
-        service::attestor_feed(&state, &attested.attestor, after, limit).await?,
-    ))
+    let read = service::attestor_feed(&state, &attested.attestor, after, limit).await?;
+    let mut response = feed(read.events).into_response();
+    response
+        .headers_mut()
+        .insert(FEED_POSITION, HeaderValue::from(read.position));
+    Ok(response)
 }
 
 /// Every integration event, for operators and integrations.

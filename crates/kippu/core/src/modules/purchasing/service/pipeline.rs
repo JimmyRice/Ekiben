@@ -311,10 +311,12 @@ pub(crate) async fn process_batch(state: AppState) -> Result<Progress, BoxError>
 /// Releases what a reservation holds and records its new status.
 pub(super) async fn release(tx: &mut dyn StoreTx, reservation: &Reservation) -> ApiResult<()> {
     let items = line_items(reservation);
-    tx.inventory().release_held(&items).await?;
+    // Quota before stock, each in ticket type order: the order purchases take them in, so a
+    // cancellation or an expiry cannot deadlock with the same buyer's purchase.
     tx.inventory()
         .return_quota(reservation.account_id, &items)
         .await?;
+    tx.inventory().release_held(&items).await?;
     tx.reservations().update_reservation(reservation).await?;
     Ok(())
 }
