@@ -1,4 +1,4 @@
-# External sign-in: Sign in with Apple, WeChat, QQ, …
+# External sign-in: Sign in with Apple, Google, …
 
 Besides email and password, people can sign in to Kippu through providers they already use.
 Kippu itself ships no client for any provider: each one has its own flow, keys and rules, and
@@ -6,7 +6,7 @@ deployments need different ones. Instead it has two building blocks, and you wri
 module that connects them to the provider of your choice:
 
 ```text
-app --> your module --> provider (Apple, WeChat, ...) --> your module
+app --> your module --> provider (Apple, Google, Weixin ...) --> your module
                                                           |  knows who it is
                        external::link_or_create <---------+
                        sessions::issue --> ordinary Kippu access + refresh tokens
