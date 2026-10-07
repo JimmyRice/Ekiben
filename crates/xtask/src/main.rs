@@ -30,7 +30,7 @@ fn main() -> ExitCode {
         Some("vectors") => vectors::run(check),
         Some("header") => header::run(check),
         Some("c-example") => c_example::run(),
-        Some("uniffi") => uniffi::run(),
+        Some("uniffi") => uniffi::run(&args[1..]),
         Some("size") => size::run(),
         _ => {
             eprintln!("usage: cargo xtask <vectors|header|c-example|uniffi|size> [--check]");

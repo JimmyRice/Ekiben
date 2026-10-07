@@ -10,7 +10,8 @@ Code, rustdoc, READMEs and `spec/` are written in English.
 ```text
 src/main.rs                    the `kippu` binary: ~10 lines of wiring, nothing else
 spec/                          normative protocols (KP1 tickets, attestors, webhooks) + shared test vectors
-docs/                          walkthrough.md/.http, external-login.md (writing a sign-in module)
+docs/                          walkthrough.md/.http, external-login.md (writing a sign-in module),
+                               building-kaisatsu.md (every platform's smallest library)
 crates/kippu/domain            pure domain: ids, money, timestamps, state machines — no I/O, no clock
 crates/kippu/store             storage ports, consistency contract, `conformance` test suite
 crates/kippu/telemetry         span contract + log layer (feature `layer`): one call chain per request
@@ -24,7 +25,7 @@ crates/kippu/adapters/objects-* object storage for event images: `-common` (obje
                                `-s3`, `-gcs`, `-azure`, one crate per provider (port in kippu-store)
 crates/kaisatsu                KP1 encode/verify, no_std; `issuer` feature for signing; fuzz/
 crates/ffi/c                   C ABI (the only crate with `unsafe`), generated include/kaisatsu.h
-crates/ffi/uniffi              UniFFI (proc-macro, no UDL) for Swift, Kotlin and C#; safe Rust only
+crates/ffi/uniffi              UniFFI (proc-macro, no UDL) for Swift, Kotlin and C#; safe Rust only; kotlin/ is a Gradle project
 crates/xtask                   `cargo xtask vectors|header [--check] | c-example | uniffi | size`
 ```
 
@@ -43,7 +44,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features --workspace --excl
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features -p kaisatsu-ffi  # same lib name as kaisatsu
 cargo xtask vectors --check && cargo xtask header --check               # generated files up to date
 cargo xtask c-example                                                   # C ABI against all 15 vectors
-cargo xtask uniffi                                                      # generate Swift/Kotlin/C# into target/uniffi, run the vectors in Swift
+cargo xtask uniffi [swift-package|kotlin|nuget]                         # bindings into target/uniffi; no argument: run the vectors in Swift
 cargo build -p kaisatsu --target thumbv7em-none-eabihf                  # proves no_std
 cargo run -- serve --config <file>                                      # see kippu.example.toml
 cargo build --profile dist                                              # server distribution build (~13 MB vs ~21 MB)

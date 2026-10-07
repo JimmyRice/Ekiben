@@ -1,93 +1,14 @@
-//! Builds the `UniFFI` library as it ships (`release-small`), generates the Swift and Kotlin
-//! sources into `target/uniffi/` (and C# when `uniffi-bindgen-cs` is installed), then compiles
-//! `crates/ffi/uniffi/examples/verify.swift` against the Swift bindings and runs every test
-//! vector, including its time checks, through it.
+//! Compiles `crates/ffi/uniffi/examples/verify.swift` against the generated Swift bindings and
+//! runs every test vector, including its time checks, through it.
 
 use std::path::Path;
 use std::process::Command;
 
 use serde_json::Value;
 
-use crate::{Result, run_command, workspace_root};
+use crate::{Result, run_command};
 
-const PROFILE: &str = "release-small";
-
-pub(crate) fn run() -> Result {
-    let root = workspace_root();
-    let cargo = |extra: &[&str]| {
-        run_command(
-            Command::new(env!("CARGO"))
-                .current_dir(&root)
-                .args([
-                    "build",
-                    "--package",
-                    "kaisatsu-uniffi",
-                    "--profile",
-                    PROFILE,
-                ])
-                .args(extra),
-        )
-    };
-    cargo(&[])?;
-    cargo(&["--features", "bindgen", "--bin", "uniffi-bindgen"])?;
-
-    let profile_dir = root.join("target").join(PROFILE);
-    let library = [
-        "libkaisatsu_uniffi.dylib",
-        "libkaisatsu_uniffi.so",
-        "kaisatsu_uniffi.dll",
-    ]
-    .map(|name| profile_dir.join(name))
-    .into_iter()
-    .find(|path| path.exists())
-    .ok_or("the shared library was not built")?;
-    let out_dir = root.join("target/uniffi");
-
-    for language in ["swift", "kotlin"] {
-        let dir = out_dir.join(language);
-        run_command(
-            Command::new(profile_dir.join("uniffi-bindgen"))
-                .args([
-                    "generate",
-                    "--no-format",
-                    "--language",
-                    language,
-                    "--library",
-                ])
-                .arg(&library)
-                .arg("--out-dir")
-                .arg(&dir),
-        )?;
-        println!("generated {language} sources in {}", dir.display());
-    }
-    if Command::new("uniffi-bindgen-cs")
-        .arg("--version")
-        .output()
-        .is_ok()
-    {
-        let dir = out_dir.join("csharp");
-        run_command(
-            Command::new("uniffi-bindgen-cs")
-                .arg("--library")
-                .arg(&library)
-                .arg("--out-dir")
-                .arg(&dir),
-        )?;
-        println!("generated csharp sources in {}", dir.display());
-    } else {
-        println!(
-            "(install uniffi-bindgen-cs, tag v0.11.0+v0.31.0 of github.com/NordSecurity/uniffi-bindgen-cs, to generate C#)"
-        );
-    }
-
-    if Command::new("swiftc").arg("--version").output().is_err() {
-        println!("(swiftc not found: skipping the Swift example)");
-        return Ok(());
-    }
-    swift_example(&root, &out_dir, &profile_dir)
-}
-
-fn swift_example(root: &Path, out_dir: &Path, library_dir: &Path) -> Result {
+pub(crate) fn run(root: &Path, out_dir: &Path, library_dir: &Path) -> Result {
     let swift_dir = out_dir.join("swift");
     let example = out_dir.join("swift-example");
     std::fs::create_dir_all(&example)?;
