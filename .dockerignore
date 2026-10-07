@@ -1,0 +1,8 @@
+target
+.git
+.idea
+.github
+.DS_Store
+docs
+**/node_modules
+crates/kaisatsu/fuzz
