@@ -306,11 +306,21 @@ Authorization: Bearer {{buyer_token}}
 
 How the bytes reach the gate — a binary QR code, Base45 text, the Base64 as is — is up to
 the app; see [section 5 of the ticket protocol](../spec/ticket-protocol.md#5-transport-encoding).
-A gate needs nothing from the server at the door except, once, the public keys to trust:
+A gate verifies tickets offline. It needs, once, the public keys to trust:
 
 ```http
 GET /.well-known/kippu/ticket-keys HTTP/1.1
 Host: localhost:8080
+```
+
+and, refreshed while doors are open, the tickets to refuse although their signature is valid —
+refunded tickets, tickets an organizer denied and every ticket of an account refused entry (see
+[building Kaisatsu](building-kaisatsu.md#after-verify-tickets-to-refuse)):
+
+```http
+GET /v1/events/{{event_id}}/denied-tickets HTTP/1.1
+Host: localhost:8080
+Authorization: Bearer {{organizer_token}}
 ```
 
 `kippu verify` checks a ticket exactly as a gate built on Kaisatsu does. `--key` takes the

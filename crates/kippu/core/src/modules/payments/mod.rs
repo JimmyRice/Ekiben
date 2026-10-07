@@ -7,6 +7,11 @@
 //! however it likes, and reports the result with a signed `POST /v1/payment-attestations`.
 //! Payment methods are added or removed by registering or revoking attestors at runtime.
 //!
+//! Refunds of issued tickets are asked of Kippu (`POST /v1/reservations/{id}/refunds`), never
+//! of an attestor: the tickets are revoked at once and the attestor is asked to return the
+//! money (`refund.required` with a `refund_id`), which it confirms. An attestor reports money
+//! that went back on its own (a chargeback) as `reversed`, which revokes the tickets.
+//!
 //! The wire protocol is specified in `spec/attestor-protocol.md`.
 
 mod dto;
@@ -34,6 +39,12 @@ pub mod permissions {
     pub const PAYMENTS_MANUAL: Permission = Permission::new("payments.manual");
     /// Read the full integration event feed.
     pub const FEED_READ: Permission = Permission::new("feed.read");
+    /// Refund one's own tickets within their refund period, and read those refunds
+    /// (account-scoped).
+    pub const REFUNDS_REQUEST: Permission = Permission::new("refunds.request");
+    /// Refund any ticket of the organization's events at any time, and read the refunds
+    /// (organization-scoped).
+    pub const REFUNDS_MANAGE: Permission = Permission::new("refunds.manage");
 }
 
 /// The payments module.
@@ -50,6 +61,8 @@ impl Module for Payments {
             (Role::Admin, permissions::ATTESTORS_MANAGE),
             (Role::Admin, permissions::FEED_READ),
             (Role::Organizer, permissions::PAYMENTS_MANUAL),
+            (Role::User, permissions::REFUNDS_REQUEST),
+            (Role::Organizer, permissions::REFUNDS_MANAGE),
         ]
     }
 
@@ -64,5 +77,8 @@ impl Module for Payments {
             .routes(routes!(routes::manual_payment))
             .routes(routes!(routes::attestor_feed))
             .routes(routes!(routes::admin_feed))
+            .routes(routes!(routes::refund_tickets, routes::reservation_refunds))
+            .routes(routes!(routes::get_refund))
+            .routes(routes!(routes::confirm_manual_refund))
     }
 }

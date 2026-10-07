@@ -39,8 +39,8 @@ const SALE_COLUMNS: &str = "SELECT id, event_id, name, opens_at, closes_at, admi
      created_at, version FROM sales";
 
 const TICKET_TYPE_COLUMNS: &str = "SELECT id, sale_id, event_id, name, price_minor, currency, \
-     capacity, per_account_limit, valid_from, valid_until, ticket_extensions, created_at, \
-     version FROM ticket_types";
+     capacity, per_account_limit, valid_from, valid_until, ticket_extensions, refundable_until, \
+     created_at, version FROM ticket_types";
 
 /// Fails with `Conflict("version")` unless exactly one row was updated.
 fn expect_one_updated(result: &sqlx::mysql::MySqlQueryResult) -> StoreResult<()> {
@@ -264,8 +264,9 @@ impl CatalogStore for MySqlStore {
         sqlx::query(
             "INSERT INTO ticket_types (id, sale_id, event_id, name, price_minor, currency, capacity,
                                        per_account_limit, valid_from, valid_until,
-                                       ticket_extensions, created_at, version)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                       ticket_extensions, refundable_until, created_at,
+                                       version)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(ticket_type.id.as_uuid())
         .bind(ticket_type.sale_id.as_uuid())
@@ -278,6 +279,7 @@ impl CatalogStore for MySqlStore {
         .bind(micros(ticket_type.valid_from))
         .bind(micros(ticket_type.valid_until))
         .bind(extensions_json(&ticket_type.ticket_extensions)?)
+        .bind(ticket_type.refundable_until.map(micros))
         .bind(micros(ticket_type.created_at))
         .bind(ticket_type.version)
         .execute(&mut *tx)
@@ -303,7 +305,7 @@ impl CatalogStore for MySqlStore {
         let result = sqlx::query(
             "UPDATE ticket_types SET name = ?, price_minor = ?, currency = ?, capacity = ?,
                                      per_account_limit = ?, valid_from = ?, valid_until = ?,
-                                     ticket_extensions = ?, version = ?
+                                     ticket_extensions = ?, refundable_until = ?, version = ?
              WHERE id = ? AND version = ?",
         )
         .bind(&ticket_type.name)
@@ -314,6 +316,7 @@ impl CatalogStore for MySqlStore {
         .bind(micros(ticket_type.valid_from))
         .bind(micros(ticket_type.valid_until))
         .bind(extensions_json(&ticket_type.ticket_extensions)?)
+        .bind(ticket_type.refundable_until.map(micros))
         .bind(ticket_type.version)
         .bind(ticket_type.id.as_uuid())
         .bind(expected_version)

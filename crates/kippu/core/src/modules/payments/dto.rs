@@ -1,14 +1,15 @@
 use kippu_domain::outbox::IntegrationEvent;
 use kippu_domain::payment::{Attestor, Environment, PaymentDisposition};
+use kippu_domain::refund::Refund;
 use kippu_domain::reservation::Reservation;
-use kippu_domain::{Money, ReservationId, TicketId, Timestamp, ValidationError};
+use kippu_domain::{Money, RefundId, ReservationId, TicketId, Timestamp, ValidationError};
 use kippu_store::OutboxRecord;
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
 use super::service::{
     AttestorReport, AttestorWithKeys, IncomingPayment, ManualPayment, NewAttestor, NewAttestorKey,
-    PaymentResult,
+    PaymentResult, RefundRequest,
 };
 use crate::keys::encode_key;
 
@@ -67,8 +68,11 @@ pub struct AttestorKeyView {
 pub enum PaymentOutcome {
     /// The buyer paid.
     Paid,
-    /// The attestor returned a payment Kippu reported as `refund.required`.
+    /// The attestor returned money Kippu asked for with `refund.required`.
     Refunded,
+    /// The money went back without Kippu asking (a chargeback, a refund made in the
+    /// provider's dashboard); the tickets it paid for are revoked.
+    Reversed,
 }
 
 /// An attestor's statement about a payment. Send it signed (see `Kippu-Signature`).
@@ -84,6 +88,9 @@ pub struct AttestationRequest {
     pub amount: Option<Money>,
     /// When the payment happened (defaults to now).
     pub occurred_at: Option<Timestamp>,
+    /// With `refunded`: the refund of issued tickets returned, as `refund.required` named it.
+    /// Leave out when `refund.required` carried none.
+    pub refund_id: Option<RefundId>,
 }
 
 /// Record a payment taken in person.
@@ -106,6 +113,19 @@ pub struct SettlementView {
     pub ticket_ids: Vec<TicketId>,
     /// `true` if this attestation had already been recorded and nothing changed.
     pub replayed: bool,
+    /// The refund of issued tickets the report confirmed (`refunded` with a `refund_id`) or
+    /// caused (`reversed`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refund: Option<Refund>,
+}
+
+/// Refund tickets of a reservation.
+#[derive(Debug, Default, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RefundTicketsRequest {
+    /// The tickets to refund. Absent or empty: every ticket of the reservation still valid.
+    #[serde(default)]
+    pub ticket_ids: Vec<TicketId>,
 }
 
 /// Where to continue reading an event feed.
@@ -169,6 +189,12 @@ impl TryFrom<AttestationRequest> for AttestorReport {
     type Error = ValidationError;
 
     fn try_from(request: AttestationRequest) -> Result<Self, ValidationError> {
+        if request.refund_id.is_some() && request.outcome != PaymentOutcome::Refunded {
+            return Err(ValidationError::new(
+                "refund_id",
+                "is only sent with the refunded outcome",
+            ));
+        }
         Ok(match request.outcome {
             PaymentOutcome::Paid => Self::Paid(IncomingPayment {
                 attestation_id: request.attestation_id,
@@ -182,6 +208,10 @@ impl TryFrom<AttestationRequest> for AttestorReport {
                 occurred_at: request.occurred_at,
             }),
             PaymentOutcome::Refunded => Self::Refunded {
+                attestation_id: request.attestation_id,
+                refund_id: request.refund_id,
+            },
+            PaymentOutcome::Reversed => Self::Reversed {
                 attestation_id: request.attestation_id,
             },
         })
@@ -204,6 +234,15 @@ impl From<PaymentResult> for SettlementView {
             reservation: result.reservation,
             ticket_ids: result.ticket_ids,
             replayed: result.replayed,
+            refund: result.refund,
+        }
+    }
+}
+
+impl From<RefundTicketsRequest> for RefundRequest {
+    fn from(request: RefundTicketsRequest) -> Self {
+        Self {
+            ticket_ids: request.ticket_ids,
         }
     }
 }

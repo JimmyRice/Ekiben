@@ -26,4 +26,12 @@ pub trait TicketStore {
 pub trait TicketsTx: Send {
     /// Records issued tickets.
     async fn insert_tickets(&mut self, tickets: &[Ticket]) -> StoreResult<()>;
+
+    /// Revokes tickets that are still valid, returning how many it revoked. Callers pass ids
+    /// sorted, which keeps lock order consistent between concurrent transactions.
+    ///
+    /// **Contract:** only `valid` tickets change, so of concurrent transactions revoking the same
+    /// ticket exactly one counts it: a caller that revoked fewer tickets than it named lost a
+    /// race and must not act as if it revoked them all.
+    async fn revoke_tickets(&mut self, tickets: &[TicketId]) -> StoreResult<u64>;
 }

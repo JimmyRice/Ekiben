@@ -4,12 +4,14 @@
 pub mod account;
 pub mod admission;
 pub mod catalog;
+pub mod denial;
 pub mod id;
 pub mod image;
 pub mod money;
 pub mod outbox;
 pub mod payment;
 pub mod purchase;
+pub mod refund;
 pub mod reservation;
 pub mod ticket;
 mod timestamp;

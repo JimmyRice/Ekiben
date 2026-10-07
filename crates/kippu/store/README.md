@@ -13,6 +13,7 @@ suite to show it provides them:
 | [`InventoryTx::try_hold`] is linearizable and all-or-nothing; `held + sold ≤ capacity` always. | No overselling. |
 | Unique keys reject duplicates and report [`Insertion::Existing`]. | Idempotent purchases and attestations. |
 | Claims and conditional updates succeed for exactly one caller. | Safe workers on any number of instances. |
+| [`TicketsTx::revoke_tickets`] changes only valid tickets, so each is revoked by one caller. | A ticket is refunded once. |
 
 Business logic lives once, in `kippu-core`; adapters only implement these primitives.
 

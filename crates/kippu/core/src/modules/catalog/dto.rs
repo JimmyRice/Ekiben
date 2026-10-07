@@ -271,6 +271,11 @@ pub struct TicketTypeRequest {
     /// Extension claims written into every ticket, keyed by tag (128-255).
     #[serde(default)]
     pub ticket_extensions: BTreeMap<u8, String>,
+    /// Until when buyers may refund their tickets of this type themselves (exclusive); no
+    /// later than `valid_from` or the event's start. Absent or `null`: buyers cannot refund
+    /// them (organizers still can).
+    #[serde(default)]
+    pub refundable_until: Option<Timestamp>,
 }
 
 /// Changes to an event: only the fields to change, plus the `version` you last read.
@@ -352,6 +357,11 @@ pub struct TicketTypePatch {
     pub valid_until: Option<Timestamp>,
     /// Extension claims written into every ticket, replaced as a whole.
     pub ticket_extensions: Option<BTreeMap<u8, String>>,
+    /// Until when buyers may refund their tickets themselves; `null` makes the tickets
+    /// non-refundable by buyers.
+    #[serde(default, deserialize_with = "present")]
+    #[schema(value_type = Option<Timestamp>)]
+    pub refundable_until: Option<Option<Timestamp>>,
 }
 
 /// A sale with its ticket types and current availability.
@@ -461,6 +471,7 @@ impl From<TicketTypeRequest> for TicketTypeSettings {
             valid_from: request.valid_from,
             valid_until: request.valid_until,
             ticket_extensions: request.ticket_extensions,
+            refundable_until: request.refundable_until,
         }
     }
 }
@@ -475,6 +486,7 @@ impl From<TicketTypePatch> for TicketTypeChanges {
             valid_from: patch.valid_from,
             valid_until: patch.valid_until,
             ticket_extensions: patch.ticket_extensions,
+            refundable_until: patch.refundable_until,
         }
     }
 }

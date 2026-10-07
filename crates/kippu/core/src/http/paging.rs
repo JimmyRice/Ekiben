@@ -35,6 +35,9 @@ impl ListingTag {
     pub(crate) const TICKETS: Self = Self(4);
     pub(crate) const RESERVATIONS: Self = Self(5);
     pub(crate) const FAVORITES: Self = Self(6);
+    pub(crate) const ORGANIZATION_DENIALS: Self = Self(7);
+    pub(crate) const EVENT_DENIALS: Self = Self(8);
+    pub(crate) const DENIED_TICKETS: Self = Self(9);
     pub(crate) const EVENTS_BY_START: Self = Self(16);
     pub(crate) const EVENTS_BY_START_DESC: Self = Self(17);
     pub(crate) const EVENTS_BY_CREATION: Self = Self(18);

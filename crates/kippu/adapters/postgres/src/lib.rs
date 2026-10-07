@@ -4,6 +4,7 @@
 mod accounts;
 mod catalog;
 mod convert;
+mod denials;
 mod errors;
 mod housekeeping;
 mod images;

@@ -143,6 +143,13 @@ pub(crate) async fn process(state: &AppState, request: &PurchaseRequest) -> ApiR
         .await?
         .ok_or_else(|| ApiError::not_found("sale"))?;
     let ticket_types = store.list_ticket_types(sale.id).await?;
+    let event = store
+        .event(sale.event_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("event"))?;
+    let denied = store
+        .account_denied(event.organization_id, event.id, request.account_id)
+        .await?;
 
     let mut tx = store.begin().await?;
     let Some(current) = tx.purchases().lock_purchase_request(request.id).await? else {
@@ -151,7 +158,12 @@ pub(crate) async fn process(state: &AppState, request: &PurchaseRequest) -> ApiR
     if current.status != PurchaseStatus::Queued {
         return Ok(());
     }
-    if let Some(reason) = precheck(&current, &sale, &ticket_types) {
+    let rejection = if denied {
+        Some(RejectionReason::AccountDenied)
+    } else {
+        precheck(&current, &sale, &ticket_types)
+    };
+    if let Some(reason) = rejection {
         reject(&mut *tx, &current, reason, state).await?;
         return Ok(tx.commit().await?);
     }

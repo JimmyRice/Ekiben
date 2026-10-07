@@ -4,6 +4,7 @@ pub mod accounts;
 pub mod admission;
 pub mod catalog;
 mod defaults;
+pub mod denials;
 pub mod images;
 pub mod payments;
 pub mod purchasing;

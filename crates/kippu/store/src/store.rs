@@ -3,9 +3,9 @@
 use async_trait::async_trait;
 
 use crate::{
-    AccountStore, CatalogStore, HousekeepingStore, ImageStore, InventoryTx, OutboxStore, OutboxTx,
-    PaymentStore, PaymentsTx, PurchaseStore, PurchasesTx, ReservationsTx, StoreResult, TicketStore,
-    TicketsTx, WebhookStore,
+    AccountStore, CatalogStore, DenialStore, HousekeepingStore, ImageStore, InventoryTx,
+    OutboxStore, OutboxTx, PaymentStore, PaymentsTx, PurchaseStore, PurchasesTx, ReservationsTx,
+    StoreResult, TicketStore, TicketsTx, WebhookStore,
 };
 
 /// A database behind Kippu.
@@ -23,6 +23,7 @@ pub trait Store:
     + HousekeepingStore
     + WebhookStore
     + ImageStore
+    + DenialStore
     + Send
     + Sync
     + 'static

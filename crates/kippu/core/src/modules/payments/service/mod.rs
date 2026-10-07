@@ -1,14 +1,19 @@
 //! Payment use cases, independent of HTTP: managing attestors, settling what they attest,
-//! and the feeds they and operators read.
+//! refunding issued tickets, and the feeds attestors and operators read.
 
 mod attestors;
 mod feed;
+mod refunds;
 mod settlement;
 
 pub use attestors::*;
 pub use feed::*;
+pub use refunds::{
+    RefundRequest, confirm_manual_refund, refund, request_refund, reservation_refunds,
+};
 pub(crate) use settlement::line_items;
 pub use settlement::{
-    AttestorReport, IncomingPayment, ManualPayment, PaymentResult, confirm_refund, manual_payment,
-    record_attestation, reservation_for_attestor, settle,
+    AttestorReport, IncomingPayment, ManualPayment, PaymentResult, confirm_refund,
+    confirm_ticket_refund, manual_payment, record_attestation, reservation_for_attestor, reverse,
+    settle,
 };

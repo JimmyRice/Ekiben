@@ -41,8 +41,8 @@ const SALE_COLUMNS: &str = "SELECT id, event_id, name, opens_at, closes_at, admi
      created_at, version FROM sales";
 
 const TICKET_TYPE_COLUMNS: &str = "SELECT id, sale_id, event_id, name, price_minor, currency, \
-     capacity, per_account_limit, valid_from, valid_until, ticket_extensions, created_at, \
-     version FROM ticket_types";
+     capacity, per_account_limit, valid_from, valid_until, ticket_extensions, refundable_until, \
+     created_at, version FROM ticket_types";
 
 /// Fails with `Conflict("version")` unless exactly one row was updated.
 fn expect_one_updated(result: &sqlx::postgres::PgQueryResult) -> StoreResult<()> {
@@ -250,8 +250,8 @@ impl CatalogStore for PostgresStore {
         sqlx::query(
             "INSERT INTO ticket_types (id, sale_id, event_id, name, price_minor, currency, capacity,
                                        per_account_limit, valid_from, valid_until,
-                                       ticket_extensions, created_at, version)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+                                       ticket_extensions, created_at, version, refundable_until)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
         )
         .bind(ticket_type.id.as_uuid())
         .bind(ticket_type.sale_id.as_uuid())
@@ -266,6 +266,7 @@ impl CatalogStore for PostgresStore {
         .bind(extensions_json(&ticket_type.ticket_extensions))
         .bind(at(ticket_type.created_at))
         .bind(ticket_type.version)
+        .bind(ticket_type.refundable_until.map(at))
         .execute(&mut *tx)
         .await
         .map_err(error)?;
@@ -289,7 +290,8 @@ impl CatalogStore for PostgresStore {
         let result = sqlx::query(
             "UPDATE ticket_types SET name = $2, price_minor = $3, currency = $4, capacity = $5,
                                      per_account_limit = $6, valid_from = $7, valid_until = $8,
-                                     ticket_extensions = $9, version = $10
+                                     ticket_extensions = $9, version = $10,
+                                     refundable_until = $12
              WHERE id = $1 AND version = $11",
         )
         .bind(ticket_type.id.as_uuid())
@@ -303,6 +305,7 @@ impl CatalogStore for PostgresStore {
         .bind(extensions_json(&ticket_type.ticket_extensions))
         .bind(ticket_type.version)
         .bind(expected_version)
+        .bind(ticket_type.refundable_until.map(at))
         .execute(&mut *tx)
         .await
         .map_err(error)?;

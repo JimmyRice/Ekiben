@@ -89,6 +89,10 @@ gate --> Kaisatsu verifies the ticket offline with keys from /.well-known/kippu/
   [`spec/webhook-protocol.md`](spec/webhook-protocol.md) — or read them as a feed.
 - Money is never taken without tickets: a payment that cannot be used ends in an explicit
   `refund_required` that the attestor acts on. See [`spec/attestor-protocol.md`](spec/attestor-protocol.md).
+- Refunds start at Kippu: the tickets are revoked and their stock returned at once, then the
+  attestor returns the money. Organizers keep deny lists of tickets and accounts; gates fetch
+  each event's tickets to refuse (`GET /v1/events/{id}/denied-tickets`) and check them after
+  verifying.
 
 ## Development
 

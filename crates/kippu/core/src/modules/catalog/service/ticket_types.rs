@@ -2,8 +2,8 @@
 
 use std::collections::BTreeMap;
 
-use kippu_domain::catalog::TicketType;
-use kippu_domain::{Money, SaleId, TicketTypeId, Timestamp};
+use kippu_domain::catalog::{Event, TicketType};
+use kippu_domain::{Money, SaleId, TicketTypeId, Timestamp, ValidationError};
 
 use super::{TicketTypeAvailability, check_version, visible_sale, writable_sale};
 use crate::app::AppState;
@@ -27,6 +27,8 @@ pub struct TicketTypeSettings {
     pub valid_until: Timestamp,
     /// Extension claims written into every ticket, keyed by tag (128-255).
     pub ticket_extensions: BTreeMap<u8, String>,
+    /// Until when buyers may refund tickets themselves; `None`: they may not.
+    pub refundable_until: Option<Timestamp>,
 }
 
 /// Changes to a ticket type. `None` keeps the stored value.
@@ -46,6 +48,9 @@ pub struct TicketTypeChanges {
     pub valid_until: Option<Timestamp>,
     /// Extension claims, replaced as a whole.
     pub ticket_extensions: Option<BTreeMap<u8, String>>,
+    /// Until when buyers may refund tickets themselves; `Some(None)` makes them
+    /// non-refundable.
+    pub refundable_until: Option<Option<Timestamp>>,
 }
 
 impl From<TicketTypeSettings> for TicketTypeChanges {
@@ -59,6 +64,7 @@ impl From<TicketTypeSettings> for TicketTypeChanges {
             valid_from: Some(settings.valid_from),
             valid_until: Some(settings.valid_until),
             ticket_extensions: Some(settings.ticket_extensions),
+            refundable_until: Some(settings.refundable_until),
         }
     }
 }
@@ -77,6 +83,19 @@ pub async fn visible_ticket_type(
         .ok_or_else(|| ApiError::not_found("ticket type"))?;
     visible_sale(state, principal, ticket_type.sale_id).await?;
     Ok(ticket_type)
+}
+
+/// Checks that buyers' refunds of `ticket_type` end before `event` opens: after that a refund
+/// could follow an admission, which Kippu cannot see.
+fn check_refund_period(ticket_type: &TicketType, event: &Event) -> ApiResult<()> {
+    match ticket_type.refundable_until {
+        Some(until) if until > event.starts_at => Err(ValidationError::new(
+            "refundable_until",
+            "must not be after the event starts",
+        )
+        .into()),
+        _ => Ok(()),
+    }
 }
 
 /// A ticket type the caller may see, with its availability.
@@ -142,10 +161,12 @@ pub async fn create_ticket_type(
         valid_from: settings.valid_from,
         valid_until: settings.valid_until,
         ticket_extensions: settings.ticket_extensions,
+        refundable_until: settings.refundable_until,
         created_at: state.now(),
         version: 1,
     };
     ticket_type.validate()?;
+    check_refund_period(&ticket_type, &event)?;
     state.store().insert_ticket_type(&ticket_type).await?;
     Ok(ticket_type)
 }
@@ -160,7 +181,12 @@ pub async fn update_ticket_type(
     expected_version: i64,
     changes: TicketTypeChanges,
 ) -> ApiResult<TicketType> {
-    let current = writable_ticket_type(state, principal, id).await?;
+    let current = state
+        .store()
+        .ticket_type(id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("ticket type"))?;
+    let (_, event) = writable_sale(state, principal, current.sale_id).await?;
     check_version(current.version, expected_version)?;
     let ticket_type = TicketType {
         name: changes.name.unwrap_or(current.name),
@@ -174,10 +200,12 @@ pub async fn update_ticket_type(
         ticket_extensions: changes
             .ticket_extensions
             .unwrap_or(current.ticket_extensions),
+        refundable_until: changes.refundable_until.unwrap_or(current.refundable_until),
         version: expected_version + 1,
         ..current
     };
     ticket_type.validate()?;
+    check_refund_period(&ticket_type, &event)?;
     state
         .store()
         .update_ticket_type(&ticket_type, expected_version)

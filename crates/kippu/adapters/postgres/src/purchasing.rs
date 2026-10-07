@@ -282,6 +282,15 @@ impl InventoryTx for PostgresTx {
         .await
     }
 
+    async fn return_sold(&mut self, items: &[LineItem]) -> StoreResult<()> {
+        // `CHECK (sold >= 0)` refuses returning more than was sold.
+        self.for_each_item(
+            items,
+            "UPDATE inventory SET sold = sold - $2 WHERE ticket_type_id = $1",
+        )
+        .await
+    }
+
     async fn try_sell(&mut self, items: &[LineItem]) -> StoreResult<bool> {
         self.all_or_nothing(
             items,

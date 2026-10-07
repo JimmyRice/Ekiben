@@ -38,7 +38,7 @@ Keep the repository root uncluttered and do not add speculative `.gitignore` ent
 ## Commands
 
 ```bash
-cargo test --workspace --all-features                                   # 253 tests incl. e2e over TCP
+cargo test --workspace --all-features                                   # 289 tests incl. e2e over TCP
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets           # default features too
 cargo fmt --all
@@ -254,6 +254,20 @@ Do not change these unless the user explicitly asks.
   listings return `EventSummary`. Per-person sensitive data (e.g. real-name IDs) is the
   integrator's job to encrypt, not the backend's.
 - **Event images** need real object storage; no local-disk or in-memory backend outside tests.
+- **Refunds of issued tickets** are asked of Kippu (buyer within the ticket type's
+  `refundable_until`, which ends no later than `valid_from` and the event's start; organizers
+  any time), never of an attestor. One transaction revokes the tickets (irreversible), returns
+  stock and quota, and emits `tickets.revoked` plus `refund.required` with a `refund_id`; the
+  attestor confirms with `outcome: refunded` and that id. Free tickets complete at once, cash
+  is confirmed by an organizer. Chargebacks are reported as `outcome: reversed`. Reservations
+  stay `issued`; per-ticket state lives in `tickets.status` and `refunds`.
+- **Denials** (not "revocations"): organizers keep deny lists per event and per organization
+  (CRUD), naming a ticket or an account. Gates never learn a ticket's holder (KP1 carries no
+  account), so `GET /v1/events/{id}/denied-tickets` joins denied tickets, tickets of denied
+  accounts and revoked tickets into ticket ids. It is a plain keyset-paged snapshot read with an
+  organizer's credentials; venues poll it. Denied accounts' purchase requests are rejected
+  (`account_denied`) by the worker, not the front door. Webhooks are not the channel for gates
+  (they need an inbound public endpoint and give no snapshot).
 - **PostgreSQL queue numbers** come from a per-sale counter row (`INSERT … ON CONFLICT DO
   UPDATE`), not a sequence: an admission batch means "the next N people" and needs consecutive
   numbers.
@@ -267,9 +281,15 @@ Do not change these unless the user explicitly asks.
 - Cortex-M (embassy) firmware example to measure real size; add the budget to CI. Static library
   size is meaningless (the linker prunes).
 - Event search by text (needs a full-text index per database) and by region or city.
-- Later: passkeys as a second Admin credential; refunds/reversals after issue and a revocation
-  feed for gates; inventory buckets for extremely hot sessions; OpenTelemetry; per-module
-  migrations with their own version tracking.
+- Gates, when a snapshot per poll is no longer enough: a per-event numbered log of denial
+  changes (deltas, `after=<number>`), a narrow machine credential for venue servers instead of
+  organizer tokens, signed lists gates verify themselves. Not needed yet.
+- Attestor feed: `attestor_feed` filters a fixed outbox window in memory, so more than `limit`
+  unrelated events after an attestor's cursor stall it (it gets `[]` and never advances).
+- Webhooks: resuming (`active: true`) does not reset the backoff; no retry-now; the backoff cap
+  is hard-coded.
+- Later: passkeys as a second Admin credential; inventory buckets for extremely hot sessions;
+  OpenTelemetry; per-module migrations with their own version tracking.
 - Request log: a "still processing" line for requests running longer than N seconds (not built).
 
 ## Known limitations
@@ -278,3 +298,8 @@ Do not change these unless the user explicitly asks.
   the same key from both running (purchases and payments are idempotent on their own). A strict
   fix is a "processing" placeholder row.
 - A ticket type belongs to exactly one sale; venue capacity shared across sales is not modelled.
+- Kippu has no check-in data, so it cannot refuse to refund a ticket already used; the buyer's
+  refund period ending before the event starts is the protection. Organizer refunds and
+  chargebacks after entry only block re-entry.
+- `denied-tickets` reads every ticket of the event per page (an `EXISTS` per ticket); fine for
+  conventions, not for stadiums polled every second.
