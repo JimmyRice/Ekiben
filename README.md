@@ -17,8 +17,9 @@ ends of the day: the ticketing servers went down when sales opened, and the entr
 down when the doors did.
 
 Ekiben aims to keep that from happening at large crowd events, conventions in particular. A
-convention crowd is hard to plan for: attendees differ in size, costume and tolerance for heat,
-so a stalled queue at the gate hurts more than it would at most events. The goal is that people
+convention crowd is hard to plan for: some cosplayers carry large props, some portray characters
+whose costumes are bulky or elaborate in themselves, and heat tolerance varies widely, so a
+stalled queue at the gate hurts more than it would at most events. The goal is that people
 can always buy a ticket and always get through the gate. That is why Kippu stays stateless and
 scales out under heavy contention, and why Kaisatsu verifies tickets offline, with nothing but
 the ticket and a public key, so a gate keeps working when the network does not.
