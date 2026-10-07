@@ -110,6 +110,7 @@ pub struct SettlementView {
 
 /// Where to continue reading an event feed.
 #[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct FeedQuery {
     /// Return events after this sequence number (default 0).
     pub after: Option<i64>,

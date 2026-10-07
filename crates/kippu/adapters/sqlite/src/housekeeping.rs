@@ -1,5 +1,8 @@
 use async_trait::async_trait;
-use kippu_store::{AuditEntry, HousekeepingStore, IdempotencyRecord, Insertion, StoreResult};
+use kippu_store::{
+    AuditEntry, AuditRecord, HousekeepingStore, IdempotencyRecord, Insertion, PageRequest,
+    StoreResult,
+};
 
 use crate::convert::{instant, micros};
 use crate::{SqliteStore, error};
@@ -70,21 +73,26 @@ impl HousekeepingStore for SqliteStore {
         Ok(())
     }
 
-    async fn audit_log(&self, limit: u32) -> StoreResult<Vec<AuditEntry>> {
-        let rows = sqlx::query_as::<_, (i64, String, String, String)>(
-            "SELECT at, actor, action, target FROM audit_log ORDER BY id DESC LIMIT ?1",
+    async fn audit_log(&self, page: PageRequest<i64>) -> StoreResult<Vec<AuditRecord>> {
+        let rows = sqlx::query_as::<_, (i64, i64, String, String, String)>(
+            "SELECT id, at, actor, action, target FROM audit_log
+             WHERE ?1 IS NULL OR id < ?1 ORDER BY id DESC LIMIT ?2",
         )
-        .bind(limit)
+        .bind(page.after)
+        .bind(page.limit)
         .fetch_all(&self.reader)
         .await
         .map_err(error)?;
         Ok(rows
             .into_iter()
-            .map(|(at, actor, action, target)| AuditEntry {
-                at: instant(at),
-                actor,
-                action,
-                target,
+            .map(|(sequence, at, actor, action, target)| AuditRecord {
+                sequence,
+                entry: AuditEntry {
+                    at: instant(at),
+                    actor,
+                    action,
+                    target,
+                },
             })
             .collect())
     }

@@ -106,7 +106,7 @@ async fn retrying_a_purchase_is_the_same_purchase() {
         .call(Method::GET, "/v1/me/reservations", Some(&buyer), None)
         .await;
     assert_eq!(
-        reservations.body.as_array().unwrap().len(),
+        reservations.body["items"].as_array().unwrap().len(),
         1,
         "ten submissions, one reservation"
     );
@@ -157,7 +157,7 @@ async fn an_attested_payment_issues_verifiable_tickets_exactly_once() {
     let tickets = app
         .call(Method::GET, "/v1/me/tickets", Some(&buyer), None)
         .await;
-    let tickets = tickets.body.as_array().unwrap();
+    let tickets = tickets.body["items"].as_array().unwrap();
     assert_eq!(tickets.len(), 2, "ten deliveries, one set of tickets");
 
     // Verify like a gate would: trusted keys from the well-known endpoint, then Kaisatsu.
@@ -281,7 +281,7 @@ async fn a_second_payment_for_the_same_reservation_is_refunded() {
     assert_eq!(
         app.call(Method::GET, "/v1/me/tickets", Some(&buyer), None)
             .await
-            .body
+            .body["items"]
             .as_array()
             .unwrap()
             .len(),
@@ -465,7 +465,7 @@ async fn free_tickets_are_issued_at_checkout() {
     assert_eq!(
         app.call(Method::GET, "/v1/me/tickets", Some(&buyer), None)
             .await
-            .body
+            .body["items"]
             .as_array()
             .unwrap()
             .len(),

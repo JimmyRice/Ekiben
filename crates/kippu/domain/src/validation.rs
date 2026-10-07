@@ -88,6 +88,20 @@ validated_string!(
 );
 
 validated_string!(
+    /// A country as its ISO 3166-1 alpha-2 code, upper-cased: `JP`, `TW`, `US`. Only the shape
+    /// is checked, not that the code is assigned.
+    CountryCode,
+    |value| {
+        let code = value.trim().to_ascii_uppercase();
+        if code.len() == 2 && code.bytes().all(|byte| byte.is_ascii_uppercase()) {
+            Ok(code)
+        } else {
+            Err(ValidationError::new("country", "must be a two-letter ISO 3166-1 code"))
+        }
+    }
+);
+
+validated_string!(
     /// A URL-friendly name: 1–64 characters of `a-z`, `0-9` and inner hyphens.
     Slug,
     |value| {
@@ -161,6 +175,14 @@ pub fn non_empty(field: &'static str, value: &str, max_len: usize) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn country_codes_are_two_letters() {
+        assert_eq!(CountryCode::new(" jp ").unwrap().as_str(), "JP");
+        assert!(CountryCode::new("JPN").is_err());
+        assert!(CountryCode::new("J1").is_err());
+        assert!(CountryCode::new("日本").is_err());
+    }
 
     #[test]
     fn emails_are_normalised() {

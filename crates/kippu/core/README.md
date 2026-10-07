@@ -36,3 +36,11 @@ edit an event.
 - **Adding a feature**: write the use case in `service`, then a handler in `routes.rs`, its
   bodies in `dto.rs`, and register the handler in `mod.rs`. In a separate crate, the same
   files make up your own `Module`.
+
+Every listing answers [`http::Listing`] — `{"items": [...], "next_cursor": ...}` — and pages
+with opaque keyset cursors. A paged service takes a `PageRequest<P>`, reads
+`page.plus_one()` from the store and returns `Page::from_lookahead(records, page.limit, …)`;
+its handler takes [`http::PageQuery`], calls `query.page(tag)?` and answers
+`Listing::page(page, tag, convert)`. The tag names the listing inside its cursors so one
+cannot resume another (a fork's modules use [`http::ListingTag`] values from 128 up). Lists
+that cannot grow answer `Listing::all(items)`, so clients read every listing the same way.

@@ -1,6 +1,6 @@
 //! HTTP handlers: each turns a request into one [`service`](super::service) call.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::HeaderValue;
 use axum::http::header::CONTENT_TYPE;
 use axum::response::IntoResponse;
@@ -11,7 +11,7 @@ use super::service;
 use crate::app::AppState;
 use crate::auth::Principal;
 use crate::error::{ApiResult, Problem};
-use crate::http::Json;
+use crate::http::{Json, Listing, ListingTag, PageQuery};
 
 const TAG: &str = "ticketing";
 
@@ -24,18 +24,25 @@ pub(crate) async fn ticket_keys(State(state): State<AppState>) -> Json<TicketKey
     Json(service::gate_keys(&state).into())
 }
 
-/// Your tickets, newest first.
+/// Your tickets, most recently issued first.
 #[utoipa::path(
     get, path = "/v1/me/tickets", tag = TAG,
     security(("bearer" = [])),
-    responses((status = 200, body = Vec<TicketView>))
+    params(PageQuery),
+    responses((status = 200, body = Listing<TicketView>), (status = 400, body = Problem))
 )]
 pub(crate) async fn my_tickets(
     State(state): State<AppState>,
     principal: Principal,
-) -> ApiResult<Json<Vec<TicketView>>> {
-    let tickets = service::tickets(&state, &principal).await?;
-    Ok(Json(tickets.into_iter().map(TicketView::from).collect()))
+    Query(query): Query<PageQuery>,
+) -> ApiResult<Json<Listing<TicketView>>> {
+    let page = query.page(ListingTag::TICKETS)?;
+    let tickets = service::tickets(&state, &principal, page).await?;
+    Ok(Json(Listing::page(
+        tickets,
+        ListingTag::TICKETS,
+        TicketView::from,
+    )))
 }
 
 /// A ticket.

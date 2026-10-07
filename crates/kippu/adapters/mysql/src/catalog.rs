@@ -1,21 +1,38 @@
 use async_trait::async_trait;
 use kippu_domain::admission::WaitingRoom;
 use kippu_domain::catalog::{Event, EventSummary, Inventory, Sale, TicketType};
+use kippu_domain::validation::CountryCode;
 use kippu_domain::{AccountId, EventId, SaleId, TicketTypeId, Timestamp};
-use kippu_store::{CatalogStore, EventFilter, PageRequest, StoreError, StoreResult};
+use kippu_store::{
+    CatalogStore, EventFilter, EventOrder, Favorite, Keyset, PageRequest, StoreError, StoreResult,
+};
 use uuid::Uuid;
 
 use crate::convert::{
-    EventRow, EventSummaryRow, InventoryRow, SaleRow, TicketTypeRow, all, event_status,
-    extensions_json, json, micros, optional,
+    AddressValues, EventRow, EventSummaryRow, InventoryRow, SaleRow, TicketTypeRow, all,
+    event_status, extensions_json, instant, json, micros, optional,
 };
 use crate::{MySqlStore, error, unique};
 
 const EVENT_SUMMARY_COLUMNS: &str = "SELECT id, organization_id, slug, title, description, venue, \
-     starts_at, ends_at, status, created_at, updated_at, version FROM events";
+     address_country, address_region, address_locality, address_postal_code, address_street, \
+     latitude, longitude, starts_at, ends_at, status, created_at, updated_at, version FROM events";
 
-const EVENT_COLUMNS: &str = "SELECT id, organization_id, slug, title, description, venue, starts_at, \
-     ends_at, status, created_at, updated_at, version, content FROM events";
+const EVENT_COLUMNS: &str = "SELECT id, organization_id, slug, title, description, venue, \
+     address_country, address_region, address_locality, address_postal_code, address_street, \
+     latitude, longitude, starts_at, ends_at, status, created_at, updated_at, version, content \
+     FROM events";
+
+/// The column an event order sorts by, the comparison that finds the events after a
+/// position, and the direction.
+const fn event_order(order: EventOrder) -> (&'static str, &'static str, &'static str) {
+    match order {
+        EventOrder::StartsAt => ("starts_at", ">", "ASC"),
+        EventOrder::StartsAtDesc => ("starts_at", "<", "DESC"),
+        EventOrder::CreatedAt => ("created_at", ">", "ASC"),
+        EventOrder::CreatedAtDesc => ("created_at", "<", "DESC"),
+    }
+}
 
 const SALE_COLUMNS: &str = "SELECT id, event_id, name, opens_at, closes_at, admission, \
      reservation_ttl_seconds, max_tickets_per_request, accepted_attestors, environment, \
@@ -37,10 +54,13 @@ fn expect_one_updated(result: &sqlx::mysql::MySqlQueryResult) -> StoreResult<()>
 #[async_trait]
 impl CatalogStore for MySqlStore {
     async fn insert_event(&self, event: &Event) -> StoreResult<()> {
+        let address = AddressValues::of(event.address.as_ref());
         sqlx::query(
             "INSERT INTO events (id, organization_id, slug, title, description, venue, starts_at,
-                                 ends_at, status, created_at, updated_at, version, content)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                 ends_at, status, created_at, updated_at, version, content,
+                                 address_country, address_region, address_locality,
+                                 address_postal_code, address_street, latitude, longitude)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(event.id.as_uuid())
         .bind(event.organization_id.as_uuid())
@@ -55,6 +75,13 @@ impl CatalogStore for MySqlStore {
         .bind(micros(event.updated_at))
         .bind(event.version)
         .bind(&event.content)
+        .bind(address.country)
+        .bind(address.region)
+        .bind(address.locality)
+        .bind(address.postal_code)
+        .bind(address.street)
+        .bind(address.latitude)
+        .bind(address.longitude)
         .execute(&self.pool)
         .await
         .map_err(unique("slug"))?;
@@ -62,10 +89,13 @@ impl CatalogStore for MySqlStore {
     }
 
     async fn update_event(&self, event: &Event, expected_version: i64) -> StoreResult<()> {
+        let address = AddressValues::of(event.address.as_ref());
         let result = sqlx::query(
             "UPDATE events SET slug = ?, title = ?, description = ?, venue = ?, starts_at = ?,
                                ends_at = ?, status = ?, updated_at = ?, version = ?,
-                               content = ?
+                               content = ?, address_country = ?, address_region = ?,
+                               address_locality = ?, address_postal_code = ?,
+                               address_street = ?, latitude = ?, longitude = ?
              WHERE id = ? AND version = ?",
         )
         .bind(event.slug.as_str())
@@ -78,6 +108,13 @@ impl CatalogStore for MySqlStore {
         .bind(micros(event.updated_at))
         .bind(event.version)
         .bind(&event.content)
+        .bind(address.country)
+        .bind(address.region)
+        .bind(address.locality)
+        .bind(address.postal_code)
+        .bind(address.street)
+        .bind(address.latitude)
+        .bind(address.longitude)
         .bind(event.id.as_uuid())
         .bind(expected_version)
         .execute(&self.pool)
@@ -99,21 +136,51 @@ impl CatalogStore for MySqlStore {
 
     async fn list_events(
         &self,
-        filter: EventFilter,
-        page: PageRequest,
+        filter: &EventFilter,
+        order: EventOrder,
+        page: PageRequest<Keyset>,
     ) -> StoreResult<Vec<EventSummary>> {
+        let (column, after, direction) = event_order(order);
+        let organization = filter.organization.map(|id| id.as_uuid());
+        let status = filter.status.map(event_status);
+        let country = filter.country.as_ref().map(CountryCode::as_str);
+        let starts_from = filter.starts_from.map(micros);
+        let starts_before = filter.starts_before.map(micros);
+        let ends_from = filter.ends_from.map(micros);
+        let ends_before = filter.ends_before.map(micros);
+        let after_at = page.after.map(|after| micros(after.at));
         let rows = sqlx::query_as::<_, EventSummaryRow>(sqlx::AssertSqlSafe(format!(
             "{EVENT_SUMMARY_COLUMNS}
              WHERE (? IS NULL OR organization_id = ?)
                AND (? = 0 OR status IN ('published', 'cancelled'))
-               AND (? IS NULL OR id > ?)
-             ORDER BY id LIMIT ?"
+               AND (? IS NULL OR status = ?)
+               AND (? IS NULL OR address_country = ?)
+               AND (? IS NULL OR starts_at >= ?)
+               AND (? IS NULL OR starts_at < ?)
+               AND (? IS NULL OR ends_at >= ?)
+               AND (? IS NULL OR ends_at < ?)
+               AND (? IS NULL OR {column} {after} ? OR ({column} = ? AND id {after} ?))
+             ORDER BY {column} {direction}, id {direction} LIMIT ?"
         )))
-        .bind(filter.organization.map(|id| id.as_uuid()))
-        .bind(filter.organization.map(|id| id.as_uuid()))
+        .bind(organization)
+        .bind(organization)
         .bind(filter.public_only)
-        .bind(page.after)
-        .bind(page.after)
+        .bind(status)
+        .bind(status)
+        .bind(country)
+        .bind(country)
+        .bind(starts_from)
+        .bind(starts_from)
+        .bind(starts_before)
+        .bind(starts_before)
+        .bind(ends_from)
+        .bind(ends_from)
+        .bind(ends_before)
+        .bind(ends_before)
+        .bind(after_at)
+        .bind(after_at)
+        .bind(after_at)
+        .bind(page.after.map(|after| after.id))
         .bind(page.limit)
         .fetch_all(&self.pool)
         .await
@@ -332,15 +399,34 @@ impl CatalogStore for MySqlStore {
         Ok(())
     }
 
-    async fn favorites(&self, account: AccountId) -> StoreResult<Vec<EventId>> {
-        let ids = sqlx::query_scalar::<_, Uuid>(
-            "SELECT event_id FROM favorites WHERE account_id = ? ORDER BY created_at DESC",
+    async fn favorites(
+        &self,
+        account: AccountId,
+        page: PageRequest<Keyset>,
+    ) -> StoreResult<Vec<Favorite>> {
+        let after_at = page.after.map(|after| micros(after.at));
+        let rows = sqlx::query_as::<_, (Uuid, i64)>(
+            "SELECT event_id, created_at FROM favorites
+             WHERE account_id = ?
+               AND (? IS NULL OR created_at < ? OR (created_at = ? AND event_id > ?))
+             ORDER BY created_at DESC, event_id LIMIT ?",
         )
         .bind(account.as_uuid())
+        .bind(after_at)
+        .bind(after_at)
+        .bind(after_at)
+        .bind(page.after.map(|after| after.id))
+        .bind(page.limit)
         .fetch_all(&self.pool)
         .await
         .map_err(error)?;
-        Ok(ids.into_iter().map(Into::into).collect())
+        Ok(rows
+            .into_iter()
+            .map(|(event_id, created_at)| Favorite {
+                event_id: event_id.into(),
+                created_at: instant(created_at),
+            })
+            .collect())
     }
 
     async fn join_waiting_room(&self, sale: SaleId) -> StoreResult<u64> {

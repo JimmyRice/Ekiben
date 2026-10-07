@@ -11,7 +11,7 @@ use super::service;
 use crate::app::AppState;
 use crate::auth::Principal;
 use crate::error::{ApiResult, Problem};
-use crate::http::Json;
+use crate::http::{Json, Listing};
 
 const TAG: &str = "webhooks";
 
@@ -44,16 +44,16 @@ pub(crate) async fn create_organization_webhook(
     get, path = "/v1/organizations/{organization_id}/webhooks", tag = TAG,
     security(("bearer" = [])),
     params(("organization_id" = OrganizationId, Path)),
-    responses((status = 200, body = Vec<Webhook>), (status = 403, body = Problem))
+    responses((status = 200, body = Listing<Webhook>), (status = 403, body = Problem))
 )]
 pub(crate) async fn list_organization_webhooks(
     State(state): State<AppState>,
     principal: Principal,
     Path(organization_id): Path<OrganizationId>,
-) -> ApiResult<Json<Vec<Webhook>>> {
-    Ok(Json(
+) -> ApiResult<Json<Listing<Webhook>>> {
+    Ok(Json(Listing::all(
         service::webhooks(&state, &principal, Some(organization_id)).await?,
-    ))
+    )))
 }
 
 /// Register a webhook for every event of the deployment.
@@ -81,13 +81,15 @@ pub(crate) async fn create_global_webhook(
 #[utoipa::path(
     get, path = "/v1/admin/webhooks", tag = TAG,
     security(("bearer" = [])),
-    responses((status = 200, body = Vec<Webhook>), (status = 403, body = Problem))
+    responses((status = 200, body = Listing<Webhook>), (status = 403, body = Problem))
 )]
 pub(crate) async fn list_global_webhooks(
     State(state): State<AppState>,
     principal: Principal,
-) -> ApiResult<Json<Vec<Webhook>>> {
-    Ok(Json(service::webhooks(&state, &principal, None).await?))
+) -> ApiResult<Json<Listing<Webhook>>> {
+    Ok(Json(Listing::all(
+        service::webhooks(&state, &principal, None).await?,
+    )))
 }
 
 /// A webhook, with its delivery progress.

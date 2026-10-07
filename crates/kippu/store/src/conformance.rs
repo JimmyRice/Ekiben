@@ -26,23 +26,25 @@ use std::sync::Arc;
 use kippu_domain::account::{Account, Identity, Organization, Role};
 use kippu_domain::admission::AdmissionPolicy;
 use kippu_domain::catalog::{
-    Event, EventStatus, EventSummary, MAX_EVENT_CONTENT_BYTES, Sale, TicketType,
+    Address, Event, EventStatus, EventSummary, MAX_EVENT_CONTENT_BYTES, Sale, TicketType,
 };
 use kippu_domain::image::{EventImage, ImageFormat};
 use kippu_domain::outbox::IntegrationEvent;
 use kippu_domain::payment::{Environment, PaymentAttestation, PaymentDisposition};
 use kippu_domain::purchase::{Basket, LineItem, PurchaseRequest, PurchaseStatus};
 use kippu_domain::reservation::{Reservation, ReservationStatus, ReservedItem};
-use kippu_domain::validation::{Email, IdempotencyKey, ProviderName, Slug, Subject};
+use kippu_domain::ticket::{Ticket, TicketStatus};
+use kippu_domain::validation::{CountryCode, Email, IdempotencyKey, ProviderName, Slug, Subject};
 use kippu_domain::webhook::Webhook;
 use kippu_domain::{
     AccountId, AttestorId, Currency, Duration, EventId, ImageId, Money, OrganizationId,
-    PurchaseRequestId, ReservationId, SaleId, SessionId, TicketTypeId, Timestamp, WebhookId,
+    PurchaseRequestId, ReservationId, SaleId, SessionId, TicketId, TicketTypeId, Timestamp,
+    WebhookId,
 };
 
 use crate::{
-    EventFilter, Hold, Insertion, Lease, PageRequest, Session, SessionRenewal, Store, StoreError,
-    Unlink, WebhookRun,
+    AuditEntry, EventFilter, EventOrder, Hold, Insertion, Keyset, Lease, PageRequest, Session,
+    SessionRenewal, Store, StoreError, Unlink, WebhookRun,
 };
 
 /// A store under test, plus whatever must outlive it (e.g. a temporary directory).
@@ -102,6 +104,12 @@ macro_rules! conformance_tests {
             webhook_settings_and_progress_are_separate,
             event_images_keep_their_order,
             event_content_is_kept_whole_and_left_out_of_listings,
+            event_addresses_round_trip,
+            event_listings_resume_exactly_in_every_order,
+            event_listings_filter,
+            account_listings_resume_exactly,
+            favorites_resume_exactly,
+            audit_log_reads_newest_first_in_pages,
         );
     };
     (@cases $mode:tt; $($case:ident),* $(,)?) => {
@@ -165,6 +173,7 @@ fn event_record(organization: OrganizationId) -> Event {
         title: "Convention".to_owned(),
         description: String::new(),
         venue: "Hall".to_owned(),
+        address: None,
         starts_at: now(),
         ends_at: now() + Duration::days(2),
         status: EventStatus::Published,
@@ -1343,11 +1352,380 @@ pub async fn event_content_is_kept_whole_and_left_out_of_listings(store: Arc<dyn
 
     let filter = EventFilter {
         organization: Some(organization),
-        public_only: false,
+        ..EventFilter::default()
     };
     let listed = store
-        .list_events(filter, PageRequest::first(10))
+        .list_events(&filter, EventOrder::default(), PageRequest::first(10))
         .await
         .unwrap();
     assert_eq!(listed, vec![EventSummary::from(edited)]);
+}
+
+/// Reads a whole listing `size` records at a time, resuming after the last record of each
+/// page the way a client follows cursors.
+async fn walk<T, P: Copy>(
+    size: u32,
+    position: impl Fn(&T) -> P,
+    mut read: impl AsyncFnMut(PageRequest<P>) -> Vec<T>,
+) -> Vec<T> {
+    let mut all = Vec::new();
+    let mut page = PageRequest::first(size);
+    loop {
+        let records = read(page).await;
+        assert!(
+            records.len() <= size as usize,
+            "a page holds at most `limit`"
+        );
+        let Some(last) = records.last() else {
+            return all;
+        };
+        page.after = Some(position(last));
+        all.extend(records);
+    }
+}
+
+fn venue_address(country: &str, latitude: Option<f64>) -> Address {
+    Address {
+        country: CountryCode::new(country).unwrap(),
+        region: Some("東京都".to_owned()),
+        locality: None,
+        postal_code: Some("135-0063".to_owned()),
+        street: "有明3-11-1".to_owned(),
+        latitude,
+        longitude: latitude.map(|_| 139.794_236_7),
+    }
+}
+
+pub async fn event_addresses_round_trip(store: Arc<dyn Store>) {
+    let organization = organization(store.as_ref()).await;
+    let event = Event {
+        address: Some(venue_address("JP", Some(35.629_812_3))),
+        ..event_record(organization)
+    };
+    store.insert_event(&event).await.unwrap();
+    assert_eq!(store.event(event.id).await.unwrap(), Some(event.clone()));
+
+    let moved_online = Event {
+        venue: "Online".to_owned(),
+        address: None,
+        version: 2,
+        ..event.clone()
+    };
+    store.update_event(&moved_online, 1).await.unwrap();
+    assert_eq!(
+        store.event(event.id).await.unwrap(),
+        Some(moved_online.clone())
+    );
+
+    let back_on_site = Event {
+        address: Some(venue_address("TW", None)),
+        version: 3,
+        ..moved_online
+    };
+    store.update_event(&back_on_site, 2).await.unwrap();
+    assert_eq!(
+        store.event(event.id).await.unwrap(),
+        Some(back_on_site.clone())
+    );
+    let filter = EventFilter {
+        organization: Some(organization),
+        ..EventFilter::default()
+    };
+    let listed = store
+        .list_events(&filter, EventOrder::default(), PageRequest::first(10))
+        .await
+        .unwrap();
+    assert_eq!(listed, vec![EventSummary::from(back_on_site)]);
+}
+
+/// Four events of a new organization: the filter that lists them all, and the events.
+async fn listed_events(store: &dyn Store) -> (EventFilter, [Event; 4]) {
+    let organization = organization(store).await;
+    let day = Duration::days(1);
+    let second = Duration::seconds(1);
+    let event =
+        |starts_at: Timestamp, created_at: Timestamp, status, country: Option<&str>| Event {
+            address: country.map(|country| venue_address(country, None)),
+            starts_at,
+            ends_at: starts_at + day,
+            status,
+            created_at,
+            ..event_record(organization)
+        };
+    // Two pairs share a sort time, so resuming has to break ties by id.
+    let events = [
+        event(now() + day, now(), EventStatus::Published, Some("JP")),
+        event(now() + day, now() + second, EventStatus::Draft, None),
+        event(now() + day * 3, now(), EventStatus::Cancelled, Some("TW")),
+        event(
+            now() - day * 5,
+            now() + second * 2,
+            EventStatus::Published,
+            Some("JP"),
+        ),
+    ];
+    for event in &events {
+        store.insert_event(event).await.unwrap();
+    }
+    let all = EventFilter {
+        organization: Some(organization),
+        ..EventFilter::default()
+    };
+    (all, events)
+}
+
+pub async fn event_listings_resume_exactly_in_every_order(store: Arc<dyn Store>) {
+    let (all, events) = listed_events(store.as_ref()).await;
+    let summaries: Vec<EventSummary> = events.iter().cloned().map(Into::into).collect();
+    for order in [
+        EventOrder::StartsAt,
+        EventOrder::StartsAtDesc,
+        EventOrder::CreatedAt,
+        EventOrder::CreatedAtDesc,
+    ] {
+        let mut expected = summaries.clone();
+        expected.sort_by_key(|event| {
+            let position = order.position(event);
+            (position.at, position.id)
+        });
+        if matches!(order, EventOrder::StartsAtDesc | EventOrder::CreatedAtDesc) {
+            expected.reverse();
+        }
+        for size in [1, 3, 10] {
+            let listed = walk(
+                size,
+                |event| order.position(event),
+                async |page| store.list_events(&all, order, page).await.unwrap(),
+            )
+            .await;
+            assert_eq!(listed, expected, "{order:?} in pages of {size}");
+        }
+    }
+}
+
+pub async fn event_listings_filter(store: Arc<dyn Store>) {
+    let (all, events) = listed_events(store.as_ref()).await;
+    let day = Duration::days(1);
+    let ids = async |filter: EventFilter| {
+        let listed = store
+            .list_events(&filter, EventOrder::StartsAt, PageRequest::first(10))
+            .await
+            .unwrap();
+        let mut ids: Vec<EventId> = listed.into_iter().map(|event| event.id).collect();
+        ids.sort();
+        ids
+    };
+    let expect = |picked: &[usize]| {
+        let mut ids: Vec<EventId> = picked.iter().map(|&i| events[i].id).collect();
+        ids.sort();
+        ids
+    };
+    let japan = Some(CountryCode::new("JP").unwrap());
+    let cases = [
+        (
+            EventFilter {
+                country: japan,
+                ..all.clone()
+            },
+            expect(&[0, 3]),
+        ),
+        (
+            EventFilter {
+                status: Some(EventStatus::Draft),
+                ..all.clone()
+            },
+            expect(&[1]),
+        ),
+        (
+            EventFilter {
+                public_only: true,
+                ..all.clone()
+            },
+            expect(&[0, 2, 3]),
+        ),
+        (
+            EventFilter {
+                starts_from: Some(now() + day),
+                ..all.clone()
+            },
+            expect(&[0, 1, 2]),
+        ),
+        (
+            EventFilter {
+                starts_before: Some(now() + day),
+                ..all.clone()
+            },
+            expect(&[3]),
+        ),
+        (
+            EventFilter {
+                ends_from: Some(now()),
+                ..all.clone()
+            },
+            expect(&[0, 1, 2]),
+        ),
+        (
+            EventFilter {
+                ends_before: Some(now()),
+                ..all.clone()
+            },
+            expect(&[3]),
+        ),
+        (
+            EventFilter {
+                starts_from: Some(now() + day),
+                starts_before: Some(now() + day * 2),
+                public_only: true,
+                ..all.clone()
+            },
+            expect(&[0]),
+        ),
+    ];
+    for (filter, expected) in cases {
+        assert_eq!(ids(filter.clone()).await, expected, "{filter:?}");
+    }
+}
+
+pub async fn account_listings_resume_exactly(store: Arc<dyn Store>) {
+    let catalog = catalog(store.as_ref(), &[100]).await;
+    let buyer = account(store.as_ref()).await;
+    let price = Money::new(1_000, Currency::JPY).unwrap();
+    let mut reservations = Vec::new();
+    let mut tickets = Vec::new();
+    // Reservation times repeat once and ticket issue times twice, so ties need the id.
+    for (i, offset) in [0, 0, 5, 9].into_iter().enumerate() {
+        let at = now() + Duration::seconds(offset);
+        let request = purchase_request(buyer, &catalog, &unique_suffix());
+        store.insert_purchase_request(&request).await.unwrap();
+        let reservation = Reservation {
+            id: ReservationId::generate(),
+            purchase_request_id: request.id,
+            account_id: buyer,
+            sale_id: catalog.sale,
+            event_id: catalog.event,
+            items: vec![ReservedItem {
+                ticket_type_id: catalog.ticket_types[0],
+                quantity: 2,
+                unit_price: price,
+            }],
+            total: price,
+            environment: Environment::Live,
+            status: ReservationStatus::Issued,
+            attestor_id: None,
+            expires_at: at,
+            created_at: at,
+            updated_at: at,
+        };
+        let issued = (0..2).map(|_| Ticket {
+            id: TicketId::generate(),
+            reservation_id: reservation.id,
+            account_id: buyer,
+            event_id: catalog.event,
+            ticket_type_id: catalog.ticket_types[0],
+            valid_from: now(),
+            valid_until: now() + Duration::days(2),
+            issued_at: now() + Duration::seconds([0, 0, 0, 7][i]),
+            status: TicketStatus::Valid,
+            encoded: vec![1, 2, 3],
+        });
+        let issued: Vec<Ticket> = issued.collect();
+        let mut tx = store.begin().await.unwrap();
+        tx.reservations()
+            .insert_reservation(&reservation)
+            .await
+            .unwrap();
+        tx.tickets().insert_tickets(&issued).await.unwrap();
+        tx.commit().await.unwrap();
+        reservations.push(reservation);
+        tickets.extend(issued);
+    }
+
+    // Newest first; equal times in id order.
+    let newest_first = |at: Timestamp, id: uuid::Uuid| (std::cmp::Reverse(at), id);
+    tickets.sort_by_key(|ticket| newest_first(ticket.issued_at, ticket.id.as_uuid()));
+    reservations
+        .sort_by_key(|reservation| newest_first(reservation.created_at, reservation.id.as_uuid()));
+    for size in [1, 3, 100] {
+        let listed = walk(
+            size,
+            |ticket: &Ticket| Keyset {
+                at: ticket.issued_at,
+                id: ticket.id.as_uuid(),
+            },
+            async |page| store.tickets_for_account(buyer, page).await.unwrap(),
+        )
+        .await;
+        assert_eq!(listed, tickets, "tickets in pages of {size}");
+        let listed = walk(
+            size,
+            |reservation: &Reservation| Keyset {
+                at: reservation.created_at,
+                id: reservation.id.as_uuid(),
+            },
+            async |page| store.reservations_for_account(buyer, page).await.unwrap(),
+        )
+        .await;
+        assert_eq!(listed, reservations, "reservations in pages of {size}");
+    }
+}
+
+pub async fn favorites_resume_exactly(store: Arc<dyn Store>) {
+    let buyer = account(store.as_ref()).await;
+    let organization = organization(store.as_ref()).await;
+    let newest_first = |at: Timestamp, id: uuid::Uuid| (std::cmp::Reverse(at), id);
+    let mut favorites = Vec::new();
+    for offset in [3, 3, 1] {
+        let event = event_record(organization);
+        store.insert_event(&event).await.unwrap();
+        let at = now() + Duration::seconds(offset);
+        store.add_favorite(buyer, event.id, at).await.unwrap();
+        favorites.push((event.id, at));
+    }
+    favorites.sort_by_key(|&(event, at)| newest_first(at, event.as_uuid()));
+    for size in [1, 2, 10] {
+        let listed = walk(
+            size,
+            |favorite: &crate::Favorite| favorite.position(),
+            async |page| store.favorites(buyer, page).await.unwrap(),
+        )
+        .await;
+        let listed: Vec<_> = listed
+            .into_iter()
+            .map(|favorite| (favorite.event_id, favorite.created_at))
+            .collect();
+        assert_eq!(listed, favorites, "favourites in pages of {size}");
+    }
+}
+
+pub async fn audit_log_reads_newest_first_in_pages(store: Arc<dyn Store>) {
+    let actor = format!("conformance:{}", unique_suffix());
+    for action in ["first", "second", "third"] {
+        let entry = AuditEntry {
+            at: now(),
+            actor: actor.clone(),
+            action: action.to_owned(),
+            target: "audit".to_owned(),
+        };
+        store.append_audit(&entry).await.unwrap();
+    }
+    // Only this case writes to the log, so the newest entries are the ones just appended.
+    let newest = store.audit_log(PageRequest::first(2)).await.unwrap();
+    let actions: Vec<&str> = newest
+        .iter()
+        .map(|record| record.entry.action.as_str())
+        .collect();
+    assert_eq!(actions, ["third", "second"]);
+    assert!(newest.iter().all(|record| record.entry.actor == actor));
+    assert!(newest[0].sequence > newest[1].sequence);
+
+    let older = store
+        .audit_log(PageRequest {
+            limit: 1,
+            after: Some(newest[1].sequence),
+        })
+        .await
+        .unwrap();
+    assert_eq!(older.len(), 1);
+    assert_eq!(older[0].entry.action, "first");
+    assert_eq!(older[0].entry.actor, actor);
 }

@@ -7,6 +7,7 @@ use kippu_domain::purchase::{Basket, LineItem, PurchaseRequest};
 use kippu_domain::reservation::Reservation;
 use kippu_domain::validation::IdempotencyKey;
 use kippu_domain::{AttestorId, PurchaseRequestId, ReservationId, SaleId, ValidationError};
+use kippu_store::{Keyset, Page, PageRequest};
 
 use super::pipeline::{release, submit};
 use crate::app::AppState;
@@ -119,10 +120,25 @@ pub async fn purchase_request(
 
 /// The caller's reservations, newest first.
 #[tracing::instrument(skip_all)]
-pub async fn reservations(state: &AppState, principal: &Principal) -> ApiResult<Vec<Reservation>> {
+pub async fn reservations(
+    state: &AppState,
+    principal: &Principal,
+    page: PageRequest<Keyset>,
+) -> ApiResult<Page<Reservation, Keyset>> {
     let account = principal.require_account()?;
     state.authorize(principal, RESERVATIONS_READ, Scope::Account(account))?;
-    Ok(state.store().reservations_for_account(account).await?)
+    let reservations = state
+        .store()
+        .reservations_for_account(account, page.plus_one())
+        .await?;
+    Ok(Page::from_lookahead(
+        reservations,
+        page.limit,
+        |reservation| Keyset {
+            at: reservation.created_at,
+            id: reservation.id.as_uuid(),
+        },
+    ))
 }
 
 /// A reservation the caller may see: their own (admins see all). Others look missing.

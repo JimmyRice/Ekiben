@@ -3,8 +3,8 @@ use kippu_domain::purchase::{LineItem, PurchaseRequest, PurchaseStatus};
 use kippu_domain::reservation::Reservation;
 use kippu_domain::{AccountId, PurchaseRequestId, ReservationId, SaleId, Timestamp};
 use kippu_store::{
-    Hold, Insertion, InventoryTx, Lease, PurchaseStore, PurchasesTx, ReservationsTx, StoreError,
-    StoreResult,
+    Hold, Insertion, InventoryTx, Keyset, Lease, PageRequest, PurchaseStore, PurchasesTx,
+    ReservationsTx, StoreError, StoreResult,
 };
 use uuid::Uuid;
 
@@ -120,11 +120,20 @@ impl PurchaseStore for SqliteStore {
         optional(row)
     }
 
-    async fn reservations_for_account(&self, account: AccountId) -> StoreResult<Vec<Reservation>> {
+    async fn reservations_for_account(
+        &self,
+        account: AccountId,
+        page: PageRequest<Keyset>,
+    ) -> StoreResult<Vec<Reservation>> {
         let rows = sqlx::query_as::<_, ReservationRow>(sqlx::AssertSqlSafe(format!(
-            "{RESERVATION_COLUMNS} WHERE account_id = ?1 ORDER BY created_at DESC"
+            "{RESERVATION_COLUMNS} WHERE account_id = ?1
+               AND (?2 IS NULL OR created_at < ?2 OR (created_at = ?2 AND id > ?3))
+             ORDER BY created_at DESC, id LIMIT ?4"
         )))
         .bind(account.as_uuid())
+        .bind(page.after.map(|after| micros(after.at)))
+        .bind(page.after.map(|after| after.id))
+        .bind(page.limit)
         .fetch_all(&self.reader)
         .await
         .map_err(error)?;

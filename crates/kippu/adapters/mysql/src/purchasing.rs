@@ -3,8 +3,8 @@ use kippu_domain::purchase::{LineItem, PurchaseRequest, PurchaseStatus};
 use kippu_domain::reservation::Reservation;
 use kippu_domain::{AccountId, PurchaseRequestId, ReservationId, SaleId, TicketTypeId, Timestamp};
 use kippu_store::{
-    Hold, Insertion, InventoryTx, Lease, PurchaseStore, PurchasesTx, ReservationsTx, StoreError,
-    StoreResult,
+    Hold, Insertion, InventoryTx, Keyset, Lease, PageRequest, PurchaseStore, PurchasesTx,
+    ReservationsTx, StoreError, StoreResult,
 };
 use uuid::Uuid;
 
@@ -139,11 +139,23 @@ impl PurchaseStore for MySqlStore {
         optional(row)
     }
 
-    async fn reservations_for_account(&self, account: AccountId) -> StoreResult<Vec<Reservation>> {
+    async fn reservations_for_account(
+        &self,
+        account: AccountId,
+        page: PageRequest<Keyset>,
+    ) -> StoreResult<Vec<Reservation>> {
+        let after_at = page.after.map(|after| micros(after.at));
         let rows = sqlx::query_as::<_, ReservationRow>(sqlx::AssertSqlSafe(format!(
-            "{RESERVATION_COLUMNS} WHERE account_id = ? ORDER BY created_at DESC"
+            "{RESERVATION_COLUMNS} WHERE account_id = ?
+               AND (? IS NULL OR created_at < ? OR (created_at = ? AND id > ?))
+             ORDER BY created_at DESC, id LIMIT ?"
         )))
         .bind(account.as_uuid())
+        .bind(after_at)
+        .bind(after_at)
+        .bind(after_at)
+        .bind(page.after.map(|after| after.id))
+        .bind(page.limit)
         .fetch_all(&self.pool)
         .await
         .map_err(error)?;

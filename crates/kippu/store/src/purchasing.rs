@@ -3,7 +3,7 @@ use kippu_domain::purchase::{LineItem, PurchaseRequest, PurchaseStatus};
 use kippu_domain::reservation::Reservation;
 use kippu_domain::{AccountId, PurchaseRequestId, ReservationId, SaleId, TicketTypeId, Timestamp};
 
-use crate::{Insertion, Lease, StoreResult};
+use crate::{Insertion, Keyset, Lease, PageRequest, StoreResult};
 
 /// Purchase requests and reservations, outside a transaction.
 #[async_trait]
@@ -37,8 +37,13 @@ pub trait PurchaseStore {
     /// Looks a reservation up by id.
     async fn reservation(&self, id: ReservationId) -> StoreResult<Option<Reservation>>;
 
-    /// An account's reservations, newest first.
-    async fn reservations_for_account(&self, account: AccountId) -> StoreResult<Vec<Reservation>>;
+    /// An account's reservations, newest first (ties in id order), resuming after the position
+    /// `page.after` (`created_at` and id of the last reservation).
+    async fn reservations_for_account(
+        &self,
+        account: AccountId,
+        page: PageRequest<Keyset>,
+    ) -> StoreResult<Vec<Reservation>>;
 
     /// Reservations still holding inventory whose `expires_at` is at or before `now`.
     async fn overdue_reservations(

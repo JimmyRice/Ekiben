@@ -58,8 +58,7 @@ async fn root_signs_in_with_a_key_and_bootstraps_the_hierarchy() {
     let audit = app
         .call(Method::GET, "/v1/admin/audit-log", Some(&root), None)
         .await;
-    let actions: Vec<_> = audit
-        .body
+    let actions: Vec<_> = audit.body["items"]
         .as_array()
         .unwrap()
         .iter()
@@ -280,4 +279,24 @@ async fn health_and_openapi_are_served() {
     let openapi = app.call(Method::GET, "/openapi.json", None, None).await;
     assert_eq!(openapi.status, StatusCode::OK);
     assert!(openapi.body["paths"]["/v1/auth/login"]["post"].is_object());
+
+    // Every schema a path or schema refers to is defined, and query parameters are documented
+    // as such.
+    let text = openapi.body.to_string();
+    for reference in text.split("\"#/components/schemas/").skip(1) {
+        let name = reference.split('"').next().unwrap();
+        assert!(
+            openapi.body["components"]["schemas"][name].is_object(),
+            "{name} is referred to but not defined"
+        );
+    }
+    let parameters = &openapi.body["paths"]["/v1/events"]["get"]["parameters"];
+    assert!(
+        parameters
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|parameter| parameter["in"] == "query" && parameter["required"] == false),
+        "{parameters}"
+    );
 }

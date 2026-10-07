@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use kippu_domain::ticket::Ticket;
 use kippu_domain::{AccountId, ReservationId, TicketId};
-use kippu_store::{StoreResult, TicketStore, TicketsTx};
+use kippu_store::{Keyset, PageRequest, StoreResult, TicketStore, TicketsTx};
 
 use crate::convert::{TicketRow, all, at, optional, ticket_status};
 use crate::tx::PostgresTx;
@@ -23,11 +23,20 @@ impl TicketStore for PostgresStore {
         optional(row)
     }
 
-    async fn tickets_for_account(&self, account: AccountId) -> StoreResult<Vec<Ticket>> {
+    async fn tickets_for_account(
+        &self,
+        account: AccountId,
+        page: PageRequest<Keyset>,
+    ) -> StoreResult<Vec<Ticket>> {
         let rows = sqlx::query_as::<_, TicketRow>(sqlx::AssertSqlSafe(format!(
-            "{TICKET_COLUMNS} WHERE account_id = $1 ORDER BY issued_at DESC, id"
+            "{TICKET_COLUMNS} WHERE account_id = $1
+               AND ($2 IS NULL OR issued_at < $2 OR (issued_at = $2 AND id > $3))
+             ORDER BY issued_at DESC, id LIMIT $4"
         )))
         .bind(account.as_uuid())
+        .bind(page.after.map(|after| at(after.at)))
+        .bind(page.after.map(|after| after.id))
+        .bind(i64::from(page.limit))
         .fetch_all(&self.pool)
         .await
         .map_err(error)?;

@@ -21,6 +21,7 @@ pub struct CheckoutRequest {
 /// Where a purchase request is polled; carries a receipt when the deployment queues requests
 /// before persisting them.
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct PollQuery {
     /// The receipt from the `Location` the request was accepted with.
     pub receipt: Option<String>,

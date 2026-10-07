@@ -1,9 +1,9 @@
 //! Events: creating, editing, publishing, and who may see them.
 
-use kippu_domain::catalog::{Event, EventStatus, EventSummary};
+use kippu_domain::catalog::{Address, Event, EventStatus, EventSummary};
 use kippu_domain::validation::Slug;
 use kippu_domain::{EventId, OrganizationId, Timestamp};
-use kippu_store::{EventFilter, PageRequest};
+use kippu_store::{EventFilter, EventOrder, Keyset, Page, PageRequest};
 
 use super::check_version;
 use crate::app::AppState;
@@ -20,8 +20,10 @@ pub struct NewEvent {
     pub title: String,
     /// Long description.
     pub description: String,
-    /// Where it takes place.
+    /// Where it takes place, as people call it.
     pub venue: String,
+    /// The precise address, if there is one.
+    pub address: Option<Address>,
     /// When it opens.
     pub starts_at: Timestamp,
     /// When it closes.
@@ -39,8 +41,10 @@ pub struct EventChanges {
     pub title: Option<String>,
     /// Long description.
     pub description: Option<String>,
-    /// Where it takes place.
+    /// Where it takes place, as people call it.
     pub venue: Option<String>,
+    /// The precise address; `Some(None)` removes it.
+    pub address: Option<Option<Address>>,
     /// When it opens.
     pub starts_at: Option<Timestamp>,
     /// When it closes.
@@ -98,30 +102,57 @@ pub async fn writable_event(
     Ok(event)
 }
 
-/// Published and cancelled events, for everyone.
+/// Published and cancelled events, for everyone. `filter`'s organization and visibility are
+/// set here.
 #[tracing::instrument(skip_all)]
-pub async fn public_events(state: &AppState, page: PageRequest) -> ApiResult<Vec<EventSummary>> {
+pub async fn public_events(
+    state: &AppState,
+    filter: EventFilter,
+    order: EventOrder,
+    page: PageRequest<Keyset>,
+) -> ApiResult<Page<EventSummary, Keyset>> {
     let filter = EventFilter {
         organization: None,
         public_only: true,
+        ..filter
     };
-    Ok(state.store().list_events(filter, page).await?)
+    list_events(state, &filter, order, page).await
 }
 
-/// All events of an organization, drafts included, for its organizers.
+/// All events of an organization, drafts included, for its organizers. `filter`'s
+/// organization and visibility are set here.
 #[tracing::instrument(skip_all)]
 pub async fn organization_events(
     state: &AppState,
     principal: &Principal,
     organization: OrganizationId,
-    page: PageRequest,
-) -> ApiResult<Vec<EventSummary>> {
+    filter: EventFilter,
+    order: EventOrder,
+    page: PageRequest<Keyset>,
+) -> ApiResult<Page<EventSummary, Keyset>> {
     state.authorize(principal, EVENTS_WRITE, Scope::Organization(organization))?;
     let filter = EventFilter {
         organization: Some(organization),
         public_only: false,
+        ..filter
     };
-    Ok(state.store().list_events(filter, page).await?)
+    list_events(state, &filter, order, page).await
+}
+
+/// One page of the events matching `filter`.
+async fn list_events(
+    state: &AppState,
+    filter: &EventFilter,
+    order: EventOrder,
+    page: PageRequest<Keyset>,
+) -> ApiResult<Page<EventSummary, Keyset>> {
+    let events = state
+        .store()
+        .list_events(filter, order, page.plus_one())
+        .await?;
+    Ok(Page::from_lookahead(events, page.limit, |event| {
+        order.position(event)
+    }))
 }
 
 /// Creates a draft event for an organization.
@@ -146,6 +177,7 @@ pub async fn create_event(
         title: new.title,
         description: new.description,
         venue: new.venue,
+        address: new.address,
         starts_at: new.starts_at,
         ends_at: new.ends_at,
         status: EventStatus::Draft,
@@ -179,6 +211,7 @@ pub async fn update_event(
         title: changes.title.unwrap_or(current.title),
         description: changes.description.unwrap_or(current.description),
         venue: changes.venue.unwrap_or(current.venue),
+        address: changes.address.unwrap_or(current.address),
         starts_at: changes.starts_at.unwrap_or(current.starts_at),
         ends_at: changes.ends_at.unwrap_or(current.ends_at),
         status: changes.status.unwrap_or(current.status),

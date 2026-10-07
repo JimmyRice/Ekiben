@@ -1,22 +1,40 @@
 use async_trait::async_trait;
 use kippu_domain::admission::WaitingRoom;
 use kippu_domain::catalog::{Event, EventSummary, Inventory, Sale, TicketType};
+use kippu_domain::validation::CountryCode;
 use kippu_domain::{AccountId, EventId, SaleId, TicketTypeId, Timestamp};
-use kippu_store::{CatalogStore, EventFilter, PageRequest, StoreError, StoreResult};
+use kippu_store::{
+    CatalogStore, EventFilter, EventOrder, Favorite, Keyset, PageRequest, StoreError, StoreResult,
+};
 use sqlx::types::Json;
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::convert::{
-    EventRow, EventSummaryRow, InventoryRow, SaleRow, TicketTypeRow, all, at, count, event_status,
-    extensions_json, optional,
+    AddressValues, EventRow, EventSummaryRow, InventoryRow, SaleRow, TicketTypeRow, all, at, count,
+    event_status, extensions_json, instant, optional,
 };
 use crate::{PostgresStore, error, unique};
 
 const EVENT_SUMMARY_COLUMNS: &str = "SELECT id, organization_id, slug, title, description, venue, \
-     starts_at, ends_at, status, created_at, updated_at, version FROM events";
+     address_country, address_region, address_locality, address_postal_code, address_street, \
+     latitude, longitude, starts_at, ends_at, status, created_at, updated_at, version FROM events";
 
-const EVENT_COLUMNS: &str = "SELECT id, organization_id, slug, title, description, venue, starts_at, \
-     ends_at, status, created_at, updated_at, version, content FROM events";
+const EVENT_COLUMNS: &str = "SELECT id, organization_id, slug, title, description, venue, \
+     address_country, address_region, address_locality, address_postal_code, address_street, \
+     latitude, longitude, starts_at, ends_at, status, created_at, updated_at, version, content \
+     FROM events";
+
+/// The column an event order sorts by, the comparison that finds the events after a
+/// position, and the direction.
+const fn event_order(order: EventOrder) -> (&'static str, &'static str, &'static str) {
+    match order {
+        EventOrder::StartsAt => ("starts_at", ">", "ASC"),
+        EventOrder::StartsAtDesc => ("starts_at", "<", "DESC"),
+        EventOrder::CreatedAt => ("created_at", ">", "ASC"),
+        EventOrder::CreatedAtDesc => ("created_at", "<", "DESC"),
+    }
+}
 
 const SALE_COLUMNS: &str = "SELECT id, event_id, name, opens_at, closes_at, admission, \
      reservation_ttl_seconds, max_tickets_per_request, accepted_attestors, environment, \
@@ -38,10 +56,14 @@ fn expect_one_updated(result: &sqlx::postgres::PgQueryResult) -> StoreResult<()>
 #[async_trait]
 impl CatalogStore for PostgresStore {
     async fn insert_event(&self, event: &Event) -> StoreResult<()> {
+        let address = AddressValues::of(event.address.as_ref());
         sqlx::query(
             "INSERT INTO events (id, organization_id, slug, title, description, venue, starts_at,
-                                 ends_at, status, created_at, updated_at, version, content)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+                                 ends_at, status, created_at, updated_at, version, content,
+                                 address_country, address_region, address_locality,
+                                 address_postal_code, address_street, latitude, longitude)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
+                     $18, $19, $20)",
         )
         .bind(event.id.as_uuid())
         .bind(event.organization_id.as_uuid())
@@ -56,6 +78,13 @@ impl CatalogStore for PostgresStore {
         .bind(at(event.updated_at))
         .bind(event.version)
         .bind(&event.content)
+        .bind(address.country)
+        .bind(address.region)
+        .bind(address.locality)
+        .bind(address.postal_code)
+        .bind(address.street)
+        .bind(address.latitude)
+        .bind(address.longitude)
         .execute(&self.pool)
         .await
         .map_err(unique("slug"))?;
@@ -63,10 +92,13 @@ impl CatalogStore for PostgresStore {
     }
 
     async fn update_event(&self, event: &Event, expected_version: i64) -> StoreResult<()> {
+        let address = AddressValues::of(event.address.as_ref());
         let result = sqlx::query(
             "UPDATE events SET slug = $2, title = $3, description = $4, venue = $5, starts_at = $6,
                                ends_at = $7, status = $8, updated_at = $9, version = $10,
-                               content = $12
+                               content = $12, address_country = $13, address_region = $14,
+                               address_locality = $15, address_postal_code = $16,
+                               address_street = $17, latitude = $18, longitude = $19
              WHERE id = $1 AND version = $11",
         )
         .bind(event.id.as_uuid())
@@ -81,6 +113,13 @@ impl CatalogStore for PostgresStore {
         .bind(event.version)
         .bind(expected_version)
         .bind(&event.content)
+        .bind(address.country)
+        .bind(address.region)
+        .bind(address.locality)
+        .bind(address.postal_code)
+        .bind(address.street)
+        .bind(address.latitude)
+        .bind(address.longitude)
         .execute(&self.pool)
         .await
         .map_err(unique("slug"))?;
@@ -100,19 +139,34 @@ impl CatalogStore for PostgresStore {
 
     async fn list_events(
         &self,
-        filter: EventFilter,
-        page: PageRequest,
+        filter: &EventFilter,
+        order: EventOrder,
+        page: PageRequest<Keyset>,
     ) -> StoreResult<Vec<EventSummary>> {
+        let (column, after, direction) = event_order(order);
         let rows = sqlx::query_as::<_, EventSummaryRow>(sqlx::AssertSqlSafe(format!(
             "{EVENT_SUMMARY_COLUMNS}
              WHERE ($1 IS NULL OR organization_id = $1)
                AND (NOT $2 OR status IN ('published', 'cancelled'))
-               AND ($3 IS NULL OR id > $3)
-             ORDER BY id LIMIT $4"
+               AND ($3 IS NULL OR status = $3)
+               AND ($4 IS NULL OR address_country = $4)
+               AND ($5 IS NULL OR starts_at >= $5)
+               AND ($6 IS NULL OR starts_at < $6)
+               AND ($7 IS NULL OR ends_at >= $7)
+               AND ($8 IS NULL OR ends_at < $8)
+               AND ($9 IS NULL OR {column} {after} $9 OR ({column} = $9 AND id {after} $10))
+             ORDER BY {column} {direction}, id {direction} LIMIT $11"
         )))
         .bind(filter.organization.map(|id| id.as_uuid()))
         .bind(filter.public_only)
-        .bind(page.after)
+        .bind(filter.status.map(event_status))
+        .bind(filter.country.as_ref().map(CountryCode::as_str))
+        .bind(filter.starts_from.map(at))
+        .bind(filter.starts_before.map(at))
+        .bind(filter.ends_from.map(at))
+        .bind(filter.ends_before.map(at))
+        .bind(page.after.map(|after| at(after.at)))
+        .bind(page.after.map(|after| after.id))
         .bind(i64::from(page.limit))
         .fetch_all(&self.pool)
         .await
@@ -330,15 +384,31 @@ impl CatalogStore for PostgresStore {
         Ok(())
     }
 
-    async fn favorites(&self, account: AccountId) -> StoreResult<Vec<EventId>> {
-        let ids = sqlx::query_scalar::<_, Uuid>(
-            "SELECT event_id FROM favorites WHERE account_id = $1 ORDER BY created_at DESC",
+    async fn favorites(
+        &self,
+        account: AccountId,
+        page: PageRequest<Keyset>,
+    ) -> StoreResult<Vec<Favorite>> {
+        let rows = sqlx::query_as::<_, (Uuid, OffsetDateTime)>(
+            "SELECT event_id, created_at FROM favorites
+             WHERE account_id = $1
+               AND ($2 IS NULL OR created_at < $2 OR (created_at = $2 AND event_id > $3))
+             ORDER BY created_at DESC, event_id LIMIT $4",
         )
         .bind(account.as_uuid())
+        .bind(page.after.map(|after| at(after.at)))
+        .bind(page.after.map(|after| after.id))
+        .bind(i64::from(page.limit))
         .fetch_all(&self.pool)
         .await
         .map_err(error)?;
-        Ok(ids.into_iter().map(Into::into).collect())
+        Ok(rows
+            .into_iter()
+            .map(|(event_id, created_at)| Favorite {
+                event_id: event_id.into(),
+                created_at: instant(created_at),
+            })
+            .collect())
     }
 
     async fn join_waiting_room(&self, sale: SaleId) -> StoreResult<u64> {

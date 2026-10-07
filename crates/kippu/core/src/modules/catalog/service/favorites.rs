@@ -2,6 +2,7 @@
 
 use kippu_domain::catalog::EventSummary;
 use kippu_domain::{AccountId, EventId};
+use kippu_store::{Favorite, Keyset, Page, PageRequest};
 
 use super::visible_event;
 use crate::app::AppState;
@@ -16,17 +17,27 @@ fn own_account(state: &AppState, principal: &Principal) -> ApiResult<AccountId> 
     Ok(account)
 }
 
-/// The caller's favourite events that they can still see.
+/// The caller's favourite events that they can still see, most recently marked first. A page
+/// leaves out events that have since become hidden, so it may hold fewer than `page.limit`.
 #[tracing::instrument(skip_all)]
-pub async fn favorites(state: &AppState, principal: &Principal) -> ApiResult<Vec<EventSummary>> {
+pub async fn favorites(
+    state: &AppState,
+    principal: &Principal,
+    page: PageRequest<Keyset>,
+) -> ApiResult<Page<EventSummary, Keyset>> {
     let account = own_account(state, principal)?;
+    let favorites = state.store().favorites(account, page.plus_one()).await?;
+    let favorites = Page::from_lookahead(favorites, page.limit, Favorite::position);
     let mut events = Vec::new();
-    for event_id in state.store().favorites(account).await? {
-        if let Ok(event) = visible_event(state, Some(principal), event_id).await {
+    for favorite in favorites.items {
+        if let Ok(event) = visible_event(state, Some(principal), favorite.event_id).await {
             events.push(event.into());
         }
     }
-    Ok(events)
+    Ok(Page {
+        items: events,
+        next: favorites.next,
+    })
 }
 
 /// Marks an event the caller can see as a favourite.

@@ -1,16 +1,149 @@
 use std::collections::BTreeMap;
 
 use kippu_domain::admission::AdmissionPolicy;
-use kippu_domain::catalog::{EventStatus, Sale, TicketType};
+use kippu_domain::catalog::{Address, EventStatus, Sale, TicketType};
 use kippu_domain::payment::Environment;
+use kippu_domain::validation::CountryCode;
 use kippu_domain::{AttestorId, Money, Timestamp, ValidationError};
-use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
+use kippu_store::{EventFilter, EventOrder, Keyset, PageRequest};
+use serde::{Deserialize, Deserializer, Serialize};
+use utoipa::{IntoParams, ToSchema};
 
 use super::service::{
     EventChanges, NewEvent, SaleChanges, SaleOffer, SaleSettings, TicketTypeAvailability,
     TicketTypeChanges, TicketTypeSettings,
 };
+use crate::error::ApiError;
+use crate::http::{ListingTag, decode_cursor, invalid_cursor, page_limit};
+
+/// Reads a field that may be `null` as `Some(value)`, so that with `#[serde(default)]` an
+/// absent field (`None`) differs from `null` (`Some(None)`).
+fn present<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
+    deserializer: D,
+) -> Result<Option<T>, D::Error> {
+    T::deserialize(deserializer).map(Some)
+}
+
+/// How events are listed: `starts_at` (default), `-starts_at`, `created_at` or `-created_at`.
+/// A leading `-` means descending.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, ToSchema)]
+pub enum EventSort {
+    /// Earliest start first.
+    #[serde(rename = "starts_at")]
+    StartsAt,
+    /// Latest start first.
+    #[serde(rename = "-starts_at")]
+    StartsAtDesc,
+    /// Oldest first.
+    #[serde(rename = "created_at")]
+    CreatedAt,
+    /// Newest first.
+    #[serde(rename = "-created_at")]
+    CreatedAtDesc,
+}
+
+/// Which events to list, in which order, and which page. Conditions combine; times bound
+/// half-open ranges (`*_from` inclusive, `*_before` exclusive), so `ends_from=<now>` lists
+/// events that are on or still to come, and `ends_from=<a>&starts_before=<b>` those taking
+/// place between `a` and `b`.
+#[derive(Debug, Default, Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
+#[into_params(parameter_in = Query)]
+pub struct EventsQuery {
+    /// Only events in this status: `draft`, `published` or `cancelled`.
+    pub status: Option<EventStatus>,
+    /// Only events whose address is in this country (ISO 3166-1 alpha-2, e.g. `JP`).
+    #[param(value_type = Option<String>)]
+    pub country: Option<CountryCode>,
+    /// Only events starting at or after this instant.
+    pub starts_from: Option<Timestamp>,
+    /// Only events starting before this instant.
+    pub starts_before: Option<Timestamp>,
+    /// Only events ending at or after this instant.
+    pub ends_from: Option<Timestamp>,
+    /// Only events ending before this instant.
+    pub ends_before: Option<Timestamp>,
+    /// The order: `starts_at` (default), `-starts_at`, `created_at` or `-created_at`.
+    #[param(inline)]
+    pub sort: Option<EventSort>,
+    /// At most this many events (default 50, at most 200).
+    pub limit: Option<u32>,
+    /// The `next_cursor` of the previous page; it remembers the order. Keep the other
+    /// parameters as they were.
+    pub cursor: Option<String>,
+}
+
+/// The listing an event order's cursors name.
+pub(crate) const fn event_listing(order: EventOrder) -> ListingTag {
+    match order {
+        EventOrder::StartsAt => ListingTag::EVENTS_BY_START,
+        EventOrder::StartsAtDesc => ListingTag::EVENTS_BY_START_DESC,
+        EventOrder::CreatedAt => ListingTag::EVENTS_BY_CREATION,
+        EventOrder::CreatedAtDesc => ListingTag::EVENTS_BY_CREATION_DESC,
+    }
+}
+
+/// The event order whose cursors `tag` names, if any.
+fn event_order(tag: ListingTag) -> Option<EventOrder> {
+    [
+        EventOrder::StartsAt,
+        EventOrder::StartsAtDesc,
+        EventOrder::CreatedAt,
+        EventOrder::CreatedAtDesc,
+    ]
+    .into_iter()
+    .find(|&order| event_listing(order) == tag)
+}
+
+impl From<EventSort> for EventOrder {
+    fn from(sort: EventSort) -> Self {
+        match sort {
+            EventSort::StartsAt => Self::StartsAt,
+            EventSort::StartsAtDesc => Self::StartsAtDesc,
+            EventSort::CreatedAt => Self::CreatedAt,
+            EventSort::CreatedAtDesc => Self::CreatedAtDesc,
+        }
+    }
+}
+
+impl EventsQuery {
+    /// The filter, order and page to list. A cursor carries the order it was made with; a
+    /// `sort` that contradicts it is an error rather than a silently wrong page.
+    pub(crate) fn into_parts(
+        self,
+    ) -> Result<(EventFilter, EventOrder, PageRequest<Keyset>), ApiError> {
+        let sort = self.sort.map(EventOrder::from);
+        let (order, after) = match self.cursor.as_deref() {
+            None => (sort.unwrap_or_default(), None),
+            Some(cursor) => {
+                let (tag, position) = decode_cursor::<Keyset>(cursor)?;
+                let order = event_order(tag)
+                    .ok_or_else(|| invalid_cursor("cursor belongs to another listing"))?;
+                if sort.is_some_and(|sort| sort != order) {
+                    return Err(invalid_cursor("cursor was made for another sort order"));
+                }
+                (order, Some(position))
+            }
+        };
+        let filter = EventFilter {
+            status: self.status,
+            country: self.country,
+            starts_from: self.starts_from,
+            starts_before: self.starts_before,
+            ends_from: self.ends_from,
+            ends_before: self.ends_before,
+            ..EventFilter::default()
+        };
+        Ok((
+            filter,
+            order,
+            PageRequest {
+                limit: page_limit(self.limit),
+                after,
+            },
+        ))
+    }
+}
 
 /// The `version` a full update must carry; it is optional only so one body serves for
 /// creating too.
@@ -28,8 +161,12 @@ pub struct CreateEventRequest {
     /// Long description.
     #[serde(default)]
     pub description: String,
-    /// Where it takes place.
+    /// Where it takes place, as people call it: "Tokyo Big Sight, East Halls", "Online".
     pub venue: String,
+    /// The precise address, for maps and navigation. Leave out for online events or while
+    /// the place is not settled.
+    #[serde(default)]
+    pub address: Option<Address>,
     /// When it opens.
     pub starts_at: Timestamp,
     /// When it closes.
@@ -52,8 +189,11 @@ pub struct UpdateEventRequest {
     /// Long description.
     #[serde(default)]
     pub description: String,
-    /// Where it takes place.
+    /// Where it takes place, as people call it.
     pub venue: String,
+    /// The precise address; absent or `null` means the event has none.
+    #[serde(default)]
+    pub address: Option<Address>,
     /// When it opens.
     pub starts_at: Timestamp,
     /// When it closes.
@@ -148,8 +288,12 @@ pub struct EventPatch {
     pub title: Option<String>,
     /// Long description.
     pub description: Option<String>,
-    /// Where it takes place.
+    /// Where it takes place, as people call it.
     pub venue: Option<String>,
+    /// The precise address, replaced as a whole; `null` removes it.
+    #[serde(default, deserialize_with = "present")]
+    #[schema(value_type = Option<Address>)]
+    pub address: Option<Option<Address>>,
     /// When it opens.
     pub starts_at: Option<Timestamp>,
     /// When it closes.
@@ -237,6 +381,7 @@ impl From<CreateEventRequest> for NewEvent {
             title: request.title,
             description: request.description,
             venue: request.venue,
+            address: request.address,
             starts_at: request.starts_at,
             ends_at: request.ends_at,
             content: request.content,
@@ -251,6 +396,7 @@ impl From<UpdateEventRequest> for EventChanges {
             title: Some(request.title),
             description: Some(request.description),
             venue: Some(request.venue),
+            address: Some(request.address),
             starts_at: Some(request.starts_at),
             ends_at: Some(request.ends_at),
             status: Some(request.status),
@@ -266,6 +412,7 @@ impl From<EventPatch> for EventChanges {
             title: patch.title,
             description: patch.description,
             venue: patch.venue,
+            address: patch.address,
             starts_at: patch.starts_at,
             ends_at: patch.ends_at,
             status: patch.status,

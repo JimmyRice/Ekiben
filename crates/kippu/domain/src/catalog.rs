@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::admission::AdmissionPolicy;
 use crate::payment::Environment;
-use crate::validation::{Slug, ValidationError, non_empty};
+use crate::validation::{CountryCode, Slug, ValidationError, non_empty};
 use crate::{AttestorId, EventId, Money, OrganizationId, SaleId, TicketTypeId, Timestamp};
 
 /// Whether an event is visible to the public.
@@ -32,8 +32,72 @@ pub enum EventStatus {
 /// The most bytes (UTF-8) an event's [`content`](Event::content) may have.
 pub const MAX_EVENT_CONTENT_BYTES: usize = 256 * 1024;
 
+/// Where an event takes place, precisely enough for maps and navigation.
+///
+/// The parts follow the usual postal layout, so clients can print the address the local way
+/// or hand it to a map service; the coordinates, when known, are what navigation should aim
+/// for (an entrance rather than the middle of a site). Listings can be narrowed by `country`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct Address {
+    /// ISO 3166-1 alpha-2 country code, e.g. `JP`.
+    #[cfg_attr(feature = "openapi", schema(example = "JP"))]
+    pub country: CountryCode,
+    /// State, province or prefecture, e.g. `東京都`.
+    pub region: Option<String>,
+    /// City, ward or town, e.g. `江東区`.
+    pub locality: Option<String>,
+    /// Postal code, e.g. `135-0063`.
+    pub postal_code: Option<String>,
+    /// Street and number, and anything finer such as a building, e.g. `有明3-11-1`.
+    pub street: String,
+    /// Degrees north (WGS 84), from -90 to 90. Given together with `longitude`.
+    pub latitude: Option<f64>,
+    /// Degrees east (WGS 84), from -180 to 180. Given together with `latitude`.
+    pub longitude: Option<f64>,
+}
+
+impl Address {
+    /// Checks the lengths of the parts and the range of the coordinates.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        non_empty("address.street", &self.street, 500)?;
+        for (field, value, max_len) in [
+            ("address.region", &self.region, 200),
+            ("address.locality", &self.locality, 200),
+            ("address.postal_code", &self.postal_code, 32),
+        ] {
+            if let Some(value) = value {
+                non_empty(field, value, max_len)?;
+            }
+        }
+        match (self.latitude, self.longitude) {
+            (None, None) => Ok(()),
+            (Some(latitude), Some(longitude)) => {
+                if !(-90.0..=90.0).contains(&latitude) {
+                    Err(ValidationError::new(
+                        "address.latitude",
+                        "must be between -90 and 90",
+                    ))
+                } else if !(-180.0..=180.0).contains(&longitude) {
+                    Err(ValidationError::new(
+                        "address.longitude",
+                        "must be between -180 and 180",
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+            _ => Err(ValidationError::new(
+                "address",
+                "needs both latitude and longitude, or neither",
+            )),
+        }
+    }
+}
+
 /// A convention or other event.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Event {
     /// Identity of the event.
@@ -46,8 +110,11 @@ pub struct Event {
     pub title: String,
     /// Long description.
     pub description: String,
-    /// Where it takes place.
+    /// Where it takes place, as people call it: "Tokyo Big Sight, East Halls", "Online".
     pub venue: String,
+    /// The precise address, for maps and navigation; `null` for online events or while the
+    /// place is not settled.
+    pub address: Option<Address>,
     /// When it opens.
     pub starts_at: Timestamp,
     /// When it closes.
@@ -71,6 +138,9 @@ impl Event {
     pub fn validate(&self) -> Result<(), ValidationError> {
         non_empty("title", &self.title, 200)?;
         non_empty("venue", &self.venue, 200)?;
+        if let Some(address) = &self.address {
+            address.validate()?;
+        }
         if self.description.chars().count() > 20_000 {
             return Err(ValidationError::new("description", "is too long"));
         }
@@ -90,7 +160,7 @@ impl Event {
 }
 
 /// An event without its [`content`](Event::content), as listings show it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct EventSummary {
     /// Identity of the event.
@@ -103,8 +173,11 @@ pub struct EventSummary {
     pub title: String,
     /// Long description.
     pub description: String,
-    /// Where it takes place.
+    /// Where it takes place, as people call it: "Tokyo Big Sight, East Halls", "Online".
     pub venue: String,
+    /// The precise address, for maps and navigation; `null` for online events or while the
+    /// place is not settled.
+    pub address: Option<Address>,
     /// When it opens.
     pub starts_at: Timestamp,
     /// When it closes.
@@ -129,6 +202,7 @@ impl EventSummary {
             title: self.title,
             description: self.description,
             venue: self.venue,
+            address: self.address,
             starts_at: self.starts_at,
             ends_at: self.ends_at,
             status: self.status,
@@ -149,6 +223,7 @@ impl From<Event> for EventSummary {
             title: event.title,
             description: event.description,
             venue: event.venue,
+            address: event.address,
             starts_at: event.starts_at,
             ends_at: event.ends_at,
             status: event.status,
@@ -312,5 +387,66 @@ impl Inventory {
     pub const fn available(&self) -> u32 {
         self.capacity
             .saturating_sub(self.held.saturating_add(self.sold))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn big_sight() -> Address {
+        Address {
+            country: CountryCode::new("JP").unwrap(),
+            region: Some("東京都".to_owned()),
+            locality: Some("江東区".to_owned()),
+            postal_code: Some("135-0063".to_owned()),
+            street: "有明3-11-1".to_owned(),
+            latitude: Some(35.6298),
+            longitude: Some(139.7942),
+        }
+    }
+
+    #[test]
+    fn addresses_need_a_street_and_both_coordinates_or_neither() {
+        assert_eq!(big_sight().validate(), Ok(()));
+        let without_coordinates = Address {
+            latitude: None,
+            longitude: None,
+            ..big_sight()
+        };
+        assert_eq!(without_coordinates.validate(), Ok(()));
+
+        let half = Address {
+            longitude: None,
+            ..big_sight()
+        };
+        assert_eq!(half.validate().unwrap_err().field, "address");
+        let off_the_map = Address {
+            latitude: Some(91.0),
+            ..big_sight()
+        };
+        assert_eq!(
+            off_the_map.validate().unwrap_err().field,
+            "address.latitude"
+        );
+        let blank = Address {
+            street: " ".to_owned(),
+            ..big_sight()
+        };
+        assert_eq!(blank.validate().unwrap_err().field, "address.street");
+        let empty_part = Address {
+            region: Some(String::new()),
+            ..big_sight()
+        };
+        assert_eq!(empty_part.validate().unwrap_err().field, "address.region");
+    }
+
+    #[test]
+    fn addresses_reject_unknown_parts() {
+        let typo = serde_json::json!({ "country": "jp", "street": "有明3-11-1", "zip": "135" });
+        assert!(serde_json::from_value::<Address>(typo).is_err());
+        let lower = serde_json::json!({ "country": "jp", "street": "有明3-11-1" });
+        let address: Address = serde_json::from_value(lower).unwrap();
+        assert_eq!(address.country.as_str(), "JP");
     }
 }

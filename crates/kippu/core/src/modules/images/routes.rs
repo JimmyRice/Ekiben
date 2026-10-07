@@ -14,12 +14,14 @@ use super::service::{self, IMMUTABLE, ImageContent, PublishedImage};
 use crate::app::AppState;
 use crate::auth::Principal;
 use crate::error::{ApiError, ApiResult, Problem};
-use crate::http::Json;
+use crate::http::{Json, Listing};
 
 const TAG: &str = "images";
 
-fn views(images: Vec<PublishedImage>) -> Json<Vec<EventImageView>> {
-    Json(images.into_iter().map(EventImageView::from).collect())
+fn views(images: Vec<PublishedImage>) -> Json<Listing<EventImageView>> {
+    Json(Listing::all(
+        images.into_iter().map(EventImageView::from).collect(),
+    ))
 }
 
 /// Reads the whole body, which the router has already capped at `images.max_bytes`.
@@ -82,13 +84,13 @@ pub(crate) async fn upload_image(
 #[utoipa::path(
     get, path = "/v1/events/{event_id}/images", tag = TAG,
     params(("event_id" = EventId, Path)),
-    responses((status = 200, body = Vec<EventImageView>), (status = 404, body = Problem), (status = 501, body = Problem))
+    responses((status = 200, body = Listing<EventImageView>), (status = 404, body = Problem), (status = 501, body = Problem))
 )]
 pub(crate) async fn list_images(
     State(state): State<AppState>,
     principal: Option<Principal>,
     Path(event_id): Path<EventId>,
-) -> ApiResult<Json<Vec<EventImageView>>> {
+) -> ApiResult<Json<Listing<EventImageView>>> {
     Ok(views(
         service::event_images(&state, principal.as_ref(), event_id).await?,
     ))
@@ -159,14 +161,14 @@ pub(crate) async fn delete_image(
     security(("bearer" = [])),
     params(("event_id" = EventId, Path)),
     request_body = ImageOrder,
-    responses((status = 200, body = Vec<EventImageView>), (status = 422, body = Problem))
+    responses((status = 200, body = Listing<EventImageView>), (status = 422, body = Problem))
 )]
 pub(crate) async fn order_images(
     State(state): State<AppState>,
     principal: Principal,
     Path(event_id): Path<EventId>,
     Json(order): Json<ImageOrder>,
-) -> ApiResult<Json<Vec<EventImageView>>> {
+) -> ApiResult<Json<Listing<EventImageView>>> {
     Ok(views(
         service::order_images(&state, &principal, event_id, &order.image_ids).await?,
     ))

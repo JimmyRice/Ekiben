@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use kippu_domain::Timestamp;
 
-use crate::{Insertion, StoreResult};
+use crate::{Insertion, PageRequest, StoreResult};
 
 /// The response to a request made with an `Idempotency-Key`, kept so a retry gets the same
 /// answer without running the request again.
@@ -30,6 +30,15 @@ pub struct AuditEntry {
     pub target: String,
 }
 
+/// An audit log entry as stored, with its place in the log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditRecord {
+    /// Position in the log; later entries have larger numbers.
+    pub sequence: i64,
+    /// The entry.
+    pub entry: AuditEntry,
+}
+
 /// Idempotency records and the audit log.
 #[async_trait]
 pub trait HousekeepingStore {
@@ -51,6 +60,6 @@ pub trait HousekeepingStore {
     /// Appends to the audit log.
     async fn append_audit(&self, entry: &AuditEntry) -> StoreResult<()>;
 
-    /// Reads the most recent `limit` audit entries, newest first.
-    async fn audit_log(&self, limit: u32) -> StoreResult<Vec<AuditEntry>>;
+    /// Reads audit entries newest first, resuming before the sequence number `page.after`.
+    async fn audit_log(&self, page: PageRequest<i64>) -> StoreResult<Vec<AuditRecord>>;
 }

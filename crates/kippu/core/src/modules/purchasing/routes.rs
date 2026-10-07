@@ -14,8 +14,8 @@ use super::service::{self, PurchaseSubmission};
 use crate::app::AppState;
 use crate::auth::Principal;
 use crate::error::{ApiResult, Problem};
-use crate::http::Json;
 use crate::http::idempotency::{IDEMPOTENCY_KEY, IdempotentByDesign};
+use crate::http::{Json, Listing, ListingTag, PageQuery};
 use crate::modules::admission::ADMISSION_PASS;
 
 const TAG: &str = "purchasing";
@@ -97,13 +97,21 @@ pub(crate) async fn get_purchase_request(
 #[utoipa::path(
     get, path = "/v1/me/reservations", tag = TAG,
     security(("bearer" = [])),
-    responses((status = 200, body = Vec<Reservation>))
+    params(PageQuery),
+    responses((status = 200, body = Listing<Reservation>), (status = 400, body = Problem))
 )]
 pub(crate) async fn my_reservations(
     State(state): State<AppState>,
     principal: Principal,
-) -> ApiResult<Json<Vec<Reservation>>> {
-    Ok(Json(service::reservations(&state, &principal).await?))
+    Query(query): Query<PageQuery>,
+) -> ApiResult<Json<Listing<Reservation>>> {
+    let page = query.page(ListingTag::RESERVATIONS)?;
+    let reservations = service::reservations(&state, &principal, page).await?;
+    Ok(Json(Listing::page(
+        reservations,
+        ListingTag::RESERVATIONS,
+        |reservation| reservation,
+    )))
 }
 
 /// A reservation.
