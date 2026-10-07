@@ -18,7 +18,8 @@ Ids are lowercase hyphenated UUID strings, the key id is hex, times are Unix sec
 ## Building
 
 Everything is generated from the compiled library (no UDL file), so the bindings are whatever
-this crate exports. Run these from the repository root; outputs land in `target/uniffi/`.
+this crate exports. Run these from the repository root; outputs land in `target/uniffi/`,
+except the Kotlin artifacts, which Gradle builds in this crate's `kotlin/` project.
 
 | Command | Result |
 |---|---|

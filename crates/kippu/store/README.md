@@ -15,3 +15,11 @@ suite to show it provides them:
 | Claims and conditional updates succeed for exactly one caller. | Safe workers on any number of instances. |
 
 Business logic lives once, in `kippu-core`; adapters only implement these primitives.
+
+Two more kinds of port live here, each optional and with its own suite:
+
+- **Messaging** — [`PurchaseInbox`] absorbs purchase bursts before they reach the database,
+  [`EventBus`] publishes outbox events (implemented by `kippu-nats`). Without them the
+  database is the queue.
+- **Object storage** — [`ObjectStorage`] holds event images (`kippu-objects-s3`, `-gcs`,
+  `-azure`); its contract is checked by `object_conformance_tests!`.

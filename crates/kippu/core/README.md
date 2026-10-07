@@ -7,6 +7,8 @@ and the background workers. It depends only on storage *ports*, never on a concr
 Kippu::new()
     .modules(kippu_core::default_modules())   // accounts, catalog, admission, purchasing, …
     .module(MyCommunityModule)                 // your own routes, permissions and tasks
+    .inbox(nats).event_bus(nats)               // optional: messaging instead of the database queue
+    .object_storage(s3)                        // optional: event images
     .build(config, store, clock)?              // → App { router, background tasks }
 ```
 

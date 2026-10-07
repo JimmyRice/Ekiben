@@ -13,6 +13,11 @@ kippu verify --key <public key> <ticket>             check a ticket offline, lik
 kippu config check                                   effective configuration, secrets redacted
 ```
 
+Every command takes `--config <file>`; `serve`, `worker`, `migrate` and `config check` also
+take `--database-url`. The binary contains the adapters enabled as features (by default all of
+them: SQLite, PostgreSQL, MySQL, NATS, S3, GCS, Azure); the database adapter is chosen by the
+scheme of `database.url` and the object storage by that of `images.url`.
+
 Logs go to stdout. `--log-format pretty` (the default) writes one block per request, from
 arrival to response — method, path, request id, client, caller, idempotency key, the events
 logged while handling it, the problem type, status and latency — so concurrent requests never
@@ -26,7 +31,9 @@ with `--config` (or `KIPPU_CONFIG`), environment variables (`KIPPU_DATABASE__URL
 between section and key) and command-line flags. See `kippu.example.toml` at the repository
 root.
 
-The `external_login` example is such a distribution: the default modules plus a sign-in module
+Two examples come with the crate. `attestor_sim` is a pretend payment provider that signs an
+attestation for a reservation (used in `docs/walkthrough.md`). The `external_login` example is
+such a distribution: the default modules plus a sign-in module
 for a pretend OAuth provider (see `docs/external-login.md`).
 
 Build your own distribution — with extra modules, or different adapters — without forking:

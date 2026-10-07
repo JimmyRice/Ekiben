@@ -73,7 +73,7 @@ Content-Type: application/json
 
 > {% client.global.set("sale_id", response.body.id); %}
 
-### 7. … and adds a ticket type. Extension 128 is printed on every ticket.
+### 7. … and adds a ticket type. Extension 128 is signed into every ticket.
 POST {{base}}/v1/sales/{{sale_id}}/ticket-types
 Authorization: Bearer {{organizer_token}}
 Content-Type: application/json

@@ -7,7 +7,7 @@ ticket gate (改札) into another world — so the pieces are named after a Japa
 |---|---|---|
 | **Kippu** (切符, *ticket*) | [`crates/kippu/`](crates/kippu) | Stateless backend: events, ticket sales under heavy contention, payment attestation, issuance. |
 | **Kaisatsu** (改札, *ticket gate*) | [`crates/kaisatsu/`](crates/kaisatsu) | `no_std` library that verifies a ticket was signed by Kippu — and nothing more. |
-| Bindings | [`crates/ffi/`](crates/ffi) | Kaisatsu for C, C++, C#, Swift, Kotlin, the Web and firmware. |
+| Bindings | [`crates/ffi/`](crates/ffi) | Kaisatsu for C, C++, C#, Swift, Kotlin and firmware. |
 | Protocol | [`spec/`](spec) | Language-neutral wire format and shared test vectors. |
 
 When a gate rejects you it goes *pinpōn* 🔔 and shuts its flaps, so Kaisatsu's error type is
@@ -21,14 +21,20 @@ spec/                           language-neutral protocols and test vectors
 docs/                           walkthrough (empty database -> verified ticket), external sign-in,
                                 building Kaisatsu for each platform
 crates/
-|-- kippu/domain                kippu-domain        pure domain model, no I/O
-|-- kippu/store                 kippu-store         storage ports + consistency contract
-|-- kippu/core                  kippu-core          modules, auth, HTTP API, workers
-|-- kippu/server                kippu-server        CLI, configuration sources, adapter wiring
-|-- kippu/adapters/sqlite       kippu-store-sqlite  SQLite adapter
-|-- kaisatsu                    kaisatsu            ticket protocol + verification (no_std)
-|-- ffi/c                       kaisatsu-ffi        C ABI
-`-- xtask                       xtask               `cargo xtask ...` automation
+|-- kippu/domain                 kippu-domain          pure domain model, no I/O
+|-- kippu/store                  kippu-store           storage ports + consistency contract
+|-- kippu/telemetry              kippu-telemetry       span contract + request log layer
+|-- kippu/core                   kippu-core            modules, auth, HTTP API, workers
+|-- kippu/server                 kippu-server          CLI, configuration sources, adapter wiring
+|-- kippu/adapters/sqlite        kippu-store-sqlite    SQLite adapter
+|-- kippu/adapters/postgres      kippu-store-postgres  PostgreSQL adapter
+|-- kippu/adapters/mysql         kippu-store-mysql     MySQL 8 adapter
+|-- kippu/adapters/nats          kippu-nats            NATS JetStream purchase inbox + event bus
+|-- kippu/adapters/objects-*     kippu-objects-*       event images on S3, GCS or Azure Blob
+|-- kaisatsu                     kaisatsu              ticket protocol + verification (no_std)
+|-- ffi/c                        kaisatsu-ffi          C ABI
+|-- ffi/uniffi                   kaisatsu-uniffi       Swift, Kotlin and C# through UniFFI
+`-- xtask                        xtask                 `cargo xtask ...` automation
 ```
 
 ## Quickstart
@@ -55,6 +61,12 @@ TOKEN=$(cargo run -q -- root-token --config kippu.example.toml --key root.key --
 curl -H "authorization: Bearer $TOKEN" localhost:8080/v1/me
 ```
 
+SQLite is enough to try Kippu and for a single instance. For more instances, point
+`database.url` at PostgreSQL or MySQL, optionally put NATS JetStream in front as the purchase
+inbox (`queue.url`), and configure object storage for event images (`images.url`); all options
+are in [`kippu.example.toml`](kippu.example.toml). The [`Dockerfile`](Dockerfile) builds a
+static image with only the adapters you name (`--build-arg FEATURES=postgres,nats,s3,mimalloc`).
+
 [`docs/walkthrough.md`](docs/walkthrough.md) goes all the way: an organizer opens a sale, a
 buyer pays through an attestor, and `kippu verify` checks the ticket like a gate.
 
@@ -67,7 +79,7 @@ buyer --> waiting room --> POST purchase-request (Idempotency-Key) --> 202, poll
 buyer --> checkout(attestor) --> payment.requested --> your payment service charges the buyer
 attestor --> signed POST /v1/payment-attestations --> one transaction: record payment, sell
                                                       stock, sign tickets, emit tickets.issued
-gate --> Kaisatsu verifies the QR offline with keys from /.well-known/kippu/ticket-keys
+gate --> Kaisatsu verifies the ticket offline with keys from /.well-known/kippu/ticket-keys
 ```
 
 - No overselling: inventory changes are conditional updates guarded by a database `CHECK`.
@@ -84,5 +96,6 @@ gate --> Kaisatsu verifies the QR offline with keys from /.well-known/kippu/tick
 cargo test --workspace --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo xtask c-example        # build the C ABI and run every test vector through it
+cargo xtask uniffi           # build the UniFFI library and run every test vector in Swift
 cargo xtask size             # Kaisatsu library sizes
 ```
