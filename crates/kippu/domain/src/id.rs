@@ -111,3 +111,11 @@ define_id!(
     /// An image of an event, kept in object storage.
     ImageId
 );
+define_id!(
+    /// Money returned for issued tickets, whose tickets were revoked.
+    RefundId
+);
+define_id!(
+    /// An entry of a deny list: a ticket or an account refused entry.
+    DenialId
+);

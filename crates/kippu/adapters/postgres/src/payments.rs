@@ -1,11 +1,17 @@
 use async_trait::async_trait;
 use kippu_domain::payment::{Attestor, AttestorKey, PaymentAttestation, PaymentDisposition};
-use kippu_domain::{AttestorId, ReservationId};
+use kippu_domain::refund::Refund;
+use kippu_domain::{AttestorId, RefundId, ReservationId, Timestamp};
 use kippu_store::{Insertion, PaymentStore, PaymentsTx, StoreResult};
+use sqlx::types::Json;
 
-use crate::convert::{AttestationRow, AttestorKeyRow, AttestorRow, all, at, optional};
+use crate::convert::{AttestationRow, AttestorKeyRow, AttestorRow, RefundRow, all, at, optional};
 use crate::tx::PostgresTx;
 use crate::{PostgresStore, error, unique};
+
+const REFUND_COLUMNS: &str = "SELECT id, reservation_id, account_id, event_id, attestor_id, \
+     attestation_id, ticket_ids, amount_minor, currency, reason, status, created_at, \
+     completed_at FROM refunds";
 
 const ATTESTATION_COLUMNS: &str = "SELECT attestor_id, attestation_id, reservation_id, amount_minor, \
      currency, occurred_at, received_at, disposition FROM payment_attestations";
@@ -151,6 +157,31 @@ impl PaymentStore for PostgresStore {
         .map_err(error)?;
         all(rows)
     }
+
+    async fn refund(&self, id: RefundId) -> StoreResult<Option<Refund>> {
+        let row = sqlx::query_as::<_, RefundRow>(sqlx::AssertSqlSafe(format!(
+            "{REFUND_COLUMNS} WHERE id = $1"
+        )))
+        .bind(id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(error)?;
+        optional(row)
+    }
+
+    async fn refunds_for_reservation(
+        &self,
+        reservation: ReservationId,
+    ) -> StoreResult<Vec<Refund>> {
+        let rows = sqlx::query_as::<_, RefundRow>(sqlx::AssertSqlSafe(format!(
+            "{REFUND_COLUMNS} WHERE reservation_id = $1 ORDER BY created_at, id"
+        )))
+        .bind(reservation.as_uuid())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(error)?;
+        all(rows)
+    }
 }
 
 #[async_trait]
@@ -208,5 +239,61 @@ impl PaymentsTx for PostgresTx {
         .await
         .map_err(error)?;
         Ok(())
+    }
+
+    async fn insert_refund(&mut self, refund: &Refund) -> StoreResult<Insertion<Refund>> {
+        let inserted = sqlx::query(
+            "INSERT INTO refunds (id, reservation_id, account_id, event_id, attestor_id,
+                                  attestation_id, ticket_ids, amount_minor, currency, reason,
+                                  status, created_at, completed_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(refund.id.as_uuid())
+        .bind(refund.reservation_id.as_uuid())
+        .bind(refund.account_id.as_uuid())
+        .bind(refund.event_id.as_uuid())
+        .bind(refund.attestor_id.as_uuid())
+        .bind(&refund.attestation_id)
+        .bind(Json(&refund.ticket_ids))
+        .bind(refund.amount.amount_minor)
+        .bind(refund.amount.currency.as_str())
+        .bind(refund.reason.as_str())
+        .bind(refund.status.as_str())
+        .bind(at(refund.created_at))
+        .bind(refund.completed_at.map(at))
+        .execute(&mut *self.conn)
+        .await
+        .map_err(error)?;
+        if inserted.rows_affected() == 1 {
+            return Ok(Insertion::Inserted);
+        }
+        let existing = sqlx::query_as::<_, RefundRow>(sqlx::AssertSqlSafe(format!(
+            "{REFUND_COLUMNS} WHERE id = $1"
+        )))
+        .bind(refund.id.as_uuid())
+        .fetch_one(&mut *self.conn)
+        .await
+        .map_err(error)?;
+        Ok(Insertion::Existing(existing.try_into()?))
+    }
+
+    async fn complete_refund(
+        &mut self,
+        id: RefundId,
+        completed_at: Timestamp,
+    ) -> StoreResult<bool> {
+        // Under READ COMMITTED a concurrent confirmation waits for the row lock, then re-checks
+        // `status = 'pending'` against the committed row: only one of them changes it.
+        let completed = sqlx::query(
+            "UPDATE refunds SET status = 'completed', completed_at = $2
+             WHERE id = $1 AND status = 'pending'",
+        )
+        .bind(id.as_uuid())
+        .bind(at(completed_at))
+        .execute(&mut *self.conn)
+        .await
+        .map_err(error)?;
+        Ok(completed.rows_affected() == 1)
     }
 }

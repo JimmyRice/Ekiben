@@ -83,4 +83,21 @@ impl TicketsTx for PostgresTx {
         }
         Ok(())
     }
+
+    async fn revoke_tickets(&mut self, tickets: &[TicketId]) -> StoreResult<u64> {
+        // A transaction that waited for another's lock re-checks `status = 'valid'` against the
+        // committed row (READ COMMITTED), so each ticket is counted by exactly one of them.
+        let mut revoked = 0;
+        for ticket in tickets {
+            revoked += sqlx::query(
+                "UPDATE tickets SET status = 'revoked' WHERE id = $1 AND status = 'valid'",
+            )
+            .bind(ticket.as_uuid())
+            .execute(&mut *self.conn)
+            .await
+            .map_err(error)?
+            .rows_affected();
+        }
+        Ok(revoked)
+    }
 }

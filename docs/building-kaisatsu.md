@@ -99,6 +99,47 @@ Only the library alone, without bindings: `cargo build -p kaisatsu-uniffi --prof
 The `uniffi` dependency is pinned (`=0.31.0`) to the version `uniffi-bindgen-cs` is built on.
 Never mix generated sources with a library from another build.
 
+## After `verify`: tickets to refuse
+
+A valid signature says Kippu issued the ticket, not that its holder may enter. Before opening, a
+gate also checks:
+
+1. **The event.** One key signs every event's tickets: compare `event_id` with the event at this
+   gate.
+2. **The time.** UniFFI's `verify(ticket, now)` checks the validity window; with the C ABI and
+   the Rust crate, call `check_time` yourself (or skip it on a device without a trustworthy
+   clock).
+3. **The deny list.** `ticket_id` must not be among the event's denied tickets: tickets refunded
+   or whose payment was reversed, tickets an organizer denied, and every ticket of an account
+   refused entry. A screenshot carries the same `ticket_id`, so it is refused too.
+
+Fetch the list with an organizer's credentials before doors open, following `next_cursor`, and
+refresh it while they are open — typically on a venue server that hands it to the gates:
+
+```http
+GET /v1/events/{event_id}/denied-tickets?limit=200
+Authorization: Bearer <organizer token>
+```
+
+```json
+{ "items": [{ "ticket_id": "0199…", "ticket_type_id": "0199…", "reason": "revoked" }],
+  "next_cursor": "…" }
+```
+
+Kaisatsu itself does not change: the check uses the `ticket_id` that `verify` returns. On
+firmware, keep the ids as sorted 16-byte arrays and binary search them (10 000 ids are 160 KiB
+and at most 14 comparisons, nothing next to the ~40 µs signature check); in Swift, Kotlin or C#
+a set of strings does. When the list cannot be refreshed, keep the last one: a stale list misses
+denials made since, but never refuses a good ticket — unless a denial was lifted meanwhile, which
+staff can override.
+
+```rust
+let ticket = verifier.verify(&bytes)?;
+ticket.check_time(now)?;
+let refused = ticket.event_id() != this_event
+    || denied.binary_search(&ticket.ticket_id().to_bytes()).is_ok(); // denied: Vec<[u8; 16]>, sorted
+```
+
 ## Why the sizes are what they are
 
 - The C ABI is `no_std`: Ed25519 and SHA-512 are nearly all of its 65 KiB.

@@ -13,17 +13,19 @@ use kippu_domain::admission::AdmissionPolicy;
 use kippu_domain::catalog::{
     Address, Event, EventStatus, EventSummary, Inventory, Sale, TicketType,
 };
+use kippu_domain::denial::{Denial, DenialSubject, DeniedBecause, DeniedTicket};
 use kippu_domain::image::EventImage;
 use kippu_domain::payment::{
     Attestor, AttestorKey, Environment, PaymentAttestation, PaymentDisposition,
 };
 use kippu_domain::purchase::{Basket, PurchaseRequest, PurchaseStatus, RejectionReason};
+use kippu_domain::refund::{Refund, RefundReason, RefundStatus};
 use kippu_domain::reservation::ReservedItem;
 use kippu_domain::reservation::{Reservation, ReservationStatus};
 use kippu_domain::ticket::{Ticket, TicketStatus};
 use kippu_domain::validation::{CountryCode, Email, ProviderName, Slug, Subject};
 use kippu_domain::webhook::Webhook;
-use kippu_domain::{Currency, Money, Timestamp};
+use kippu_domain::{Currency, Money, TicketId, Timestamp};
 use kippu_store::StoreError;
 use sqlx::types::Json;
 use time::OffsetDateTime;
@@ -339,6 +341,7 @@ pub(crate) struct TicketTypeRow {
     valid_from: OffsetDateTime,
     valid_until: OffsetDateTime,
     ticket_extensions: Json<BTreeMap<String, String>>,
+    refundable_until: Option<OffsetDateTime>,
     created_at: OffsetDateTime,
     version: i64,
 }
@@ -358,6 +361,7 @@ impl TryFrom<TicketTypeRow> for TicketType {
             valid_from: instant(row.valid_from),
             valid_until: instant(row.valid_until),
             ticket_extensions: extensions_from_json(row.ticket_extensions)?,
+            refundable_until: row.refundable_until.map(instant),
             created_at: instant(row.created_at),
             version: row.version,
         })
@@ -621,6 +625,94 @@ impl TryFrom<TicketRow> for Ticket {
             issued_at: instant(row.issued_at),
             status,
             encoded: row.encoded,
+        })
+    }
+}
+
+#[derive(sqlx::FromRow)]
+pub(crate) struct RefundRow {
+    id: Uuid,
+    reservation_id: Uuid,
+    account_id: Uuid,
+    event_id: Uuid,
+    attestor_id: Uuid,
+    attestation_id: String,
+    ticket_ids: Json<Vec<TicketId>>,
+    amount_minor: i64,
+    currency: String,
+    reason: String,
+    status: String,
+    created_at: OffsetDateTime,
+    completed_at: Option<OffsetDateTime>,
+}
+
+impl TryFrom<RefundRow> for Refund {
+    type Error = StoreError;
+
+    fn try_from(row: RefundRow) -> Result<Self, StoreError> {
+        Ok(Self {
+            id: row.id.into(),
+            reservation_id: row.reservation_id.into(),
+            account_id: row.account_id.into(),
+            event_id: row.event_id.into(),
+            attestor_id: row.attestor_id.into(),
+            attestation_id: row.attestation_id,
+            ticket_ids: row.ticket_ids.0,
+            amount: money(row.amount_minor, &row.currency)?,
+            reason: parse::<RefundReason>(&row.reason)?,
+            status: parse::<RefundStatus>(&row.status)?,
+            created_at: instant(row.created_at),
+            completed_at: row.completed_at.map(instant),
+        })
+    }
+}
+
+#[derive(sqlx::FromRow)]
+pub(crate) struct DenialRow {
+    id: Uuid,
+    organization_id: Uuid,
+    event_id: Option<Uuid>,
+    subject_kind: String,
+    subject_id: Uuid,
+    note: String,
+    created_at: OffsetDateTime,
+    updated_at: OffsetDateTime,
+    version: i64,
+}
+
+impl TryFrom<DenialRow> for Denial {
+    type Error = StoreError;
+
+    fn try_from(row: DenialRow) -> Result<Self, StoreError> {
+        Ok(Self {
+            id: row.id.into(),
+            organization_id: row.organization_id.into(),
+            event_id: row.event_id.map(Into::into),
+            subject: DenialSubject::from_parts(&row.subject_kind, row.subject_id)
+                .map_err(StoreError::backend)?,
+            note: row.note,
+            created_at: instant(row.created_at),
+            updated_at: instant(row.updated_at),
+            version: row.version,
+        })
+    }
+}
+
+#[derive(sqlx::FromRow)]
+pub(crate) struct DeniedTicketRow {
+    ticket_id: Uuid,
+    ticket_type_id: Uuid,
+    reason: String,
+}
+
+impl TryFrom<DeniedTicketRow> for DeniedTicket {
+    type Error = StoreError;
+
+    fn try_from(row: DeniedTicketRow) -> Result<Self, StoreError> {
+        Ok(Self {
+            ticket_id: row.ticket_id.into(),
+            ticket_type_id: row.ticket_type_id.into(),
+            reason: parse::<DeniedBecause>(&row.reason)?,
         })
     }
 }

@@ -322,6 +322,10 @@ pub struct TicketType {
     /// Extension claims (tags `0x80..=0xFF`) written into every ticket of this type,
     /// such as a hall or a day number. Gates read them with Kaisatsu.
     pub ticket_extensions: BTreeMap<u8, String>,
+    /// Until when buyers may refund tickets of this type themselves (exclusive); never after
+    /// `valid_from`. `null`: the tickets are not refundable by buyers (organizers can still
+    /// refund them).
+    pub refundable_until: Option<Timestamp>,
     /// When the ticket type was created.
     pub created_at: Timestamp,
     /// Incremented on every change.
@@ -348,6 +352,15 @@ impl TicketType {
             return Err(ValidationError::new(
                 "valid_until",
                 "must be after valid_from",
+            ));
+        }
+        if self
+            .refundable_until
+            .is_some_and(|until| until > self.valid_from)
+        {
+            return Err(ValidationError::new(
+                "refundable_until",
+                "must not be after valid_from",
             ));
         }
         for (&tag, value) in &self.ticket_extensions {

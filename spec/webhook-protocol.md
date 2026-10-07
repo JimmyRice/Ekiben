@@ -18,7 +18,9 @@ POST /v1/admin/webhooks
 ```
 
 - `topics` limits what is delivered; empty or absent means every topic:
-  `payment.requested`, `tickets.issued`, `refund.required`, `reservation.expired`.
+  `payment.requested`, `tickets.issued`, `refund.required`, `reservation.expired`,
+  `tickets.revoked`. New topics may be added: a webhook with empty `topics` receives them too,
+  so receivers MUST answer `2xx` to topics they do not handle (see §2).
 - A new webhook receives events recorded from then on, not earlier ones (read the feed for
   those).
 - `url` must use `https` and must not point to a loopback, private, link-local or otherwise
@@ -51,7 +53,8 @@ Kippu-Delivery: <webhook id>:<sequence>
 its position in the outbox, increasing with commit order.
 
 - **Success** is any `2xx` answer within the timeout (10 seconds by default). Redirects are
-  not followed and count as failures.
+  not followed and count as failures. A receiver that does not handle an event's topic still
+  answers `2xx`: anything else blocks every later event (see *Order*).
 - **Order.** Events reach a webhook in sequence order. After a failure nothing later is sent
   until the failed event is accepted.
 - **At least once.** An event may be delivered more than once (a timeout after the receiver

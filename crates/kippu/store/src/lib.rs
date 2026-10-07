@@ -5,6 +5,7 @@ mod accounts;
 mod catalog;
 #[cfg(feature = "conformance")]
 pub mod conformance;
+mod denials;
 mod error;
 mod housekeeping;
 mod images;
@@ -22,6 +23,7 @@ mod webhooks;
 
 pub use accounts::{AccountStore, Session, SessionRenewal, Unlink};
 pub use catalog::{CatalogStore, EventFilter, EventOrder, Favorite};
+pub use denials::DenialStore;
 pub use error::{BoxError, StoreError, StoreResult};
 pub use housekeeping::{AuditEntry, AuditRecord, HousekeepingStore, IdempotencyRecord};
 pub use images::ImageStore;

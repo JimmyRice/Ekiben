@@ -179,3 +179,7 @@ Authorization: Bearer {{buyer_token}}
 
 ### 20. The keys a gate trusts
 GET {{base}}/.well-known/kippu/ticket-keys
+
+### 21. The tickets a gate refuses although their signature is valid
+GET {{base}}/v1/events/{{event_id}}/denied-tickets
+Authorization: Bearer {{organizer_token}}

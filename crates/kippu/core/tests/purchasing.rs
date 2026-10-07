@@ -647,3 +647,76 @@ async fn each_sale_is_first_come_first_served_even_when_sales_run_in_parallel() 
         assert_eq!(request.body["status"], expected, "{:?}", request.body);
     }
 }
+
+#[tokio::test]
+async fn the_attestor_feed_reads_past_other_attestors_events() {
+    let app = TestApp::start().await;
+    let ours = app.attestor("live").await;
+    let theirs = app.attestor("live").await;
+    let our_shop = app.shop(10, 1_000, json!({})).await;
+    app.accept_attestor(&our_shop, &ours.id).await;
+    let their_shop = app.shop(10, 1_000, json!({})).await;
+    app.accept_attestor(&their_shop, &theirs.id).await;
+
+    let checkout = async |buyer: &str, shop: &support::Shop, attestor: &support::Attestor| {
+        let reservation = app.reserve(buyer, shop, 1).await;
+        let checked_out = app
+            .call(
+                Method::POST,
+                &format!(
+                    "/v1/reservations/{}/checkout",
+                    reservation["id"].as_str().unwrap()
+                ),
+                Some(buyer),
+                Some(json!({ "attestor_id": attestor.id })),
+            )
+            .await;
+        assert_eq!(checked_out.status, StatusCode::OK, "{:?}", checked_out.body);
+    };
+    // Three events for the other attestor come first, then one for ours.
+    let (first, second) = (app.buyer().await, app.buyer().await);
+    checkout(&first, &their_shop, &theirs).await;
+    checkout(&first, &their_shop, &theirs).await;
+    checkout(&second, &their_shop, &theirs).await;
+    checkout(&second, &our_shop, &ours).await;
+
+    // A window of two holds only the other attestor's events; the feed reads on.
+    let poll = async |attestor: &support::Attestor, after: i64| {
+        let reply = app
+            .signed(
+                attestor,
+                Method::GET,
+                &format!("/v1/attestor/feed?after={after}&limit=2"),
+                None,
+            )
+            .await;
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+        let position: i64 = reply
+            .headers
+            .get("kippu-feed-position")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        (reply.body.as_array().unwrap().clone(), position)
+    };
+    let (events, position) = poll(&ours, 0).await;
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["event"]["attestor_id"], json!(ours.id));
+    let our_sequence = events[0]["sequence"].as_i64().unwrap();
+    assert_eq!(position, our_sequence);
+    let (events, after_ours) = poll(&ours, position).await;
+    assert!(events.is_empty() && after_ours == position);
+
+    // The other attestor gets its first two, and resumes after the second.
+    let (events, position) = poll(&theirs, 0).await;
+    assert_eq!(events.len(), 2);
+    assert_eq!(position, events[1]["sequence"].as_i64().unwrap());
+    // Its third comes with our event read past, so it never polls before our event again.
+    let (events, position) = poll(&theirs, position).await;
+    assert_eq!(events.len(), 1);
+    assert_eq!(position, our_sequence);
+    let (events, last) = poll(&theirs, position).await;
+    assert!(events.is_empty() && last == our_sequence);
+}

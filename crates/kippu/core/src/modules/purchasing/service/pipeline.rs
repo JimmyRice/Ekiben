@@ -143,6 +143,13 @@ pub(crate) async fn process(state: &AppState, request: &PurchaseRequest) -> ApiR
         .await?
         .ok_or_else(|| ApiError::not_found("sale"))?;
     let ticket_types = store.list_ticket_types(sale.id).await?;
+    let event = store
+        .event(sale.event_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("event"))?;
+    let denied = store
+        .account_denied(event.organization_id, event.id, request.account_id)
+        .await?;
 
     let mut tx = store.begin().await?;
     let Some(current) = tx.purchases().lock_purchase_request(request.id).await? else {
@@ -151,7 +158,12 @@ pub(crate) async fn process(state: &AppState, request: &PurchaseRequest) -> ApiR
     if current.status != PurchaseStatus::Queued {
         return Ok(());
     }
-    if let Some(reason) = precheck(&current, &sale, &ticket_types) {
+    let rejection = if denied {
+        Some(RejectionReason::AccountDenied)
+    } else {
+        precheck(&current, &sale, &ticket_types)
+    };
+    if let Some(reason) = rejection {
         reject(&mut *tx, &current, reason, state).await?;
         return Ok(tx.commit().await?);
     }
@@ -299,10 +311,12 @@ pub(crate) async fn process_batch(state: AppState) -> Result<Progress, BoxError>
 /// Releases what a reservation holds and records its new status.
 pub(super) async fn release(tx: &mut dyn StoreTx, reservation: &Reservation) -> ApiResult<()> {
     let items = line_items(reservation);
-    tx.inventory().release_held(&items).await?;
+    // Quota before stock, each in ticket type order: the order purchases take them in, so a
+    // cancellation or an expiry cannot deadlock with the same buyer's purchase.
     tx.inventory()
         .return_quota(reservation.account_id, &items)
         .await?;
+    tx.inventory().release_held(&items).await?;
     tx.reservations().update_reservation(reservation).await?;
     Ok(())
 }

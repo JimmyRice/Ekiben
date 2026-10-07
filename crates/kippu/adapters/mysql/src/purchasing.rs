@@ -341,6 +341,15 @@ impl InventoryTx for MySqlTx {
         Ok(())
     }
 
+    async fn return_sold(&mut self, items: &[LineItem]) -> StoreResult<()> {
+        // Undoing a sale. `CHECK (sold >= 0)` refuses returning more than was sold: the
+        // quantity is signed, so the subtraction goes negative instead of wrapping.
+        for item in items {
+            self.stock(SELL.undo, item).await?;
+        }
+        Ok(())
+    }
+
     async fn try_sell(&mut self, items: &[LineItem]) -> StoreResult<bool> {
         self.stock_all_or_nothing(items, &SELL).await
     }

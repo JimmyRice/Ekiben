@@ -2,15 +2,16 @@
 //! result into a response. Rules live in the service, not here.
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
+use kippu_domain::refund::Refund;
 use kippu_domain::reservation::Reservation;
-use kippu_domain::{AttestorId, ReservationId};
+use kippu_domain::{AttestorId, RefundId, ReservationId};
 use kippu_store::OutboxRecord;
 
 use super::dto::{
     AttestationRequest, AttestorKeyRequest, AttestorView, CreateAttestorRequest, FeedEvent,
-    FeedQuery, ManualPaymentRequest, RevokedRequest, SettlementView,
+    FeedQuery, ManualPaymentRequest, RefundTicketsRequest, RevokedRequest, SettlementView,
 };
 use super::service::{self, AttestorReport, PaymentResult};
 use super::signature::Attested;
@@ -21,6 +22,9 @@ use crate::http::idempotency::IdempotentByDesign;
 use crate::http::{Json, Listing};
 
 const TAG: &str = "payments";
+
+/// How far the attestor feed was read: the `after` of the next poll.
+const FEED_POSITION: &str = "kippu-feed-position";
 
 /// A settlement response, marked as safe to repeat without the idempotency middleware.
 fn settlement(result: PaymentResult) -> Response {
@@ -136,7 +140,8 @@ pub(crate) async fn attestor_reservation(
     ))
 }
 
-/// For attestors: report a payment, or confirm a refund Kippu asked for.
+/// For attestors: report a payment, confirm a refund Kippu asked for, or report that money
+/// went back without Kippu asking (`reversed`: a chargeback; the tickets are revoked).
 ///
 /// Safe to retry: an attestation is recorded once per `attestation_id`, and every delivery
 /// gets the same answer. A response with status 200 means "recorded — stop retrying", even
@@ -149,6 +154,8 @@ pub(crate) async fn attestor_reservation(
         (status = 200, body = SettlementView),
         (status = 401, body = Problem),
         (status = 403, description = "Attestor not accepted, or sandbox attestor on a live sale", body = Problem),
+        (status = 404, description = "Unknown attestation or refund", body = Problem),
+        (status = 409, description = "A payment for issued tickets confirmed without a refund_id", body = Problem),
         (status = 422, description = "Amount does not match the reservation", body = Problem),
     )
 )]
@@ -182,21 +189,32 @@ pub(crate) async fn manual_payment(
 }
 
 /// For attestors: integration events addressed to you (`payment.requested`, `refund.required`).
-/// Poll it with the last sequence number you processed.
+///
+/// Poll it with `after` set to the `Kippu-Feed-Position` of the previous answer: how far Kippu
+/// read the feed, past events addressed to others. (The sequence of the last event you
+/// processed also works, but can stay behind other attestors' events.)
 #[utoipa::path(
     get, path = "/v1/attestor/feed", tag = TAG,
     params(FeedQuery, ("Kippu-Signature" = String, Header)),
-    responses((status = 200, body = Vec<FeedEvent>), (status = 401, body = Problem))
+    responses(
+        (status = 200, body = Vec<FeedEvent>, headers(
+            ("Kippu-Feed-Position" = i64, description = "The sequence to poll after next")
+        )),
+        (status = 401, body = Problem),
+    )
 )]
 pub(crate) async fn attestor_feed(
     State(state): State<AppState>,
     Query(query): Query<FeedQuery>,
     attested: Attested,
-) -> ApiResult<Json<Vec<FeedEvent>>> {
+) -> ApiResult<Response> {
     let (after, limit) = query.page();
-    Ok(feed(
-        service::attestor_feed(&state, &attested.attestor, after, limit).await?,
-    ))
+    let read = service::attestor_feed(&state, &attested.attestor, after, limit).await?;
+    let mut response = feed(read.events).into_response();
+    response
+        .headers_mut()
+        .insert(FEED_POSITION, HeaderValue::from(read.position));
+    Ok(response)
 }
 
 /// Every integration event, for operators and integrations.
@@ -215,4 +233,88 @@ pub(crate) async fn admin_feed(
     Ok(feed(
         service::full_feed(&state, &principal, after, limit).await?,
     ))
+}
+
+/// Refund tickets of a reservation: they are revoked at once (gates refuse them from now on),
+/// their stock returns to the sale, and the attestor that took the payment is asked to return
+/// the money (`refund.required` with the refund's id). The buyer may do so within the refund
+/// period of the tickets' types; an organizer of the event at any time.
+///
+/// Send an `Idempotency-Key` to retry safely.
+#[utoipa::path(
+    post, path = "/v1/reservations/{reservation_id}/refunds", tag = TAG,
+    security(("bearer" = [])),
+    params(("reservation_id" = ReservationId, Path)),
+    request_body = RefundTicketsRequest,
+    responses(
+        (status = 201, body = Refund),
+        (status = 404, body = Problem),
+        (status = 409, description = "Not issued, already refunded, or outside the refund period", body = Problem),
+        (status = 422, body = Problem),
+    )
+)]
+pub(crate) async fn refund_tickets(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(reservation_id): Path<ReservationId>,
+    Json(request): Json<RefundTicketsRequest>,
+) -> ApiResult<(StatusCode, Json<Refund>)> {
+    let refund =
+        service::request_refund(&state, &principal, reservation_id, request.into()).await?;
+    Ok((StatusCode::CREATED, Json(refund)))
+}
+
+/// A reservation's refunds, oldest first.
+#[utoipa::path(
+    get, path = "/v1/reservations/{reservation_id}/refunds", tag = TAG,
+    security(("bearer" = [])),
+    params(("reservation_id" = ReservationId, Path)),
+    responses((status = 200, body = Listing<Refund>), (status = 404, body = Problem))
+)]
+pub(crate) async fn reservation_refunds(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(reservation_id): Path<ReservationId>,
+) -> ApiResult<Json<Listing<Refund>>> {
+    Ok(Json(Listing::all(
+        service::reservation_refunds(&state, &principal, reservation_id).await?,
+    )))
+}
+
+/// A refund.
+#[utoipa::path(
+    get, path = "/v1/refunds/{refund_id}", tag = TAG,
+    security(("bearer" = [])),
+    params(("refund_id" = RefundId, Path)),
+    responses((status = 200, body = Refund), (status = 404, body = Problem))
+)]
+pub(crate) async fn get_refund(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(refund_id): Path<RefundId>,
+) -> ApiResult<Json<Refund>> {
+    Ok(Json(service::refund(&state, &principal, refund_id).await?))
+}
+
+/// Confirm that cash taken in person was handed back, completing the refund.
+#[utoipa::path(
+    post, path = "/v1/refunds/{refund_id}/manual-confirmation", tag = TAG,
+    security(("bearer" = [])),
+    params(("refund_id" = RefundId, Path)),
+    responses(
+        (status = 200, body = Refund),
+        (status = 403, body = Problem),
+        (status = 404, body = Problem),
+        (status = 409, description = "The payment was not taken in person", body = Problem),
+    )
+)]
+pub(crate) async fn confirm_manual_refund(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(refund_id): Path<RefundId>,
+) -> ApiResult<Response> {
+    let refund = service::confirm_manual_refund(&state, &principal, refund_id).await?;
+    let mut response = Json(refund).into_response();
+    response.extensions_mut().insert(IdempotentByDesign);
+    Ok(response)
 }

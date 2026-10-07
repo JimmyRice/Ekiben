@@ -28,18 +28,20 @@ use kippu_domain::admission::AdmissionPolicy;
 use kippu_domain::catalog::{
     Address, Event, EventStatus, EventSummary, MAX_EVENT_CONTENT_BYTES, Sale, TicketType,
 };
+use kippu_domain::denial::{Denial, DenialSubject, DeniedBecause, DeniedTicket};
 use kippu_domain::image::{EventImage, ImageFormat};
 use kippu_domain::outbox::IntegrationEvent;
 use kippu_domain::payment::{Environment, PaymentAttestation, PaymentDisposition};
 use kippu_domain::purchase::{Basket, LineItem, PurchaseRequest, PurchaseStatus};
+use kippu_domain::refund::{Refund, RefundReason, RefundStatus};
 use kippu_domain::reservation::{Reservation, ReservationStatus, ReservedItem};
 use kippu_domain::ticket::{Ticket, TicketStatus};
 use kippu_domain::validation::{CountryCode, Email, IdempotencyKey, ProviderName, Slug, Subject};
 use kippu_domain::webhook::Webhook;
 use kippu_domain::{
-    AccountId, AttestorId, Currency, Duration, EventId, ImageId, Money, OrganizationId,
-    PurchaseRequestId, ReservationId, SaleId, SessionId, TicketId, TicketTypeId, Timestamp,
-    WebhookId,
+    AccountId, AttestorId, Currency, DenialId, Duration, EventId, ImageId, Money, OrganizationId,
+    PurchaseRequestId, RefundId, ReservationId, SaleId, SessionId, TicketId, TicketTypeId,
+    Timestamp, WebhookId,
 };
 
 use crate::{
@@ -110,6 +112,13 @@ macro_rules! conformance_tests {
             account_listings_resume_exactly,
             favorites_resume_exactly,
             audit_log_reads_newest_first_in_pages,
+            refund_periods_round_trip,
+            tickets_are_revoked_once,
+            refunded_tickets_return_to_stock,
+            refunds_are_recorded_once_and_completed_once,
+            denials_are_idempotent_and_versioned,
+            denial_listings_resume_exactly,
+            denied_tickets_join_every_cause,
         );
     };
     (@cases $mode:tt; $($case:ident),* $(,)?) => {
@@ -192,7 +201,16 @@ struct Catalog {
 }
 
 async fn catalog(store: &dyn Store, capacities: &[u32]) -> Catalog {
-    let event = event_record(organization(store).await);
+    catalog_in(store, organization(store).await, capacities).await
+}
+
+/// Like [`catalog`], for an event of an existing organization.
+async fn catalog_in(
+    store: &dyn Store,
+    organization: OrganizationId,
+    capacities: &[u32],
+) -> Catalog {
+    let event = event_record(organization);
     store.insert_event(&event).await.unwrap();
     let sale = Sale {
         id: SaleId::generate(),
@@ -222,6 +240,7 @@ async fn catalog(store: &dyn Store, capacities: &[u32]) -> Catalog {
             valid_from: now(),
             valid_until: now() + Duration::days(2),
             ticket_extensions: BTreeMap::new(),
+            refundable_until: None,
             created_at: now(),
             version: 1,
         };
@@ -1728,4 +1747,562 @@ pub async fn audit_log_reads_newest_first_in_pages(store: Arc<dyn Store>) {
     assert_eq!(older.len(), 1);
     assert_eq!(older[0].entry.action, "first");
     assert_eq!(older[0].entry.actor, actor);
+}
+
+// ── Refunds and denials ──────────────────────────────────────────────────────────────────
+
+/// Issues `count` tickets of the catalog's first ticket type to a new buyer, the way a
+/// payment does: the stock is held, then sold, and the tickets are recorded.
+async fn issued(store: &dyn Store, catalog: &Catalog, count: u32) -> (Reservation, Vec<Ticket>) {
+    let mut reservation = reservation(store, catalog, ReservationStatus::Issued, now()).await;
+    reservation.items[0].quantity = count;
+    let items = [line(catalog.ticket_types[0], count)];
+    let tickets: Vec<Ticket> = (0..count)
+        .map(|_| Ticket {
+            id: TicketId::generate(),
+            reservation_id: reservation.id,
+            account_id: reservation.account_id,
+            event_id: catalog.event,
+            ticket_type_id: catalog.ticket_types[0],
+            valid_from: now(),
+            valid_until: now() + Duration::days(2),
+            issued_at: now(),
+            status: TicketStatus::Valid,
+            encoded: vec![1, 2, 3],
+        })
+        .collect();
+    let mut tx = store.begin().await.unwrap();
+    assert!(tx.inventory().try_hold(&items).await.unwrap());
+    tx.inventory().sell_held(&items).await.unwrap();
+    tx.tickets().insert_tickets(&tickets).await.unwrap();
+    tx.commit().await.unwrap();
+    (reservation, tickets)
+}
+
+pub async fn refund_periods_round_trip(store: Arc<dyn Store>) {
+    let catalog = catalog(store.as_ref(), &[10]).await;
+    let mut ticket_type = store
+        .ticket_type(catalog.ticket_types[0])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(ticket_type.refundable_until, None);
+
+    ticket_type.refundable_until = Some(now() - Duration::hours(1));
+    ticket_type.version = 2;
+    store.update_ticket_type(&ticket_type, 1).await.unwrap();
+    let stored = store.ticket_type(ticket_type.id).await.unwrap().unwrap();
+    assert_eq!(stored.refundable_until, Some(now() - Duration::hours(1)));
+
+    ticket_type.refundable_until = None;
+    ticket_type.version = 3;
+    store.update_ticket_type(&ticket_type, 2).await.unwrap();
+    let stored = store.ticket_type(ticket_type.id).await.unwrap().unwrap();
+    assert_eq!(stored.refundable_until, None);
+}
+
+pub async fn tickets_are_revoked_once(store: Arc<dyn Store>) {
+    let catalog = catalog(store.as_ref(), &[10]).await;
+    let (_, tickets) = issued(store.as_ref(), &catalog, 2).await;
+    let ids: Vec<TicketId> = tickets.iter().map(|ticket| ticket.id).collect();
+
+    let racers = (0..8).map(|_| {
+        let store = store.clone();
+        let ids = ids.clone();
+        tokio::spawn(async move {
+            let mut tx = store.begin().await.unwrap();
+            let revoked = tx.tickets().revoke_tickets(&ids).await.unwrap();
+            tx.commit().await.unwrap();
+            revoked
+        })
+    });
+    let mut total = 0;
+    for racer in racers {
+        total += racer.await.unwrap();
+    }
+    assert_eq!(
+        total, 2,
+        "each ticket is revoked by exactly one transaction"
+    );
+    for id in &ids {
+        let ticket = store.ticket(*id).await.unwrap().unwrap();
+        assert_eq!(ticket.status, TicketStatus::Revoked);
+    }
+
+    // A dropped transaction revokes nothing.
+    let (_, kept) = issued(store.as_ref(), &catalog, 1).await;
+    let mut tx = store.begin().await.unwrap();
+    assert_eq!(tx.tickets().revoke_tickets(&[kept[0].id]).await.unwrap(), 1);
+    drop(tx);
+    let ticket = store.ticket(kept[0].id).await.unwrap().unwrap();
+    assert_eq!(ticket.status, TicketStatus::Valid);
+}
+
+pub async fn refunded_tickets_return_to_stock(store: Arc<dyn Store>) {
+    let catalog = catalog(store.as_ref(), &[3]).await;
+    let ticket_type = catalog.ticket_types[0];
+    issued(store.as_ref(), &catalog, 3).await;
+    let inventory = store.inventory(ticket_type).await.unwrap().unwrap();
+    assert_eq!((inventory.sold, inventory.available()), (3, 0));
+
+    let mut tx = store.begin().await.unwrap();
+    tx.inventory()
+        .return_sold(&[line(ticket_type, 2)])
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let inventory = store.inventory(ticket_type).await.unwrap().unwrap();
+    assert_eq!((inventory.sold, inventory.available()), (1, 2));
+
+    // The returned stock can be held again; `sold` never goes below zero.
+    let mut tx = store.begin().await.unwrap();
+    assert!(
+        tx.inventory()
+            .try_hold(&[line(ticket_type, 2)])
+            .await
+            .unwrap()
+    );
+    tx.commit().await.unwrap();
+    let mut tx = store.begin().await.unwrap();
+    assert!(
+        tx.inventory()
+            .return_sold(&[line(ticket_type, 2)])
+            .await
+            .is_err()
+    );
+    drop(tx);
+    let inventory = store.inventory(ticket_type).await.unwrap().unwrap();
+    assert_eq!((inventory.held, inventory.sold), (2, 1));
+}
+
+#[expect(clippy::too_many_lines, reason = "one refund's life, told in order")]
+pub async fn refunds_are_recorded_once_and_completed_once(store: Arc<dyn Store>) {
+    let catalog = catalog(store.as_ref(), &[10]).await;
+    let (reservation, tickets) = issued(store.as_ref(), &catalog, 3).await;
+    let payment = PaymentAttestation {
+        attestor_id: AttestorId::MANUAL,
+        attestation_id: format!("pay-{}", unique_suffix()),
+        reservation_id: reservation.id,
+        amount: Money::new(3_000, Currency::JPY).unwrap(),
+        occurred_at: now(),
+        received_at: now(),
+        disposition: PaymentDisposition::Applied,
+    };
+    let mut tx = store.begin().await.unwrap();
+    tx.payments().insert_attestation(&payment).await.unwrap();
+    tx.commit().await.unwrap();
+    let first = Refund {
+        id: RefundId::generate(),
+        reservation_id: reservation.id,
+        account_id: reservation.account_id,
+        event_id: catalog.event,
+        attestor_id: payment.attestor_id,
+        attestation_id: payment.attestation_id.clone(),
+        ticket_ids: vec![tickets[0].id, tickets[1].id],
+        amount: Money::new(2_000, Currency::JPY).unwrap(),
+        reason: RefundReason::Requested,
+        status: RefundStatus::Pending,
+        created_at: now(),
+        completed_at: None,
+    };
+    let second = Refund {
+        id: RefundId::reversal(AttestorId::MANUAL, &first.attestation_id),
+        ticket_ids: vec![tickets[2].id],
+        amount: Money::new(1_000, Currency::JPY).unwrap(),
+        reason: RefundReason::Reversal,
+        status: RefundStatus::Completed,
+        created_at: now() + Duration::seconds(1),
+        completed_at: Some(now() + Duration::seconds(1)),
+        ..first.clone()
+    };
+
+    for refund in [&first, &second] {
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.payments().insert_refund(refund).await.unwrap(),
+            Insertion::Inserted
+        );
+        tx.commit().await.unwrap();
+    }
+    let retry = Refund {
+        amount: Money::new(1, Currency::JPY).unwrap(),
+        ..second.clone()
+    };
+    let mut tx = store.begin().await.unwrap();
+    assert_eq!(
+        tx.payments().insert_refund(&retry).await.unwrap(),
+        Insertion::Existing(second.clone())
+    );
+    tx.commit().await.unwrap();
+
+    assert_eq!(store.refund(first.id).await.unwrap(), Some(first.clone()));
+    assert_eq!(
+        store.refunds_for_reservation(reservation.id).await.unwrap(),
+        vec![first.clone(), second.clone()]
+    );
+    assert_eq!(store.refund(RefundId::generate()).await.unwrap(), None);
+
+    // Concurrent confirmations: one completes it, at the time it gives.
+    let completed_at = now() + Duration::minutes(5);
+    let racers = (0..6).map(|_| {
+        let store = store.clone();
+        let id = first.id;
+        tokio::spawn(async move {
+            let mut tx = store.begin().await.unwrap();
+            let completed = tx
+                .payments()
+                .complete_refund(id, completed_at)
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+            completed
+        })
+    });
+    let mut winners = 0;
+    for racer in racers {
+        winners += u32::from(racer.await.unwrap());
+    }
+    assert_eq!(winners, 1);
+    let stored = store.refund(first.id).await.unwrap().unwrap();
+    assert_eq!(stored.status, RefundStatus::Completed);
+    assert_eq!(stored.completed_at, Some(completed_at));
+
+    let mut tx = store.begin().await.unwrap();
+    assert!(
+        !tx.payments()
+            .complete_refund(second.id, now())
+            .await
+            .unwrap()
+    );
+    assert!(
+        !tx.payments()
+            .complete_refund(RefundId::generate(), now())
+            .await
+            .unwrap()
+    );
+    tx.commit().await.unwrap();
+    assert_eq!(store.refund(second.id).await.unwrap(), Some(second));
+}
+
+fn denial(organization: OrganizationId, event: Option<EventId>, subject: DenialSubject) -> Denial {
+    Denial {
+        id: DenialId::derive(organization, event, subject),
+        organization_id: organization,
+        event_id: event,
+        subject,
+        note: "Resold on an auction site".to_owned(),
+        created_at: now(),
+        updated_at: now(),
+        version: 1,
+    }
+}
+
+pub async fn denials_are_idempotent_and_versioned(store: Arc<dyn Store>) {
+    let organization = organization(store.as_ref()).await;
+    let event = event_record(organization);
+    store.insert_event(&event).await.unwrap();
+    let denied = denial(
+        organization,
+        Some(event.id),
+        DenialSubject::Account(AccountId::generate()),
+    );
+
+    assert_eq!(
+        store.insert_denial(&denied).await.unwrap(),
+        Insertion::Inserted
+    );
+    let again = Denial {
+        note: "Different note".to_owned(),
+        ..denied.clone()
+    };
+    assert_eq!(
+        store.insert_denial(&again).await.unwrap(),
+        Insertion::Existing(denied.clone())
+    );
+    assert_eq!(store.denial(denied.id).await.unwrap(), Some(denied.clone()));
+
+    let edited = Denial {
+        note: "Banned after an incident in 2026".to_owned(),
+        updated_at: now() + Duration::hours(1),
+        version: 2,
+        ..denied.clone()
+    };
+    store.update_denial(&edited, 1).await.unwrap();
+    let stale = Denial {
+        note: "Stale".to_owned(),
+        version: 2,
+        ..denied.clone()
+    };
+    assert!(matches!(
+        store.update_denial(&stale, 1).await,
+        Err(StoreError::Conflict("version"))
+    ));
+    assert_eq!(store.denial(denied.id).await.unwrap(), Some(edited));
+
+    // Organization-wide denials have no event.
+    let everywhere = denial(
+        organization,
+        None,
+        DenialSubject::Ticket(TicketId::generate()),
+    );
+    store.insert_denial(&everywhere).await.unwrap();
+    assert_eq!(
+        store.denial(everywhere.id).await.unwrap(),
+        Some(everywhere.clone())
+    );
+
+    assert!(store.delete_denial(denied.id).await.unwrap());
+    assert!(!store.delete_denial(denied.id).await.unwrap());
+    assert_eq!(store.denial(denied.id).await.unwrap(), None);
+    // Lifted, it can be added again.
+    assert_eq!(
+        store.insert_denial(&denied).await.unwrap(),
+        Insertion::Inserted
+    );
+}
+
+pub async fn denial_listings_resume_exactly(store: Arc<dyn Store>) {
+    let organization = organization(store.as_ref()).await;
+    let event = event_record(organization);
+    store.insert_event(&event).await.unwrap();
+    let other_event = event_record(organization);
+    store.insert_event(&other_event).await.unwrap();
+
+    let mut organization_wide = Vec::new();
+    let mut for_event = Vec::new();
+    for i in 0..5_i64 {
+        // Pairs share a time, so ties are broken by id.
+        let at = now() + Duration::seconds(i / 2);
+        let wide = Denial {
+            created_at: at,
+            updated_at: at,
+            ..denial(
+                organization,
+                None,
+                DenialSubject::Account(AccountId::generate()),
+            )
+        };
+        let own = Denial {
+            created_at: at,
+            updated_at: at,
+            ..denial(
+                organization,
+                Some(event.id),
+                DenialSubject::Ticket(TicketId::generate()),
+            )
+        };
+        let elsewhere = denial(
+            organization,
+            Some(other_event.id),
+            DenialSubject::Ticket(TicketId::generate()),
+        );
+        for denied in [&wide, &own, &elsewhere] {
+            store.insert_denial(denied).await.unwrap();
+        }
+        organization_wide.push(wide);
+        for_event.push(own);
+    }
+
+    let newest_first = |denial: &Denial| (std::cmp::Reverse(denial.created_at), denial.id);
+    organization_wide.sort_by_key(newest_first);
+    for_event.sort_by_key(newest_first);
+    let position = |denial: &Denial| Keyset {
+        at: denial.created_at,
+        id: denial.id.as_uuid(),
+    };
+    for size in [1, 2, 100] {
+        let listed = walk(size, position, async |page| {
+            store
+                .organization_denials(organization, page)
+                .await
+                .unwrap()
+        })
+        .await;
+        assert_eq!(
+            listed, organization_wide,
+            "organization denials in pages of {size}"
+        );
+        let listed = walk(size, position, async |page| {
+            store.event_denials(event.id, page).await.unwrap()
+        })
+        .await;
+        assert_eq!(listed, for_event, "event denials in pages of {size}");
+    }
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "every cause of a denial set up side by side, then read back"
+)]
+pub async fn denied_tickets_join_every_cause(store: Arc<dyn Store>) {
+    let here = catalog(store.as_ref(), &[100]).await;
+    let organization = store
+        .event(here.event)
+        .await
+        .unwrap()
+        .unwrap()
+        .organization_id;
+    // A second event of the same organization, and an event of another organization.
+    let sibling = catalog_in(store.as_ref(), organization, &[100]).await;
+    let stranger = catalog(store.as_ref(), &[100]).await;
+    let stranger_organization = store
+        .event(stranger.event)
+        .await
+        .unwrap()
+        .unwrap()
+        .organization_id;
+
+    let (_, refunded) = issued(store.as_ref(), &here, 2).await;
+    let (_, ticket_denied) = issued(store.as_ref(), &here, 2).await;
+    let (_, everywhere_denied) = issued(store.as_ref(), &here, 1).await;
+    let (held_by_banned, banned_here) = issued(store.as_ref(), &here, 2).await;
+    let (held_by_banned_everywhere, banned_everywhere) = issued(store.as_ref(), &here, 1).await;
+    let (held_by_banned_elsewhere, _) = issued(store.as_ref(), &here, 1).await;
+    let (_, untouched) = issued(store.as_ref(), &here, 2).await;
+    let (_, sibling_tickets) = issued(store.as_ref(), &sibling, 1).await;
+
+    let mut tx = store.begin().await.unwrap();
+    tx.tickets()
+        .revoke_tickets(&[refunded[0].id, refunded[1].id])
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let denials = [
+        // One ticket, for this event; and a revoked ticket, denied too.
+        denial(
+            organization,
+            Some(here.event),
+            DenialSubject::Ticket(ticket_denied[0].id),
+        ),
+        denial(
+            organization,
+            Some(here.event),
+            DenialSubject::Ticket(refunded[0].id),
+        ),
+        // One ticket, for every event of the organization.
+        denial(
+            organization,
+            None,
+            DenialSubject::Ticket(everywhere_denied[0].id),
+        ),
+        // Accounts: for this event, for every event, and for the sibling event only.
+        denial(
+            organization,
+            Some(here.event),
+            DenialSubject::Account(held_by_banned.account_id),
+        ),
+        denial(
+            organization,
+            None,
+            DenialSubject::Account(held_by_banned_everywhere.account_id),
+        ),
+        denial(
+            organization,
+            Some(sibling.event),
+            DenialSubject::Account(held_by_banned_elsewhere.account_id),
+        ),
+        // Another organization's list does not reach this event.
+        denial(
+            stranger_organization,
+            None,
+            DenialSubject::Ticket(untouched[0].id),
+        ),
+        denial(
+            stranger_organization,
+            None,
+            DenialSubject::Account(untouched[1].account_id),
+        ),
+    ];
+    for denied in &denials {
+        store.insert_denial(denied).await.unwrap();
+    }
+
+    let denied_ticket = |ticket: &Ticket, reason| DeniedTicket {
+        ticket_id: ticket.id,
+        ticket_type_id: ticket.ticket_type_id,
+        reason,
+    };
+    let mut expected = vec![
+        denied_ticket(&refunded[0], DeniedBecause::Revoked),
+        denied_ticket(&refunded[1], DeniedBecause::Revoked),
+        denied_ticket(&ticket_denied[0], DeniedBecause::Denied),
+        denied_ticket(&everywhere_denied[0], DeniedBecause::Denied),
+        denied_ticket(&banned_here[0], DeniedBecause::Denied),
+        denied_ticket(&banned_here[1], DeniedBecause::Denied),
+        denied_ticket(&banned_everywhere[0], DeniedBecause::Denied),
+    ];
+    expected.sort_by_key(|denied| denied.ticket_id);
+    for size in [1, 3, 100] {
+        let listed = walk(
+            size,
+            |denied: &DeniedTicket| denied.ticket_id.as_uuid(),
+            async |page| store.denied_tickets(here.event, page).await.unwrap(),
+        )
+        .await;
+        assert_eq!(listed, expected, "denied tickets in pages of {size}");
+    }
+    assert!(
+        store
+            .denied_tickets(sibling.event, PageRequest::first(100))
+            .await
+            .unwrap()
+            .iter()
+            .all(|denied| denied.ticket_id != sibling_tickets[0].id),
+        "a ticket of the sibling event held by nobody denied is admitted"
+    );
+    assert_eq!(
+        store
+            .denied_tickets(stranger.event, PageRequest::first(100))
+            .await
+            .unwrap(),
+        vec![],
+    );
+
+    for (account, expected) in [
+        (held_by_banned.account_id, true),
+        (held_by_banned_everywhere.account_id, true),
+        (held_by_banned_elsewhere.account_id, false),
+        (untouched[1].account_id, false),
+    ] {
+        assert_eq!(
+            store
+                .account_denied(organization, here.event, account)
+                .await
+                .unwrap(),
+            expected
+        );
+    }
+    assert!(
+        store
+            .account_denied(
+                organization,
+                sibling.event,
+                held_by_banned_elsewhere.account_id
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .account_denied(
+                stranger_organization,
+                stranger.event,
+                untouched[1].account_id
+            )
+            .await
+            .unwrap()
+    );
+
+    // Lifting a denial lets its tickets in again.
+    store.delete_denial(denials[3].id).await.unwrap();
+    let listed = store
+        .denied_tickets(here.event, PageRequest::first(100))
+        .await
+        .unwrap();
+    assert!(
+        listed
+            .iter()
+            .all(|denied| denied.ticket_id != banned_here[0].id)
+    );
+    assert_eq!(listed.len(), expected.len() - 2);
 }

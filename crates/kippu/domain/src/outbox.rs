@@ -6,7 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{AccountId, AttestorId, Money, ReservationId, TicketId, Timestamp};
+use crate::refund::RefundReason;
+use crate::{AccountId, AttestorId, EventId, Money, RefundId, ReservationId, TicketId, Timestamp};
 
 /// Something that happened, for consumers outside Kippu.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,7 +36,8 @@ pub enum IntegrationEvent {
         /// The new tickets.
         ticket_ids: Vec<TicketId>,
     },
-    /// An attested payment could not be used and must be returned.
+    /// Money must be returned: an attested payment could not be used, or tickets it paid for
+    /// were refunded.
     #[serde(rename = "refund.required")]
     RefundRequired {
         /// The reservation the payment was for.
@@ -46,6 +48,22 @@ pub enum IntegrationEvent {
         attestation_id: String,
         /// How much to refund.
         amount: Money,
+        /// The refund of issued tickets this is for; absent when the whole payment could not
+        /// be used. Confirm with it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        refund_id: Option<RefundId>,
+    },
+    /// Tickets were revoked: refunded, or their payment reversed. Gates must refuse them.
+    #[serde(rename = "tickets.revoked")]
+    TicketsRevoked {
+        /// The reservation the tickets were bought with.
+        reservation_id: ReservationId,
+        /// The event they admitted to.
+        event_id: EventId,
+        /// The revoked tickets.
+        ticket_ids: Vec<TicketId>,
+        /// Why.
+        reason: RefundReason,
     },
     /// An unpaid reservation lapsed and its inventory was released.
     #[serde(rename = "reservation.expired")]
@@ -57,11 +75,12 @@ pub enum IntegrationEvent {
 
 impl IntegrationEvent {
     /// Every topic there is.
-    pub const TOPICS: [&'static str; 4] = [
+    pub const TOPICS: [&'static str; 5] = [
         "payment.requested",
         "tickets.issued",
         "refund.required",
         "reservation.expired",
+        "tickets.revoked",
     ];
 
     /// The reservation the event is about. Every event concerns one.
@@ -70,7 +89,8 @@ impl IntegrationEvent {
             Self::PaymentRequested { reservation_id, .. }
             | Self::TicketsIssued { reservation_id, .. }
             | Self::RefundRequired { reservation_id, .. }
-            | Self::ReservationExpired { reservation_id } => *reservation_id,
+            | Self::ReservationExpired { reservation_id }
+            | Self::TicketsRevoked { reservation_id, .. } => *reservation_id,
         }
     }
 
@@ -81,6 +101,7 @@ impl IntegrationEvent {
             Self::TicketsIssued { .. } => "tickets.issued",
             Self::RefundRequired { .. } => "refund.required",
             Self::ReservationExpired { .. } => "reservation.expired",
+            Self::TicketsRevoked { .. } => "tickets.revoked",
         }
     }
 }

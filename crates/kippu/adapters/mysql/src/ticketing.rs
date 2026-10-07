@@ -86,4 +86,21 @@ impl TicketsTx for MySqlTx {
         }
         Ok(())
     }
+
+    async fn revoke_tickets(&mut self, tickets: &[TicketId]) -> StoreResult<u64> {
+        // rows_affected counts matched rows, so the status test must be in the WHERE clause: a
+        // ticket another transaction revoked first no longer matches once its lock is released.
+        let mut revoked = 0;
+        for ticket in tickets {
+            revoked += sqlx::query(
+                "UPDATE tickets SET status = 'revoked' WHERE id = ? AND status = 'valid'",
+            )
+            .bind(ticket.as_uuid())
+            .execute(&mut *self.conn)
+            .await
+            .map_err(error)?
+            .rows_affected();
+        }
+        Ok(revoked)
+    }
 }

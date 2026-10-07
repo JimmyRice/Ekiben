@@ -84,8 +84,9 @@ pub struct Hold {
 
 /// Stock and per-account limits inside a transaction.
 ///
-/// Callers pass items sorted by ticket type, which keeps lock order consistent and rules out
-/// deadlocks between concurrent transactions.
+/// Callers pass items sorted by ticket type, and change an account's quota before stock in
+/// the same transaction, which keeps lock order consistent and rules out deadlocks between
+/// concurrent transactions.
 #[async_trait]
 pub trait InventoryTx: Send {
     /// Moves `quantity` tickets of every item from available to held.
@@ -99,6 +100,11 @@ pub trait InventoryTx: Send {
 
     /// Moves tickets from held to sold (payment).
     async fn sell_held(&mut self, items: &[LineItem]) -> StoreResult<()>;
+
+    /// Moves tickets from sold back to available (a refund).
+    ///
+    /// **Contract:** `sold` never drops below zero.
+    async fn return_sold(&mut self, items: &[LineItem]) -> StoreResult<()>;
 
     /// Moves tickets straight from available to sold (a late payment re-acquiring stock).
     ///

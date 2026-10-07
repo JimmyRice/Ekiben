@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use kippu_domain::payment::{Attestor, AttestorKey, PaymentAttestation, PaymentDisposition};
-use kippu_domain::{AttestorId, ReservationId};
+use kippu_domain::refund::Refund;
+use kippu_domain::{AttestorId, RefundId, ReservationId, Timestamp};
 
 use crate::{Insertion, StoreResult};
 
@@ -46,6 +47,12 @@ pub trait PaymentStore {
         &self,
         reservation: ReservationId,
     ) -> StoreResult<Vec<PaymentAttestation>>;
+
+    /// Looks a refund up by id.
+    async fn refund(&self, id: RefundId) -> StoreResult<Option<Refund>>;
+    /// A reservation's refunds, oldest first (refunds recorded together in id order).
+    async fn refunds_for_reservation(&self, reservation: ReservationId)
+    -> StoreResult<Vec<Refund>>;
 }
 
 /// Attestations inside a transaction.
@@ -68,4 +75,16 @@ pub trait PaymentsTx: Send {
         attestation_id: &str,
         disposition: PaymentDisposition,
     ) -> StoreResult<()>;
+
+    /// Records a refund.
+    ///
+    /// **Contract:** the id is unique. Recording a refund whose id exists writes nothing and
+    /// returns the stored one, so a derived id makes the refund happen once.
+    async fn insert_refund(&mut self, refund: &Refund) -> StoreResult<Insertion<Refund>>;
+
+    /// Marks a pending refund completed at `at`. Returns whether this call completed it.
+    ///
+    /// **Contract:** only a `pending` refund changes, so of concurrent confirmations exactly
+    /// one returns `true`.
+    async fn complete_refund(&mut self, id: RefundId, at: Timestamp) -> StoreResult<bool>;
 }
