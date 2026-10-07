@@ -222,6 +222,6 @@ async fn outbox_events_are_relayed_once_and_in_order() {
     app.drain("event-relay").await;
     let published = bus.published.lock().unwrap().clone();
     let outbox = app.app.state().store().outbox_after(0, 100).await.unwrap();
-    assert!(!outbox.is_empty());
+    assert_ne!(outbox.len(), 0, "the checkout recorded events");
     assert_eq!(published, outbox, "every event, once, in order");
 }
