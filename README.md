@@ -6,6 +6,10 @@
 > protocols) may change in breaking ways at any time, without notice or migration path.
 > **Do not use it in production without thorough testing of your own.**
 
+> [!NOTE]
+> **Issues and pull requests are disabled** on the GitHub repository while the project is
+> unfinished. Contributions, including merging other branches, are not being accepted for now.
+
 Ticketing infrastructure for conventions. Going to a convention is like passing through the
 ticket gate (改札) into another world — so the pieces are named after a Japanese train journey:
 
