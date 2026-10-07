@@ -1,0 +1,36 @@
+[package]
+name = "kaisatsu"
+description = "Kaisatsu (改札): minimal, no_std verification of tickets issued by Kippu."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = true
+categories = ["cryptography", "no-std", "embedded"]
+keywords = ["ticket", "ed25519", "verification", "no_std", "qr"]
+
+[features]
+default = []
+## Heap-backed conveniences.
+alloc = []
+## Base45 (RFC 9285) decoding, plus encoding with `alloc`: one way to carry a ticket as QR
+## alphanumeric text. Off by default; verification itself takes the ticket's bytes.
+base45 = []
+## Ticket encoding and signing, used by the Kippu backend.
+issuer = ["alloc", "ed25519-dalek/zeroize"]
+
+[dependencies]
+ed25519-dalek.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+hex.workspace = true
+proptest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[[test]]
+name = "issue_and_verify"
+required-features = ["issuer"]
+
+[lints]
+workspace = true

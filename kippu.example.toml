@@ -1,0 +1,99 @@
+# Kippu configuration.
+#
+# Sources, from lowest to highest priority: built-in defaults, this file (`--config` or
+# KIPPU_CONFIG), environment variables, command-line flags. Every key below can be set from the
+# environment as KIPPU_<SECTION>__<KEY>, e.g. KIPPU_DATABASE__URL or KIPPU_KEYS__TOKEN_SIGNING_KEY.
+# Keep secrets in the environment or a secrets manager, not in files.
+#
+# Print the effective configuration (secrets redacted) with `kippu config check`.
+
+[server]
+listen = "0.0.0.0:8080"
+request_timeout_seconds = 30
+max_body_bytes = 1048576
+# Browser origins allowed to call the API. Empty disables CORS.
+cors_allowed_origins = []
+
+[database]
+# Required: Kippu keeps no state of its own. The scheme selects the adapter.
+url = "sqlite:///var/lib/kippu/kippu.db"
+# Apply migrations on start. Set to false to run `kippu migrate` as a deployment step instead.
+auto_migrate = true
+
+[issuer]
+# Written into every ticket's `issuer` claim, and the audience root tokens must name.
+id = "kippu.example.org"
+
+[keys]
+# Both keys are required and must be identical on every instance. Generate each with
+# `kippu keygen` and provide them through the environment:
+#   KIPPU_KEYS__TICKET_SIGNING_KEY   signs tickets (public key published for gates)
+#   KIPPU_KEYS__TOKEN_SIGNING_KEY    signs access tokens, queue tickets and admission passes
+#   KIPPU_KEYS__WEBHOOK_SIGNING_KEY  signs webhook deliveries (optional; enables webhooks)
+#
+# After rotating the ticket key, list the previous public key here so gates keep accepting
+# tickets issued before the rotation:
+retired_ticket_keys = []
+
+[root]
+# Root has no password and no database record. Whoever holds a private key matching one of
+# these public keys can mint a root token: `kippu root-token --key root.key --name owner`.
+max_token_ttl_seconds = 600
+# [[root.keys]]
+# name = "owner"
+# public_key = "<contents of root.pub from `kippu keygen --out root`>"
+
+[auth]
+access_token_ttl_seconds = 900
+refresh_token_ttl_seconds = 2592000
+queue_ticket_ttl_seconds = 21600
+admission_pass_ttl_seconds = 600
+# Link an external sign-in (Sign in with Apple, WeChat…) to the existing account with the same
+# email when the provider verified it. Kippu does not verify registration emails, so only turn
+# this on if every account's email is known to be verified.
+link_by_verified_email = false
+
+[queue]
+# Optional NATS JetStream in front of the database (KIPPU_QUEUE__URL). Without it the database
+# is the durable queue and integration events are read from the outbox feed.
+# url = "nats://nats.internal:4222"
+purchase_inbox = true   # absorb purchase bursts in JetStream; workers persist them
+relay_events = true     # publish outbox events to kippu.events.<topic>
+inbox_batch_size = 200
+relay_batch_size = 200
+interval_ms = 200
+
+[images]
+# Event images live in an object store, never on an instance's disk. Without `url`, uploads
+# answer 501. Credentials come from the provider's environment variables (AWS_ACCESS_KEY_ID,
+# GOOGLE_SERVICE_ACCOUNT, AZURE_STORAGE_ACCOUNT_KEY, …).
+# url = "s3://kippu-images/production"
+# public_base_url = "https://images.example.org/production"   # serve through a CDN instead
+max_bytes = 10485760
+max_per_event = 20
+# [images.options]
+# aws_endpoint = "https://minio.internal:9000"   # S3-compatible services
+# aws_region = "auto"
+
+[webhooks]
+# Deliveries are signed with keys.webhook_signing_key (KIPPU_KEYS__WEBHOOK_SIGNING_KEY); without
+# it webhooks are unavailable. Receivers verify with /.well-known/kippu/webhook-keys.
+interval_ms = 1000
+batch_size = 50
+timeout_seconds = 10
+lease_seconds = 60
+# Leave both off in production: they let a registered URL reach Kippu's own network.
+allow_http = false
+allow_private_networks = false
+
+[workers]
+# Background work runs on every instance; all tasks coordinate through the database.
+enabled = true
+purchase_batch_size = 50
+purchase_interval_ms = 200
+purchase_lease_seconds = 30
+# Sales processed at once per batch, when the database allows concurrent writers (PostgreSQL,
+# MySQL). Requests of one sale are always processed in the order they were accepted.
+purchase_concurrency = 8
+expiry_interval_ms = 1000
+admission_interval_ms = 1000

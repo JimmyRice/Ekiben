@@ -1,0 +1,23 @@
+[package]
+name = "kippu-store"
+description = "Kippu's storage ports and the consistency contract every adapter must honour."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+## The conformance test suite every adapter runs against itself.
+conformance = ["dep:tokio"]
+
+[dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+futures-util.workspace = true
+kippu-domain.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, optional = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+uuid = { workspace = true, features = ["v7"] }
+
+[lints]
+workspace = true

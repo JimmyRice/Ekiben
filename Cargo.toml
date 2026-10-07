@@ -1,6 +1,237 @@
-[package]
-name = "ekiben"
+# Ekiben (駅弁) — ticketing infrastructure for conventions.
+#
+#   crates/kippu/     Kippu (切符): the stateless ticketing backend, split into layered crates.
+#   crates/kaisatsu/  Kaisatsu (改札): the minimal, `no_std` ticket verification library.
+#   crates/ffi/       Language bindings for Kaisatsu.
+#   crates/xtask/     Repository automation (`cargo xtask`).
+#
+# This manifest is both the workspace root and the `ekiben` package, whose only job is
+# to produce the batteries-included `kippu` binary from `src/main.rs`.
+
+[workspace]
+resolver = "3"
+members = [
+    # Backend
+    "crates/kippu/domain",
+    "crates/kippu/store",
+    "crates/kippu/telemetry",
+    "crates/kippu/core",
+    "crates/kippu/server",
+    "crates/kippu/adapters/sqlite",
+    "crates/kippu/adapters/postgres",
+    "crates/kippu/adapters/mysql",
+    "crates/kippu/adapters/nats",
+    "crates/kippu/adapters/objects-common",
+    "crates/kippu/adapters/objects-s3",
+    "crates/kippu/adapters/objects-gcs",
+    "crates/kippu/adapters/objects-azure",
+    # Ticket verification core
+    "crates/kaisatsu",
+    # Bindings
+    "crates/ffi/c",
+    "crates/ffi/uniffi",
+    # Tooling
+    "crates/xtask",
+]
+exclude = ["crates/kaisatsu/fuzz"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.98"
+publish = false
+
+[workspace.dependencies]
+# ── Internal crates ─────────────────────────────────────────────────────────────
+kaisatsu = { path = "crates/kaisatsu", version = "0.1.0", default-features = false }
+kippu-domain = { path = "crates/kippu/domain" }
+kippu-store = { path = "crates/kippu/store" }
+kippu-telemetry = { path = "crates/kippu/telemetry" }
+kippu-store-sqlite = { path = "crates/kippu/adapters/sqlite" }
+kippu-store-postgres = { path = "crates/kippu/adapters/postgres" }
+kippu-store-mysql = { path = "crates/kippu/adapters/mysql" }
+kippu-nats = { path = "crates/kippu/adapters/nats" }
+kippu-objects-common = { path = "crates/kippu/adapters/objects-common" }
+kippu-objects-s3 = { path = "crates/kippu/adapters/objects-s3" }
+kippu-objects-gcs = { path = "crates/kippu/adapters/objects-gcs" }
+kippu-objects-azure = { path = "crates/kippu/adapters/objects-azure" }
+kippu-core = { path = "crates/kippu/core" }
+kippu-server = { path = "crates/kippu/server", default-features = false }
+
+# ── Async runtime & HTTP ────────────────────────────────────────────────────────
+async-trait = "0.1.92"
+axum = "0.8.9"
+bytes = "1.12"
+http = "1"
+http-body-util = "0.1"
+tokio = "1.53"
+tokio-util = "0.7.19"
+tower = "0.5.3"
+tower-http = "0.7.1"
+
+# ── Serialization & domain primitives ───────────────────────────────────────────
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+time = "0.3.55"
+uuid = "1.27"
+
+# ── Storage ─────────────────────────────────────────────────────────────────────
+sqlx = { version = "0.9.0", default-features = false }
+
+# ── Configuration, CLI & errors ─────────────────────────────────────────────────
+clap = { version = "4.6", features = ["derive", "env"] }
+figment = "0.10.19"
+thiserror = "2.0.21"
+
+# ── Cryptography ────────────────────────────────────────────────────────────────
+argon2 = "0.6"
+base64 = "0.23"
+ed25519-dalek = { version = "3.0", default-features = false }
+getrandom = "0.4"
+secrecy = "0.10.3"
+sha2 = { version = "0.11", default-features = false }
+
+# ── Outbound HTTP (webhooks) ────────────────────────────────────────────────────
+# TLS through rustls with ring, like sqlx: no second crypto backend to build.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "http2"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8"
+
+# ── Messaging ───────────────────────────────────────────────────────────────────
+async-nats = { version = "0.50", default-features = false }
+futures-util = "0.3"
+
+# ── Object storage (event images) ───────────────────────────────────────────────
+# Real object stores only (no `fs`): Kippu keeps no state on its own disks. Each provider's
+# adapter crate turns on its own `*-base` feature.
+object_store = { version = "0.14", default-features = false, features = ["reqwest", "ring"] }
+
+# ── Observability & API documentation ───────────────────────────────────────────
+tracing = "0.1.44"
+tracing-subscriber = "0.3.23"
+utoipa = "6.0"
+utoipa-axum = "0.3"
+
+# ── Language bindings ───────────────────────────────────────────────────────────
+# Pinned to the release the C# generator (uniffi-bindgen-cs) is built on: generated sources
+# and the library must come from the same UniFFI contract version.
+uniffi = { version = "=0.31.0", default-features = false }
+
+# ── Binary ──────────────────────────────────────────────────────────────────────
+mimalloc = "0.1.52"
+
+# ── Testing & tooling ───────────────────────────────────────────────────────────
+cbindgen = "0.29"
+hex = "0.4.3"
+proptest = "1.11"
+tempfile = "3.27"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+unreachable_pub = "warn"
+unused_qualifications = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Pedantic lints that add noise without improving readability.
+missing_errors_doc = "allow"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+# Restriction lints we opt into. Tests may unwrap (see clippy.toml).
+dbg_macro = "warn"
+expect_used = "warn"
+print_stdout = "warn"
+todo = "warn"
+unwrap_used = "warn"
+
+# ── The `ekiben` package: the `kippu` server binary ─────────────────────────────
+
+[package]
+name = "ekiben"
+description = "The batteries-included `kippu` server binary."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "kippu"
+path = "src/main.rs"
+
+[features]
+default = ["sqlite", "postgres", "mysql", "nats", "s3", "gcs", "azure", "mimalloc"]
+## Storage adapters compiled into the binary.
+sqlite = ["kippu-server/sqlite"]
+postgres = ["kippu-server/postgres"]
+mysql = ["kippu-server/mysql"]
+nats = ["kippu-server/nats"]
+## Object storage for event images: Amazon S3 and compatible services, Google Cloud Storage,
+## Azure Blob Storage.
+s3 = ["kippu-server/s3"]
+gcs = ["kippu-server/gcs"]
+azure = ["kippu-server/azure"]
+## Use mimalloc as the global allocator.
+mimalloc = ["dep:mimalloc"]
+## Let `kippu verify` read tickets carried as Base45 text.
+base45 = ["kippu-server/base45"]
 
 [dependencies]
+kippu-core.workspace = true
+kippu-server.workspace = true
+mimalloc = { workspace = true, optional = true }
+
+[lints]
+workspace = true
+
+# ── Build profiles ──────────────────────────────────────────────────────────────
+
+# Debug builds compile the crypto crates optimized: unoptimized Argon2 and Ed25519 make tests
+# crawl, and these crates are not what anyone steps through in a debugger.
+[profile.dev.package]
+argon2.opt-level = 3
+blake2.opt-level = 3
+curve25519-dalek.opt-level = 3
+ed25519-dalek.opt-level = 3
+sha2.opt-level = 3
+
+# Server builds: favour throughput.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "debuginfo" # Keep symbol names so panic backtraces stay readable.
+panic = "unwind"    # A panicking request is caught by tower-http instead of killing the process.
+
+# Kaisatsu FFI / WebAssembly / microcontroller builds: favour size.
+# Embedded targets can squeeze further with `CARGO_PROFILE_RELEASE_SMALL_OPT_LEVEL=z`.
+[profile.release-small]
+inherits = "release"
+opt-level = "s"
+panic = "abort"
+strip = "symbols"
+
+# Kippu server distribution builds (`cargo build --profile dist`): balance throughput and size.
+# Size-optimized by default (the code is dominated by SQL, TLS and glue that waits on I/O), with
+# the CPU-bound hot paths kept at full optimization. Symbols are stripped: errors carry their
+# origin through `#[track_caller]`, not backtraces. Unwinding stays on, as in `release`.
+[profile.dist]
+inherits = "release"
+opt-level = "s"
+strip = "symbols"
+
+[profile.dist.package]
+# Password hashing and ticket signing.
+argon2.opt-level = 3
+blake2.opt-level = 3
+curve25519-dalek.opt-level = 3
+ed25519-dalek.opt-level = 3
+sha2.opt-level = 3
+# Request path.
+bytes.opt-level = 3
+h2.opt-level = 3
+httparse.opt-level = 3
+hyper.opt-level = 3
+serde_json.opt-level = 3
+tokio.opt-level = 3

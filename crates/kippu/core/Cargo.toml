@@ -1,0 +1,53 @@
+[package]
+name = "kippu-core"
+description = "Kippu's application core: modules, authentication, HTTP API and background workers."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+argon2.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+base64.workspace = true
+bytes.workspace = true
+ed25519-dalek = { workspace = true, features = ["fast", "zeroize", "pkcs8", "pem", "rand_core"] }
+getrandom.workspace = true
+hex.workspace = true
+http-body-util.workspace = true
+kaisatsu = { workspace = true, features = ["issuer"] }
+kippu-domain = { workspace = true, features = ["openapi"] }
+kippu-store.workspace = true
+kippu-telemetry.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+rustls-native-certs.workspace = true
+secrecy = { workspace = true, features = ["serde"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio-util = { workspace = true, features = ["rt"] }
+tower.workspace = true
+tower-http = { workspace = true, features = ["trace", "request-id", "catch-panic", "timeout", "cors", "util"] }
+tracing.workspace = true
+utoipa = { workspace = true, features = ["uuid"] }
+utoipa-axum.workspace = true
+uuid.workspace = true
+
+
+[dev-dependencies]
+kippu-objects-common.workspace = true
+kippu-store-mysql.workspace = true
+kippu-store-postgres.workspace = true
+kippu-store-sqlite.workspace = true
+object_store.workspace = true
+sqlx = { workspace = true, features = ["postgres", "mysql"] }
+tempfile.workspace = true
+tower = { workspace = true, features = ["util"] }
+
+[lints]
+workspace = true

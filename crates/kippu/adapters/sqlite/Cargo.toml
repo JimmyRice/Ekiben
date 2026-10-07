@@ -1,0 +1,24 @@
+[package]
+name = "kippu-store-sqlite"
+description = "SQLite storage adapter for Kippu."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+kippu-domain.workspace = true
+kippu-store.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx = { workspace = true, features = ["sqlite-bundled", "runtime-tokio", "migrate", "macros", "uuid"] }
+uuid.workspace = true
+
+[dev-dependencies]
+kippu-store = { workspace = true, features = ["conformance"] }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

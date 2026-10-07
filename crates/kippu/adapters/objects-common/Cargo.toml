@@ -1,0 +1,24 @@
+[package]
+name = "kippu-objects-common"
+description = "Shared parts of Kippu's object storage adapters: the `object_store` bridge to the port."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+futures-util.workspace = true
+kippu-store.workspace = true
+object_store.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+
+[dev-dependencies]
+kippu-store = { workspace = true, features = ["conformance"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+uuid = { workspace = true, features = ["v7"] }
+
+[lints]
+workspace = true

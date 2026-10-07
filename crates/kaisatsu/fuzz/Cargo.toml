@@ -1,0 +1,31 @@
+# Fuzz targets for Kaisatsu's parser. Not a workspace member; run with cargo-fuzz:
+#
+#     cargo install cargo-fuzz
+#     cargo +nightly fuzz run verify      (from the kaisatsu/ directory)
+
+[package]
+name = "kaisatsu-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+kaisatsu = { path = "..", features = ["issuer", "base45"] }
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "verify"
+path = "fuzz_targets/verify.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "base45"
+path = "fuzz_targets/base45.rs"
+test = false
+doc = false
+bench = false

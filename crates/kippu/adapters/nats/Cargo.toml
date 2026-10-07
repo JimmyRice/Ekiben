@@ -1,0 +1,24 @@
+[package]
+name = "kippu-nats"
+description = "NATS JetStream for Kippu: a purchase inbox in front of the database, and an event bus."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-nats = { workspace = true, features = ["ring", "jetstream", "nkeys", "server_2_10", "server_2_11"] }
+async-trait.workspace = true
+futures-util.workspace = true
+kippu-domain.workspace = true
+kippu-store.workspace = true
+kippu-telemetry.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+async-nats = { workspace = true, features = ["ring", "jetstream"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+uuid = { workspace = true, features = ["v7"] }
+
+[lints]
+workspace = true

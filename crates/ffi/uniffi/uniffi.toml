@@ -1,0 +1,11 @@
+# Passed to the generators by `cargo xtask uniffi` (`--config`).
+
+[bindings.kotlin]
+package_name = "org.ekiben.kaisatsu"
+cdylib_name = "kaisatsu_uniffi"
+
+[bindings.csharp]
+namespace = "Ekiben.Kaisatsu"
+cdylib_name = "kaisatsu_uniffi"
+# The types are part of the NuGet package's API.
+access_modifier = "public"

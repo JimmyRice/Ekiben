@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Packed by `cargo xtask uniffi nuget`. The C# is generated into target/uniffi/csharp, and
+       the native libraries are collected as target/uniffi/nuget-natives/<rid>/native/. -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <PackageId>Ekiben.Kaisatsu</PackageId>
+    <Version>0.1.0</Version>
+    <Description>Verify Kippu tickets from .NET.</Description>
+    <PackageTags>ticket;ed25519;verification</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="../../../../target/uniffi/csharp/*.cs" />
+    <None Include="../../../../target/uniffi/nuget-natives/**/*" Pack="true" PackagePath="runtimes" />
+  </ItemGroup>
+
+</Project>

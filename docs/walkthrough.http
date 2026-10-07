@@ -1,0 +1,172 @@
+### Kippu walkthrough — run the requests from top to bottom (RustRover / IntelliJ HTTP client).
+#
+# Prepare keys and start the server first, as described in docs/walkthrough.md, then fill in
+# the three values below. Every other id is captured from the responses as you go.
+
+@base = http://localhost:8080
+# Output of: kippu root-token --config kippu.toml --key root.key --name owner   (valid 10 min)
+@root_token = paste-the-root-token-here
+# Contents of attestor.pub (from: kippu keygen --out attestor)
+@attestor_public_key = paste-attestor.pub-here
+
+### 1. Root creates an organization
+POST {{base}}/v1/admin/organizations
+Authorization: Bearer {{root_token}}
+Content-Type: application/json
+
+{ "slug": "comiket", "name": "Comic Market" }
+
+> {% client.global.set("organization_id", response.body.id); %}
+
+### 2. Root creates an organizer account
+POST {{base}}/v1/admin/accounts
+Authorization: Bearer {{root_token}}
+Content-Type: application/json
+
+{
+  "email": "staff@example.org",
+  "password": "correct horse battery",
+  "display_name": "Staff",
+  "role": "organizer"
+}
+
+> {% client.global.set("organizer_id", response.body.id); %}
+
+### 3. … and makes it a member of the organization (204)
+PUT {{base}}/v1/admin/organizations/{{organization_id}}/members/{{organizer_id}}
+Authorization: Bearer {{root_token}}
+
+### 4. The organizer signs in
+POST {{base}}/v1/auth/login
+Content-Type: application/json
+
+{ "email": "staff@example.org", "password": "correct horse battery" }
+
+> {% client.global.set("organizer_token", response.body.access_token.token); %}
+
+### 5. The organizer creates an event (a draft)
+POST {{base}}/v1/organizations/{{organization_id}}/events
+Authorization: Bearer {{organizer_token}}
+Content-Type: application/json
+
+{
+  "slug": "c110",
+  "title": "Comic Market 110",
+  "venue": "Tokyo Big Sight",
+  "starts_at": "2027-08-16T10:00:00+09:00",
+  "ends_at": "2027-08-17T16:00:00+09:00",
+  "content": "<h1>Comic Market 110</h1><p>Two days at Tokyo Big Sight.</p>"
+}
+
+> {% client.global.set("event_id", response.body.id); %}
+
+### 6. … opens a sale for it (open admission: no waiting room)
+POST {{base}}/v1/events/{{event_id}}/sales
+Authorization: Bearer {{organizer_token}}
+Content-Type: application/json
+
+{
+  "name": "General",
+  "opens_at": "2026-10-01T00:00:00Z",
+  "closes_at": "2027-08-01T00:00:00Z"
+}
+
+> {% client.global.set("sale_id", response.body.id); %}
+
+### 7. … and adds a ticket type. Extension 128 is printed on every ticket.
+POST {{base}}/v1/sales/{{sale_id}}/ticket-types
+Authorization: Bearer {{organizer_token}}
+Content-Type: application/json
+
+{
+  "name": "Day 1",
+  "price": { "amount_minor": 2500, "currency": "JPY" },
+  "capacity": 100,
+  "valid_from": "2027-08-16T08:00:00+09:00",
+  "valid_until": "2027-08-17T00:00:00+09:00",
+  "ticket_extensions": { "128": "EAST-1" }
+}
+
+> {% client.global.set("ticket_type_id", response.body.id); %}
+
+### 8. Root registers a payment attestor with its public key
+POST {{base}}/v1/admin/attestors
+Authorization: Bearer {{root_token}}
+Content-Type: application/json
+
+{
+  "name": "Card gateway",
+  "environment": "live",
+  "keys": [{ "key_id": "k1", "public_key": "{{attestor_public_key}}" }]
+}
+
+> {% client.global.set("attestor_id", response.body.id); %}
+
+### 9. The organizer accepts the attestor for the sale: PATCH sends only what changes
+PATCH {{base}}/v1/sales/{{sale_id}}
+Authorization: Bearer {{organizer_token}}
+Content-Type: application/merge-patch+json
+
+{ "version": 1, "accepted_attestors": ["{{attestor_id}}"] }
+
+### 10. … and publishes the event
+PATCH {{base}}/v1/events/{{event_id}}
+Authorization: Bearer {{organizer_token}}
+Content-Type: application/merge-patch+json
+
+{ "version": 1, "status": "published" }
+
+### 11. A buyer signs up
+POST {{base}}/v1/auth/register
+Content-Type: application/json
+
+{ "email": "miku@example.org", "password": "correct horse battery", "display_name": "Miku" }
+
+### 12. … and signs in
+POST {{base}}/v1/auth/login
+Content-Type: application/json
+
+{ "email": "miku@example.org", "password": "correct horse battery" }
+
+> {% client.global.set("buyer_token", response.body.access_token.token); %}
+
+### 13. Anyone can browse published events
+GET {{base}}/v1/events
+
+### 14. The buyer asks for two tickets (202; send it again and nothing changes)
+POST {{base}}/v1/sales/{{sale_id}}/purchase-requests
+Authorization: Bearer {{buyer_token}}
+Idempotency-Key: my-first-order
+Content-Type: application/json
+
+{ "items": [{ "ticket_type_id": "{{ticket_type_id}}", "quantity": 2 }] }
+
+> {% client.global.set("purchase_request", response.headers.valueOf("Location")); %}
+
+### 15. A background worker reserves the tickets: poll until the status is `reserved`
+GET {{base}}{{purchase_request}}
+Authorization: Bearer {{buyer_token}}
+
+> {% client.global.set("reservation_id", response.body.reservation_id); %}
+
+### 16. The buyer chooses to pay through the attestor (`payment_pending`)
+POST {{base}}/v1/reservations/{{reservation_id}}/checkout
+Authorization: Bearer {{buyer_token}}
+Content-Type: application/json
+
+{ "attestor_id": "{{attestor_id}}" }
+
+# Now report the payment as the attestor would; see step 17 in docs/walkthrough.md.
+
+### 18. The buyer's tickets; `ticket` is the signed ticket in Base64
+GET {{base}}/v1/me/tickets
+Authorization: Bearer {{buyer_token}}
+
+> {% client.global.set("ticket_id", response.body[0].id); %}
+
+### 19. The same ticket's raw bytes
+GET {{base}}/v1/tickets/{{ticket_id}}/raw
+Authorization: Bearer {{buyer_token}}
+
+### 20. The keys a gate trusts
+GET {{base}}/.well-known/kippu/ticket-keys

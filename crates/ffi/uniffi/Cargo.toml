@@ -1,0 +1,31 @@
+[package]
+name = "kaisatsu-uniffi"
+description = "UniFFI bindings for Kaisatsu: verify Kippu tickets from Swift, Kotlin and C#."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "kaisatsu_uniffi"
+crate-type = ["cdylib", "staticlib", "lib"]
+
+[features]
+## The `uniffi-bindgen` binary that generates the Swift and Kotlin sources.
+bindgen = ["uniffi/cli"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["bindgen"]
+
+[dependencies]
+kaisatsu = { workspace = true, features = ["alloc"] }
+uniffi = { workspace = true }
+
+[dev-dependencies]
+hex.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
