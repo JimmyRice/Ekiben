@@ -3,6 +3,7 @@
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use kippu_domain::denial::{Denial, DeniedTicket};
 use kippu_domain::{DenialId, EventId, OrganizationId};
 
@@ -11,23 +12,28 @@ use super::service::{self, AddedDenial};
 use crate::app::AppState;
 use crate::auth::Principal;
 use crate::error::{ApiResult, Problem};
+use crate::http::idempotency::IdempotentByDesign;
 use crate::http::{Json, Listing, ListingTag, PageQuery};
 
 const TAG: &str = "denials";
 
-/// 201 for a new denial, 200 for one that was already there.
-fn added(added: AddedDenial) -> (StatusCode, Json<Denial>) {
+/// 201 for a new denial, 200 for one that was already there. Safe to repeat without the
+/// idempotency middleware: the id is derived from organization, event and subject.
+fn added(added: AddedDenial) -> Response {
     let status = if added.created {
         StatusCode::CREATED
     } else {
         StatusCode::OK
     };
-    (status, Json(added.denial))
+    let mut response = (status, Json(added.denial)).into_response();
+    response.extensions_mut().insert(IdempotentByDesign);
+    response
 }
 
 /// Refuse a ticket or an account entry to every event of an organization, present and
-/// future. A denied account cannot buy tickets for them either. Adding the same denial again
-/// answers 200 with the one already there.
+/// future. A denied account's purchase requests are rejected from then on (a reservation it
+/// already holds can still be paid; those tickets are refused at the gate too). Adding the
+/// same denial again answers 200 with the one already there.
 #[utoipa::path(
     post, path = "/v1/organizations/{organization_id}/denials", tag = TAG,
     security(("bearer" = [])),
@@ -45,7 +51,7 @@ pub(crate) async fn create_organization_denial(
     principal: Principal,
     Path(organization_id): Path<OrganizationId>,
     Json(request): Json<CreateDenialRequest>,
-) -> ApiResult<(StatusCode, Json<Denial>)> {
+) -> ApiResult<Response> {
     Ok(added(
         service::create_organization_denial(&state, &principal, organization_id, request.into())
             .await?,
@@ -74,8 +80,10 @@ pub(crate) async fn list_organization_denials(
     )))
 }
 
-/// Refuse a ticket or an account entry to one event. A denied account cannot buy tickets for
-/// it either. Adding the same denial again answers 200 with the one already there.
+/// Refuse a ticket or an account entry to one event. A denied account's purchase requests
+/// are rejected from then on (a reservation it already holds can still be paid; those tickets
+/// are refused at the gate too). Adding the same denial again answers 200 with the one
+/// already there.
 #[utoipa::path(
     post, path = "/v1/events/{event_id}/denials", tag = TAG,
     security(("bearer" = [])),
@@ -94,7 +102,7 @@ pub(crate) async fn create_event_denial(
     principal: Principal,
     Path(event_id): Path<EventId>,
     Json(request): Json<CreateDenialRequest>,
-) -> ApiResult<(StatusCode, Json<Denial>)> {
+) -> ApiResult<Response> {
     Ok(added(
         service::create_event_denial(&state, &principal, event_id, request.into()).await?,
     ))

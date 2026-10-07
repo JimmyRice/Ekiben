@@ -8,7 +8,8 @@
 //! refund that arrives late, never money returned for a ticket that still works.
 //!
 //! The attestor confirms with `outcome: refunded` and the refund's id. Free tickets have no
-//! money to return and complete at once; cash taken in person is confirmed by an organizer.
+//! money to return and complete at once; cash taken in person is confirmed by an organizer. A
+//! partial refund made outside Kippu has no other way in: it is asked of Kippu like any other.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -259,7 +260,6 @@ pub(super) async fn revoke(
     for ticket in tickets {
         *counts.entry(ticket.ticket_type_id).or_default() += 1;
     }
-    // In ticket type order, like every inventory change, so locks are taken in one order.
     let items: Vec<LineItem> = counts
         .into_iter()
         .map(|(ticket_type_id, quantity)| LineItem {
@@ -267,10 +267,12 @@ pub(super) async fn revoke(
             quantity,
         })
         .collect();
-    tx.inventory().return_sold(&items).await?;
+    // Quota before stock, each in ticket type order: the order purchases and late payments
+    // take them in, so a refund cannot deadlock with the same buyer's purchase.
     tx.inventory()
         .return_quota(reservation.account_id, &items)
         .await?;
+    tx.inventory().return_sold(&items).await?;
     // A reversal of a payment whose tickets were all refunded already revokes nothing.
     if !refund.ticket_ids.is_empty() {
         let revoked = IntegrationEvent::TicketsRevoked {

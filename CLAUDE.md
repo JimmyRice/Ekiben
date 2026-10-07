@@ -259,14 +259,17 @@ Do not change these unless the user explicitly asks.
   any time), never of an attestor. One transaction revokes the tickets (irreversible), returns
   stock and quota, and emits `tickets.revoked` plus `refund.required` with a `refund_id`; the
   attestor confirms with `outcome: refunded` and that id. Free tickets complete at once, cash
-  is confirmed by an organizer. Chargebacks are reported as `outcome: reversed`. Reservations
-  stay `issued`; per-ticket state lives in `tickets.status` and `refunds`.
+  is confirmed by an organizer. Chargebacks and other whole-payment returns are reported as
+  `outcome: reversed`, which also completes the payment's pending refunds; partial refunds
+  always go through Kippu. Reservations stay `issued`; per-ticket state lives in
+  `tickets.status` and `refunds`.
 - **Denials** (not "revocations"): organizers keep deny lists per event and per organization
   (CRUD), naming a ticket or an account. Gates never learn a ticket's holder (KP1 carries no
   account), so `GET /v1/events/{id}/denied-tickets` joins denied tickets, tickets of denied
   accounts and revoked tickets into ticket ids. It is a plain keyset-paged snapshot read with an
   organizer's credentials; venues poll it. Denied accounts' purchase requests are rejected
-  (`account_denied`) by the worker, not the front door. Webhooks are not the channel for gates
+  (`account_denied`) by the worker, not the front door; a reservation held before the denial
+  can still be paid (its tickets are refused at the gate). Webhooks are not the channel for gates
   (they need an inbound public endpoint and give no snapshot).
 - **PostgreSQL queue numbers** come from a per-sale counter row (`INSERT … ON CONFLICT DO
   UPDATE`), not a sequence: an admission batch means "the next N people" and needs consecutive

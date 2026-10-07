@@ -92,11 +92,12 @@ async fn organizers_keep_deny_lists_for_their_events_and_organization() {
     let event_denials = format!("/v1/events/{}/denials", shop.event_id);
     let organization_denials = format!("/v1/organizations/{organization}/denials");
     let ticket_denial = app
-        .call(
+        .call_with(
             Method::POST,
             &event_denials,
             Some(&shop.organizer),
             Some(json!({ "subject": subject("ticket", &tickets[0]), "note": "Reported stolen" })),
+            &[("idempotency-key", "deny-stolen-ticket")],
         )
         .await;
     assert_eq!(
@@ -110,13 +111,14 @@ async fn organizers_keep_deny_lists_for_their_events_and_organization() {
     assert_eq!(ticket_denial.body["subject"]["kind"], "ticket");
     assert_eq!(ticket_denial.body["note"], "Reported stolen");
 
-    // Denying the same thing again changes nothing.
+    // Denying the same thing again changes nothing, with or without an Idempotency-Key.
     let again = app
-        .call(
+        .call_with(
             Method::POST,
             &event_denials,
             Some(&shop.organizer),
             Some(json!({ "subject": subject("ticket", &tickets[0]), "note": "Other note" })),
+            &[("idempotency-key", "deny-stolen-ticket")],
         )
         .await;
     assert_eq!(again.status, StatusCode::OK);

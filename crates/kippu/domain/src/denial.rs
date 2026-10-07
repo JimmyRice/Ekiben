@@ -26,7 +26,8 @@ pub enum DenialSubject {
     /// One ticket, whoever presents it.
     Ticket(TicketId),
     /// Every ticket an account holds for the events the denial covers, including tickets
-    /// issued later. The account also cannot buy tickets for those events.
+    /// issued later. The account's purchase requests for those events are rejected from then
+    /// on; a reservation it already holds can still be paid, and those tickets are refused too.
     Account(AccountId),
 }
 

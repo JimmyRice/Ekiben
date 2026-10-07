@@ -395,6 +395,16 @@ async fn a_reversal_revokes_the_tickets_it_paid_for() {
     );
     assert_eq!(ticket_status(&app, &buyer, &tickets[1]).await, "revoked");
     assert_eq!(available(&app, &shop).await, 10);
+    // The refund still pending went back with the payment: nothing more to pay out.
+    let earlier = app
+        .call(
+            Method::GET,
+            &format!("/v1/refunds/{}", refunded.body["id"].as_str().unwrap()),
+            Some(&shop.organizer),
+            None,
+        )
+        .await;
+    assert_eq!(earlier.body["status"], "completed", "{:?}", earlier.body);
 
     for _ in 0..3 {
         let again = app

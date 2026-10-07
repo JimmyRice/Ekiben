@@ -37,8 +37,8 @@ pub enum AttestorReport {
         /// when the whole payment could not be used.
         refund_id: Option<RefundId>,
     },
-    /// The money went back without Kippu asking: a chargeback, or a refund made in the
-    /// provider's dashboard. The tickets it paid for are revoked.
+    /// The whole payment went back without Kippu asking: a chargeback, or a full refund made
+    /// in the provider's dashboard. The tickets it paid for are revoked.
     Reversed {
         /// The attestor's reference for the payment.
         attestation_id: String,
@@ -498,9 +498,11 @@ pub async fn confirm_ticket_refund(
     refund_result(state, attestation, refund, !completed).await
 }
 
-/// The attestor reports that a payment's money went back without Kippu asking: a chargeback,
-/// or a refund made in the provider's dashboard. The tickets it paid for are revoked and
-/// their stock returned; the reversal is recorded as a completed refund. Idempotent.
+/// The attestor reports that a payment's money went back as a whole without Kippu asking: a
+/// chargeback, or a full refund made in the provider's dashboard. The tickets it still paid for
+/// are revoked and their stock returned, and the reversal is recorded as a completed refund.
+/// Refunds of the payment still pending are completed too: their money went back with it.
+/// Idempotent.
 #[tracing::instrument(skip_all)]
 pub async fn reverse(
     state: &AppState,
@@ -520,20 +522,32 @@ pub async fn reverse(
     if let Some(existing) = store.refund(id).await? {
         return refund_result(state, attestation, existing, true).await;
     }
+    // Read before the transaction. A refund racing this one revokes some of these tickets
+    // first, and `revoke` then fails with 409: the attestor retries and reads afresh.
+    let tickets: Vec<_> = store
+        .tickets_for_reservation(attestation.reservation_id)
+        .await?
+        .into_iter()
+        .filter(|ticket| ticket.status == TicketStatus::Valid)
+        .collect();
+    let pending: Vec<RefundId> = store
+        .refunds_for_reservation(attestation.reservation_id)
+        .await?
+        .into_iter()
+        .filter(|refund| {
+            refund.status == RefundStatus::Pending
+                && refund.attestor_id == attestor
+                && refund.attestation_id == attestation_id
+        })
+        .map(|refund| refund.id)
+        .collect();
     let now = state.now();
     let mut tx = store.begin().await?;
-    // Every revocation locks the reservation first, so the tickets read now stay as they are.
     let reservation = tx
         .reservations()
         .lock_reservation(attestation.reservation_id)
         .await?
         .ok_or_else(|| ApiError::not_found("reservation"))?;
-    let tickets: Vec<_> = store
-        .tickets_for_reservation(reservation.id)
-        .await?
-        .into_iter()
-        .filter(|ticket| ticket.status == TicketStatus::Valid)
-        .collect();
     let refund = new_refund(
         id,
         &reservation,
@@ -548,12 +562,16 @@ pub async fn reverse(
         drop(tx);
         return refund_result(state, attestation, existing, true).await;
     }
+    for pending in &pending {
+        tx.payments().complete_refund(*pending, now).await?;
+    }
     tx.commit().await?;
     tracing::info!(
         refund = %refund.id,
         reservation = %reservation.id,
         attestor = %attestor,
         tickets = refund.ticket_ids.len(),
+        pending_refunds_completed = pending.len(),
         "payment reversed; tickets revoked"
     );
     refund_result(state, attestation, refund, false).await

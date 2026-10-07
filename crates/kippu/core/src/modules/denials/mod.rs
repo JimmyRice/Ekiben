@@ -1,8 +1,9 @@
 //! Denials: deny lists of tickets and accounts refused entry, and what gates must refuse.
 //!
 //! Organizers keep a list per event and one for every event of their organization. An entry
-//! names a ticket or an account; a denied account cannot buy tickets for the events its denial
-//! covers (its purchase requests are rejected with `account_denied`).
+//! names a ticket or an account; a denied account's purchase requests for the events its
+//! denial covers are rejected with `account_denied` (a reservation it already holds can still be
+//! paid, and those tickets are refused at the gate like its others).
 //!
 //! Gates verify tickets offline and never learn who holds a ticket, so what they need is a set
 //! of ticket ids: `GET /v1/events/{id}/denied-tickets` joins the tickets denied directly, the

@@ -133,8 +133,8 @@ cannot be paid out is the deployment's to settle by other means, never by restor
 
 ## 7. Reporting a reversal
 
-Money can go back without Kippu asking: a chargeback, or a refund made in the provider's
-dashboard. Report it, so that the tickets it paid for stop working:
+The whole payment can go back without Kippu asking: a chargeback, or a full refund made in the
+provider's dashboard. Report it, so that the tickets it paid for stop working:
 
 ```http
 POST /v1/payment-attestations
@@ -144,9 +144,15 @@ Kippu-Signature: …
 ```
 
 Every ticket of the payment still valid is revoked and its stock returned, and Kippu records a
-completed refund with `"reason": "reversal"` (returned under `refund`). Idempotent: reporting
-it again answers `"replayed": true` and changes nothing. For a payment that paid for no tickets
-(`refund_required`), a reversal is the same as confirming its refund (§5).
+completed refund with `"reason": "reversal"` (returned under `refund`). Refunds of the payment
+still `pending` are completed too: their money went back with the payment, so do not pay out
+their `refund.required`. Idempotent: reporting it again answers `"replayed": true` and changes
+nothing. For a payment that paid for no tickets (`refund_required`), a reversal is the same as
+confirming its refund (§5).
+
+A partial refund is never a reversal. Money returned for some of the tickets is asked of Kippu
+(`POST /v1/reservations/{id}/refunds`, by an organizer), which revokes exactly those tickets and
+sends the matching `refund.required` (§6).
 
 ## 8. Built-in attestors
 

@@ -70,8 +70,9 @@ pub enum PaymentOutcome {
     Paid,
     /// The attestor returned money Kippu asked for with `refund.required`.
     Refunded,
-    /// The money went back without Kippu asking (a chargeback, a refund made in the
-    /// provider's dashboard); the tickets it paid for are revoked.
+    /// The whole payment went back without Kippu asking (a chargeback, a full refund made in
+    /// the provider's dashboard); the tickets it paid for are revoked. A partial refund is not
+    /// a reversal: it is asked of Kippu with `POST /v1/reservations/{id}/refunds`.
     Reversed,
 }
 
