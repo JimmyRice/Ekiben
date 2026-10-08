@@ -13,7 +13,7 @@
 
 use std::collections::BTreeSet;
 
-use kippu_domain::catalog::Event;
+use kippu_domain::catalog::EventSummary;
 use kippu_domain::outbox::IntegrationEvent;
 use kippu_domain::payment::{PaymentAttestation, PaymentDisposition};
 use kippu_domain::refund::{Refund, RefundReason, RefundStatus};
@@ -49,7 +49,7 @@ fn acting(
     state: &AppState,
     principal: &Principal,
     reservation: &Reservation,
-    event: &Event,
+    event: &EventSummary,
 ) -> Option<Acting> {
     let policy = state.policy();
     if policy.permits(
@@ -76,7 +76,7 @@ async fn refundable_reservation(
     principal: &Principal,
     id: ReservationId,
     what: &'static str,
-) -> ApiResult<(Reservation, Event, Acting)> {
+) -> ApiResult<(Reservation, EventSummary, Acting)> {
     let reservation = state
         .store()
         .reservation(id)
@@ -84,7 +84,7 @@ async fn refundable_reservation(
         .ok_or_else(|| ApiError::not_found(what))?;
     let event = state
         .store()
-        .event(reservation.event_id)
+        .event_summary(reservation.event_id)
         .await?
         .ok_or_else(|| ApiError::not_found(what))?;
     let acting =
@@ -157,7 +157,7 @@ fn already_revoked() -> ApiError {
 async fn check_refund_period(
     state: &AppState,
     reservation: &Reservation,
-    event: &Event,
+    event: &EventSummary,
     tickets: &[Ticket],
     now: Timestamp,
 ) -> ApiResult<()> {
@@ -382,7 +382,7 @@ pub async fn confirm_manual_refund(
     let refund = refund(state, principal, id).await?;
     let event = state
         .store()
-        .event(refund.event_id)
+        .event_summary(refund.event_id)
         .await?
         .ok_or_else(|| ApiError::not_found("refund"))?;
     state.authorize(

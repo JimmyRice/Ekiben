@@ -214,6 +214,13 @@ impl EventSummary {
     }
 }
 
+impl EventSummary {
+    /// Whether the public may see the event.
+    pub const fn is_public(&self) -> bool {
+        matches!(self.status, EventStatus::Published | EventStatus::Cancelled)
+    }
+}
+
 impl From<Event> for EventSummary {
     fn from(event: Event) -> Self {
         Self {

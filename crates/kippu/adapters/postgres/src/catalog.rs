@@ -137,6 +137,17 @@ impl CatalogStore for PostgresStore {
         optional(row)
     }
 
+    async fn event_summary(&self, id: EventId) -> StoreResult<Option<EventSummary>> {
+        let row = sqlx::query_as::<_, EventSummaryRow>(sqlx::AssertSqlSafe(format!(
+            "{EVENT_SUMMARY_COLUMNS} WHERE id = $1"
+        )))
+        .bind(id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(error)?;
+        optional(row)
+    }
+
     async fn list_events(
         &self,
         filter: &EventFilter,

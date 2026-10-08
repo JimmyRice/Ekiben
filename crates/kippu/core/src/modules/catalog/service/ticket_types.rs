@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use kippu_domain::catalog::{Event, TicketType};
+use kippu_domain::catalog::{EventSummary, TicketType};
 use kippu_domain::{Money, SaleId, TicketTypeId, Timestamp, ValidationError};
 
 use super::{TicketTypeAvailability, check_version, visible_sale, writable_sale};
@@ -88,7 +88,7 @@ pub async fn visible_ticket_type(
 
 /// Checks that buyers' refunds of `ticket_type` end before `event` opens: after that a refund
 /// could follow an admission, which Kippu cannot see.
-fn check_refund_period(ticket_type: &TicketType, event: &Event) -> ApiResult<()> {
+fn check_refund_period(ticket_type: &TicketType, event: &EventSummary) -> ApiResult<()> {
     match ticket_type.refundable_until {
         Some(until) if until > event.starts_at => Err(ValidationError::new(
             "refundable_until",

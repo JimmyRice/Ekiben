@@ -165,7 +165,7 @@ pub async fn manual_payment(
         .ok_or_else(|| ApiError::not_found("reservation"))?;
     let event = state
         .store()
-        .event(reservation.event_id)
+        .event_summary(reservation.event_id)
         .await?
         .ok_or_else(|| ApiError::not_found("event"))?;
     state.authorize(

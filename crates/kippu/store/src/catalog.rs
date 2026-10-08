@@ -89,6 +89,9 @@ pub trait CatalogStore {
     async fn update_event(&self, event: &Event, expected_version: i64) -> StoreResult<()>;
     /// Looks an event up by id.
     async fn event(&self, id: EventId) -> StoreResult<Option<Event>>;
+    /// Looks an event up by id, without its content: what checks of who may see or edit it
+    /// need, at a fraction of the read.
+    async fn event_summary(&self, id: EventId) -> StoreResult<Option<EventSummary>>;
     /// Lists the events matching `filter` in `order`, without their content, resuming after
     /// the position `page.after` (the sort time and id of [`EventOrder::position`]).
     async fn list_events(

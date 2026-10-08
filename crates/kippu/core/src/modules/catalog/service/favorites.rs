@@ -31,7 +31,7 @@ pub async fn favorites(
     let mut events = Vec::new();
     for favorite in favorites.items {
         if let Ok(event) = visible_event(state, Some(principal), favorite.event_id).await {
-            events.push(event.into());
+            events.push(event);
         }
     }
     Ok(Page {

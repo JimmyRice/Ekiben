@@ -140,7 +140,7 @@ pub(crate) async fn process(state: &AppState, request: &PurchaseRequest) -> ApiR
         .ok_or_else(|| ApiError::not_found("sale"))?;
     let ticket_types = store.list_ticket_types(sale.id).await?;
     let event = store
-        .event(sale.event_id)
+        .event_summary(sale.event_id)
         .await?
         .ok_or_else(|| ApiError::not_found("event"))?;
     let denied = store

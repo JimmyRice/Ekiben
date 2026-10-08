@@ -34,7 +34,7 @@ async fn organization_of(
     let organization = match state.store().reservation(reservation).await? {
         Some(reservation) => state
             .store()
-            .event(reservation.event_id)
+            .event_summary(reservation.event_id)
             .await?
             .map(|event| event.organization_id),
         None => None,

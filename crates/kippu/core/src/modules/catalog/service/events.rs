@@ -55,44 +55,67 @@ pub struct EventChanges {
     pub content: Option<String>,
 }
 
-/// Whether `principal` may edit (and see drafts of) `event`.
-pub fn can_write(state: &AppState, principal: Option<&Principal>, event: &Event) -> bool {
+/// Whether `principal` may edit (and see drafts of) the events of `organization`.
+pub fn can_write(
+    state: &AppState,
+    principal: Option<&Principal>,
+    organization: OrganizationId,
+) -> bool {
     principal.is_some_and(|principal| {
-        state.policy().permits(
-            principal,
-            EVENTS_WRITE,
-            Scope::Organization(event.organization_id),
-        )
+        state
+            .policy()
+            .permits(principal, EVENTS_WRITE, Scope::Organization(organization))
     })
 }
 
-/// An event the caller may see: published or cancelled, or a draft they could edit.
-/// Hidden events are reported as missing rather than forbidden.
+/// Whether `principal` may see an event: published or cancelled, or a draft they could edit.
+fn can_see(
+    state: &AppState,
+    principal: Option<&Principal>,
+    public: bool,
+    organization: OrganizationId,
+) -> bool {
+    public || can_write(state, principal, organization)
+}
+
+/// An event the caller may see, without its content: published or cancelled, or a draft
+/// they could edit. Hidden events are reported as missing rather than forbidden.
 #[tracing::instrument(skip_all)]
 pub async fn visible_event(
     state: &AppState,
     principal: Option<&Principal>,
     id: EventId,
+) -> ApiResult<EventSummary> {
+    state
+        .store()
+        .event_summary(id)
+        .await?
+        .filter(|event| can_see(state, principal, event.is_public(), event.organization_id))
+        .ok_or_else(|| ApiError::not_found("event"))
+}
+
+/// An event the caller may see, with its content.
+#[tracing::instrument(skip_all)]
+pub async fn event_details(
+    state: &AppState,
+    principal: Option<&Principal>,
+    id: EventId,
 ) -> ApiResult<Event> {
-    let event = state
+    state
         .store()
         .event(id)
         .await?
-        .ok_or_else(|| ApiError::not_found("event"))?;
-    if event.is_public() || can_write(state, principal, &event) {
-        Ok(event)
-    } else {
-        Err(ApiError::not_found("event"))
-    }
+        .filter(|event| can_see(state, principal, event.is_public(), event.organization_id))
+        .ok_or_else(|| ApiError::not_found("event"))
 }
 
-/// An event the caller may edit.
+/// An event the caller may edit, without its content.
 #[tracing::instrument(skip_all)]
 pub async fn writable_event(
     state: &AppState,
     principal: &Principal,
     id: EventId,
-) -> ApiResult<Event> {
+) -> ApiResult<EventSummary> {
     let event = visible_event(state, Some(principal), id).await?;
     state.authorize(
         principal,
@@ -201,7 +224,12 @@ pub async fn update_event(
     expected_version: i64,
     changes: EventChanges,
 ) -> ApiResult<Event> {
-    let current = writable_event(state, principal, id).await?;
+    let current = event_details(state, Some(principal), id).await?;
+    state.authorize(
+        principal,
+        EVENTS_WRITE,
+        Scope::Organization(current.organization_id),
+    )?;
     check_version(current.version, expected_version)?;
     let event = Event {
         slug: match changes.slug {

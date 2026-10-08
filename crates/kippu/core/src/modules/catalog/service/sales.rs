@@ -1,7 +1,7 @@
 //! Sales: the windows in which an event's tickets are sold.
 
 use kippu_domain::admission::AdmissionPolicy;
-use kippu_domain::catalog::{Event, Sale, TicketType};
+use kippu_domain::catalog::{EventSummary, Sale, TicketType};
 use kippu_domain::payment::Environment;
 use kippu_domain::{AttestorId, EventId, SaleId, Timestamp};
 
@@ -92,7 +92,7 @@ pub async fn visible_sale(
     state: &AppState,
     principal: Option<&Principal>,
     id: SaleId,
-) -> ApiResult<(Sale, Event)> {
+) -> ApiResult<(Sale, EventSummary)> {
     let sale = state
         .store()
         .sale(id)
@@ -108,7 +108,7 @@ pub async fn writable_sale(
     state: &AppState,
     principal: &Principal,
     id: SaleId,
-) -> ApiResult<(Sale, Event)> {
+) -> ApiResult<(Sale, EventSummary)> {
     let sale = state
         .store()
         .sale(id)

@@ -1358,6 +1358,7 @@ pub async fn event_images_keep_their_order(store: Arc<dyn Store>) {
     assert_eq!(store.event_image(first.id).await.unwrap(), None);
 }
 
+/// Content is stored as is, and left out of listings and summaries.
 pub async fn event_content_is_kept_whole_and_left_out_of_listings(store: Arc<dyn Store>) {
     let organization = organization(store.as_ref()).await;
     // The largest content allowed, with multi-byte characters: limits are in bytes.
@@ -1385,7 +1386,15 @@ pub async fn event_content_is_kept_whole_and_left_out_of_listings(store: Arc<dyn
         .list_events(&filter, EventOrder::default(), PageRequest::first(10))
         .await
         .unwrap();
-    assert_eq!(listed, vec![EventSummary::from(edited)]);
+    assert_eq!(listed, vec![EventSummary::from(edited.clone())]);
+    assert_eq!(
+        store.event_summary(event.id).await.unwrap(),
+        Some(EventSummary::from(edited))
+    );
+    assert_eq!(
+        store.event_summary(EventId::generate()).await.unwrap(),
+        None
+    );
 }
 
 /// Reads a whole listing `size` records at a time, resuming after the last record of each
