@@ -87,6 +87,7 @@ macro_rules! conformance_tests {
             inventory_never_oversells,
             holds_are_all_or_nothing,
             sale_inventory_reads_every_type_at_once,
+            stock_locked_up_front_never_deadlocks,
             quotas_are_enforced_and_all_or_nothing,
             dropped_transactions_roll_back,
             claims_are_exclusive_until_the_lease_lapses,
@@ -485,6 +486,41 @@ pub async fn sale_inventory_reads_every_type_at_once(store: Arc<dyn Store>) {
             .unwrap()
             .is_empty()
     );
+}
+
+pub async fn stock_locked_up_front_never_deadlocks(store: Arc<dyn Store>) {
+    let catalog = catalog(store.as_ref(), &[1_000, 1_000]).await;
+    let (first, second) = (catalog.ticket_types[0], catalog.ticket_types[1]);
+    // Every transaction changes the two types in the order that deadlocks half the others,
+    // after locking both in ticket type order.
+    let transactions = (0..20).map(|index| {
+        let store = store.clone();
+        tokio::spawn(async move {
+            let (a, b) = if index % 2 == 0 {
+                (first, second)
+            } else {
+                (second, first)
+            };
+            let mut tx = store.begin().await?;
+            tx.inventory()
+                .lock_stock(&lines([line(second, 1), line(first, 1)]))
+                .await?;
+            for ticket_type in [a, b] {
+                assert!(
+                    tx.inventory()
+                        .try_hold(&lines([line(ticket_type, 1)]))
+                        .await?
+                );
+                tokio::task::yield_now().await;
+            }
+            tx.commit().await
+        })
+    });
+    for transaction in transactions.collect::<Vec<_>>() {
+        transaction.await.unwrap().unwrap();
+    }
+    assert_eq!(store.inventory(first).await.unwrap().unwrap().held, 20);
+    assert_eq!(store.inventory(second).await.unwrap().unwrap().held, 20);
 }
 
 pub async fn holds_are_all_or_nothing(store: Arc<dyn Store>) {

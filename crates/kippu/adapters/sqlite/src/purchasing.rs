@@ -256,6 +256,11 @@ fn bind_item(query: SqliteQuery<'_>, item: LineItem) -> SqliteQuery<'_> {
 
 #[async_trait]
 impl InventoryTx for SqliteTx {
+    async fn lock_stock(&mut self, _items: &LineItems) -> StoreResult<()> {
+        // Transactions begin with BEGIN IMMEDIATE: the one writer holds every row already.
+        Ok(())
+    }
+
     async fn try_hold(&mut self, items: &LineItems) -> StoreResult<bool> {
         self.all_or_nothing(
             items,

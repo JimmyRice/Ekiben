@@ -614,6 +614,58 @@ async fn drafts_are_invisible_to_the_public() {
     assert_eq!(own.status, StatusCode::OK);
 }
 
+#[tokio::test]
+async fn a_batch_of_buyers_is_served_in_arrival_order() {
+    let app = TestApp::start().await;
+    let shop = app.shop(3, 1_000, json!({})).await;
+    let mut buyers = Vec::new();
+    for _ in 0..6 {
+        buyers.push(app.buyer().await);
+    }
+    // Six buyers for three tickets, then the first buyer again, beyond its limit of two: one
+    // batch, processed together except where an account repeats.
+    let mut submitted = Vec::new();
+    for (buyer, quantity) in buyers
+        .iter()
+        .map(|buyer| (buyer, 1))
+        .chain([(&buyers[0], 2)])
+    {
+        app.clock.advance(Duration::milliseconds(1));
+        let reply = app.purchase(buyer, &shop, quantity, &uuid_suffix()).await;
+        assert_eq!(reply.status, StatusCode::ACCEPTED, "{:?}", reply.body);
+        submitted.push((buyer, reply.body["id"].as_str().unwrap().to_owned()));
+    }
+    app.drain("purchases").await;
+
+    let mut outcomes = Vec::new();
+    for (buyer, id) in submitted {
+        let request = app
+            .call(
+                Method::GET,
+                &format!("/v1/purchase-requests/{id}"),
+                Some(buyer),
+                None,
+            )
+            .await;
+        outcomes.push(match request.body["status"].as_str().unwrap() {
+            "rejected" => request.body["reason"].as_str().unwrap().to_owned(),
+            status => status.to_owned(),
+        });
+    }
+    assert_eq!(
+        outcomes,
+        [
+            "reserved",
+            "reserved",
+            "reserved",
+            "sold_out",
+            "sold_out",
+            "sold_out",
+            "limit_exceeded"
+        ]
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn each_sale_is_first_come_first_served_even_when_sales_run_in_parallel() {
     let app = TestApp::start().await;

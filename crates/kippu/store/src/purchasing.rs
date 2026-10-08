@@ -188,6 +188,14 @@ impl std::ops::Deref for Holds {
 /// rule out deadlocks between concurrent transactions.
 #[async_trait]
 pub trait InventoryTx: Send {
+    /// Locks the stock of `items`' ticket types, in ticket type order, until the transaction
+    /// ends, without changing it. A transaction that goes on to change several types' stock
+    /// in another order (one purchase after another) takes them first with this.
+    ///
+    /// **Contract:** two transactions that lock overlapping stock this way before changing it
+    /// never deadlock on it. A backend with a single writer may do nothing.
+    async fn lock_stock(&mut self, items: &LineItems) -> StoreResult<()>;
+
     /// Moves `quantity` tickets of every item from available to held.
     ///
     /// **Contract:** linearizable and all-or-nothing. Returns `false` — with no changes — if any
