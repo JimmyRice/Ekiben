@@ -126,12 +126,17 @@ async fn hot_paths_run_a_fixed_number_of_statements() {
     }
     let ((), three_requests) = statements.of(app.drain("purchases")).await;
 
+    // MySQL has neither RETURNING nor ON CONFLICT, so its writes take more statements.
+    let (worker_one, worker_three) = match std::env::var("EKIBEN_TEST_BACKEND").as_deref() {
+        Ok("mysql") => (17, 31),
+        _ => (12, 24),
+    };
     let counts = [
         ("sale offer", offer_statements, 4),
         ("admission", admission_statements, 3),
         ("purchase", purchase_statements, 3),
-        ("worker, one request", one_request, 12),
-        ("worker, three requests", three_requests, 24),
+        ("worker, one request", one_request, worker_one),
+        ("worker, three requests", three_requests, worker_three),
     ];
     for (path, measured, most) in counts {
         eprintln!("{path}: {measured} statements");
