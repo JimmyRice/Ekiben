@@ -7,9 +7,15 @@
 //! may have fixed the cause (e.g. obtained an admission pass) in between. Keys are scoped to the
 //! caller, so two accounts never collide.
 //!
-//! Handlers that are idempotent by design — purchase requests derive their id from the key,
-//! payment attestations are unique per attestor — mark their responses with
-//! [`IdempotentByDesign`] and are always executed.
+//! Routes that are idempotent by design — purchase requests derive their id from the key,
+//! payment attestations are unique per attestor — are declared by their modules
+//! ([`Module::idempotent_routes`](crate::Module::idempotent_routes)) and pass straight through:
+//! no buffering, no lookup, nothing stored.
+//!
+//! A caller's token is verified here once; the [`Principal`] is handed on to the handler in the
+//! request's extensions rather than verified again.
+
+use std::sync::Arc;
 
 use axum::body::{Body, to_bytes};
 use axum::extract::{Request, State};
@@ -23,19 +29,23 @@ use kippu_store::IdempotencyRecord;
 use sha2::{Digest, Sha256};
 
 use crate::app::AppState;
+use crate::auth::Principal;
 use crate::error::{ApiError, ProblemKind};
+use crate::module::IdempotentRoute;
 
 /// The request header.
 pub const IDEMPOTENCY_KEY: &str = "idempotency-key";
 /// Set on responses replayed from a stored record.
 pub const REPLAYED: &str = "idempotent-replayed";
 
-/// Response extension: this handler handles retries itself; do not store its response.
-#[derive(Debug, Clone, Copy)]
-pub struct IdempotentByDesign;
+/// What the middleware needs: the application, and the routes it lets through.
+pub(crate) struct Idempotency {
+    pub(crate) state: AppState,
+    pub(crate) by_design: Vec<IdempotentRoute>,
+}
 
 pub(crate) async fn middleware(
-    State(state): State<AppState>,
+    State(idempotency): State<Arc<Idempotency>>,
     request: Request,
     next: Next,
 ) -> Response {
@@ -57,7 +67,15 @@ pub(crate) async fn middleware(
         ))
         .into_response();
     };
-    handle(&state, &key, request, next)
+    let path = request.uri().path();
+    if idempotency
+        .by_design
+        .iter()
+        .any(|route| route.matches(request.method(), path))
+    {
+        return next.run(request).await;
+    }
+    handle(&idempotency.state, &key, request, next)
         .await
         .unwrap_or_else(IntoResponse::into_response)
 }
@@ -68,8 +86,16 @@ async fn handle(
     request: Request,
     next: Next,
 ) -> Result<Response, ApiError> {
-    let scope = scope(state, &request);
-    let (parts, body) = request.into_parts();
+    let (mut parts, body) = request.into_parts();
+    let principal = authenticate(state, &parts);
+    let scope = principal
+        .as_ref()
+        .map_or_else(|| "anonymous".to_owned(), Principal::actor);
+    if let Some(principal) = principal {
+        // A replayed response never reaches the handler, so record the caller here.
+        super::trace::record_caller(&principal);
+        parts.extensions.insert(principal);
+    }
     let limit = parts
         .extensions
         .get::<super::RequestBodyLimit>()
@@ -94,9 +120,7 @@ async fn handle(
     }
 
     let response = next.run(Request::from_parts(parts, Body::from(body))).await;
-    if response.extensions().get::<IdempotentByDesign>().is_some()
-        || !response.status().is_success()
-    {
+    if !response.status().is_success() {
         return Ok(response);
     }
 
@@ -120,21 +144,13 @@ async fn handle(
 }
 
 /// Identifies the caller without failing: an invalid token is left for the handler to reject.
-fn scope(state: &AppState, request: &Request) -> String {
-    request
-        .headers()
+fn authenticate(state: &AppState, parts: &axum::http::request::Parts) -> Option<Principal> {
+    parts
+        .headers
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
         .and_then(|token| state.tokens().authenticate(token, state.now()).ok())
-        .map_or_else(
-            || "anonymous".to_owned(),
-            |principal| {
-                // A replayed response never reaches the handler, so record the caller here.
-                super::trace::record_caller(&principal);
-                principal.actor()
-            },
-        )
 }
 
 fn replay(record: &IdempotencyRecord, fingerprint: &str) -> Response {

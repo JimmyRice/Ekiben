@@ -266,6 +266,26 @@ async fn idempotency_keys_replay_the_first_response() {
 }
 
 #[tokio::test]
+async fn routes_idempotent_by_design_are_real_routes() {
+    let app = TestApp::start().await;
+    let openapi = app
+        .call(Method::GET, "/openapi.json", None, None)
+        .await
+        .body;
+    for module in kippu_core::default_modules() {
+        for route in module.idempotent_routes() {
+            let method = route.method.as_str().to_ascii_lowercase();
+            assert!(
+                openapi["paths"][route.path][&method].is_object(),
+                "{} declares {method} {}, which is not a route",
+                module.name(),
+                route.path
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn health_and_openapi_are_served() {
     let app = TestApp::start().await;
     assert_eq!(

@@ -33,11 +33,15 @@ impl FromRequestParts<AppState> for Principal {
 impl OptionalFromRequestParts<AppState> for Principal {
     type Rejection = ApiError;
 
-    /// Verifying a token needs no I/O, so this resolves immediately.
+    /// Verifying a token needs no I/O, so this resolves immediately. A principal the
+    /// idempotency middleware verified already is taken as is.
     fn from_request_parts(
         parts: &mut Parts,
         state: &AppState,
     ) -> impl Future<Output = Result<Option<Self>, ApiError>> + Send {
+        if let Some(principal) = parts.extensions.get::<Self>() {
+            return std::future::ready(Ok(Some(principal.clone())));
+        }
         let principal = bearer(parts).and_then(|token| {
             token
                 .map(|token| state.tokens().authenticate(token, state.now()))

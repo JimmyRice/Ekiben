@@ -20,6 +20,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::http::Method;
 use kippu_domain::account::Role;
 use kippu_store::BoxError;
 use utoipa_axum::router::OpenApiRouter;
@@ -47,6 +48,13 @@ pub trait Module: Send + Sync + 'static {
         Vec::new()
     }
 
+    /// Routes that handle retries themselves (ids derived from the request, references unique
+    /// per caller): the `Idempotency-Key` middleware lets them through without buffering the
+    /// request, looking up or storing a response.
+    fn idempotent_routes(&self) -> Vec<IdempotentRoute> {
+        Vec::new()
+    }
+
     /// Periodic background work.
     fn tasks(&self, config: &Config) -> Vec<BackgroundTask> {
         let _ = config;
@@ -67,19 +75,50 @@ pub struct BodyLimit {
 impl BodyLimit {
     /// Whether a request path falls under this limit.
     pub fn matches(&self, path: &str) -> bool {
-        let mut pattern = self.path.split('/');
-        let mut segments = path.split('/');
-        loop {
-            match (pattern.next(), segments.next()) {
-                (None, None) => return true,
-                (Some(expected), Some(actual)) => {
-                    let wildcard = expected.starts_with('{') && expected.ends_with('}');
-                    if !wildcard && expected != actual {
-                        return false;
-                    }
+        path_matches(self.path, path)
+    }
+}
+
+/// A route that is idempotent by design; see [`Module::idempotent_routes`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdempotentRoute {
+    /// The route's method.
+    pub method: Method,
+    /// The route's path as declared, e.g. `/v1/sales/{sale_id}/purchase-requests`; `{…}`
+    /// segments match any one segment.
+    pub path: &'static str,
+}
+
+impl IdempotentRoute {
+    /// A `POST` route.
+    pub const fn post(path: &'static str) -> Self {
+        Self {
+            method: Method::POST,
+            path,
+        }
+    }
+
+    /// Whether a request goes to this route.
+    pub fn matches(&self, method: &Method, path: &str) -> bool {
+        self.method == method && path_matches(self.path, path)
+    }
+}
+
+/// Whether a request path matches a declared route path, whose `{…}` segments match any one
+/// segment.
+fn path_matches(declared: &str, path: &str) -> bool {
+    let mut pattern = declared.split('/');
+    let mut segments = path.split('/');
+    loop {
+        match (pattern.next(), segments.next()) {
+            (None, None) => return true,
+            (Some(expected), Some(actual)) => {
+                let wildcard = expected.starts_with('{') && expected.ends_with('}');
+                if !wildcard && expected != actual {
+                    return false;
                 }
-                _ => return false,
             }
+            _ => return false,
         }
     }
 }

@@ -22,7 +22,7 @@ use utoipa_axum::routes;
 
 use crate::app::AppState;
 use crate::auth::Permission;
-use crate::module::Module;
+use crate::module::{IdempotentRoute, Module};
 
 pub use dto::*;
 
@@ -68,5 +68,13 @@ impl Module for Denials {
                 routes::delete_denial
             ))
             .routes(routes!(routes::denied_tickets))
+    }
+
+    fn idempotent_routes(&self) -> Vec<IdempotentRoute> {
+        // A denial's id is derived from organization, event and subject.
+        vec![
+            IdempotentRoute::post("/v1/organizations/{organization_id}/denials"),
+            IdempotentRoute::post("/v1/events/{event_id}/denials"),
+        ]
     }
 }

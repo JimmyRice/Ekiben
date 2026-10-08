@@ -90,7 +90,7 @@ as `shop`, `attestor`, `reserve`, `drain`); the full journey over real TCP is
   Option<&Principal>, ids, its own input struct)` and does authorization, validation, store
   calls, audit and outbox events; it never imports `axum` or `dto` (build errors with
   `crate::error::StatusCode`). A handler extracts, converts with `dto`, calls **one** service
-  fn and shapes the response (status, headers, `IdempotentByDesign`); it never calls
+  fn and shapes the response (status, headers); it never calls
   `state.store()`, `authorize` or `audit`. Only failures of HTTP itself (an unreadable body)
   are raised in routes. PUT and PATCH map to the same `update_*(…, version, Changes)` service
   fn.
@@ -106,7 +106,8 @@ as `shop`, `attestor`, `reserve`, `drain`); the full journey over real TCP is
   error format.
 - **Idempotency:** anything that may be retried must be safe to repeat (derived ids, unique
   keys returning `Insertion::Existing`, status checks before transitions). Handlers that are
-  idempotent by design insert `IdempotentByDesign` into the response extensions.
+  idempotent by design are declared in `Module::idempotent_routes`; the `Idempotency-Key`
+  middleware lets them through untouched.
 - **Money / time:** `Money` is integer minor units; `Timestamp` is UTC microseconds. Domain
   functions take `now` as an argument; only `Clock` reads time.
 - **Updates** use optimistic concurrency: the client sends the `version` it read; stale → 412.

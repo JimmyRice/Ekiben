@@ -129,7 +129,7 @@ async fn hot_paths_run_a_fixed_number_of_statements() {
     let counts = [
         ("sale offer", offer_statements, 4),
         ("admission", admission_statements, 3),
-        ("purchase", purchase_statements, 4),
+        ("purchase", purchase_statements, 3),
         ("worker, one request", one_request, 12),
         ("worker, three requests", three_requests, 24),
     ];
