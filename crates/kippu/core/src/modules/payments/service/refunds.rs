@@ -11,17 +11,16 @@
 //! money to return and complete at once; cash taken in person is confirmed by an organizer. A
 //! partial refund made outside Kippu has no other way in: it is asked of Kippu like any other.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use kippu_domain::catalog::Event;
 use kippu_domain::outbox::IntegrationEvent;
 use kippu_domain::payment::{PaymentAttestation, PaymentDisposition};
-use kippu_domain::purchase::LineItem;
 use kippu_domain::refund::{Refund, RefundReason, RefundStatus};
 use kippu_domain::reservation::{Reservation, ReservationStatus};
 use kippu_domain::ticket::{Ticket, TicketStatus};
 use kippu_domain::{AttestorId, Money, RefundId, ReservationId, TicketId, Timestamp};
-use kippu_store::{Insertion, StoreTx};
+use kippu_store::{Insertion, LineItems, StoreTx};
 
 use crate::app::AppState;
 use crate::auth::{Principal, Scope};
@@ -254,19 +253,9 @@ pub(super) async fn revoke(
     if revoked != u64::try_from(refund.ticket_ids.len()).unwrap_or(u64::MAX) {
         return Err(already_revoked());
     }
-    let mut counts: BTreeMap<_, u32> = BTreeMap::new();
-    for ticket in tickets {
-        *counts.entry(ticket.ticket_type_id).or_default() += 1;
-    }
-    let items: Vec<LineItem> = counts
-        .into_iter()
-        .map(|(ticket_type_id, quantity)| LineItem {
-            ticket_type_id,
-            quantity,
-        })
-        .collect();
-    // Quota before stock, each in ticket type order: the order purchases and late payments
-    // take them in, so a refund cannot deadlock with the same buyer's purchase.
+    let items = LineItems::count(tickets.iter().map(|ticket| ticket.ticket_type_id));
+    // Quota before stock: the order purchases and late payments take them in, so a refund
+    // cannot deadlock with the same buyer's purchase.
     tx.inventory()
         .return_quota(reservation.account_id, &items)
         .await?;

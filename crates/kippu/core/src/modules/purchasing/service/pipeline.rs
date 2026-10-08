@@ -7,13 +7,13 @@ use kippu_domain::purchase::{Basket, PurchaseRequest, PurchaseStatus, RejectionR
 use kippu_domain::reservation::{Reservation, ReservationStatus, ReservedItem};
 use kippu_domain::validation::IdempotencyKey;
 use kippu_domain::{AccountId, Duration, Money, PurchaseRequestId, ReservationId};
-use kippu_store::{BoxError, Hold, Insertion, Lease, StoreTx};
+use kippu_store::{BoxError, Insertion, Lease, LineItems, StoreTx};
 use tracing::Instrument;
 
 use crate::app::AppState;
 use crate::error::{ApiError, ApiResult, StatusCode};
 use crate::module::Progress;
-use crate::modules::payments::service::line_items;
+use crate::modules::payments::service::{holds, line_items};
 
 /// The answer to resubmitting a key: the same purchase again, or a different one.
 fn resubmitted(existing: PurchaseRequest, basket: &Basket) -> ApiResult<PurchaseRequest> {
@@ -165,30 +165,18 @@ pub(crate) async fn process(state: &AppState, request: &PurchaseRequest) -> ApiR
     }
 
     let (items, total) = reserved_items(&current, &ticket_types)?;
-    let holds: Vec<Hold> = current
-        .basket
-        .items()
-        .iter()
-        .map(|item| Hold {
-            ticket_type_id: item.ticket_type_id,
-            quantity: item.quantity,
-            per_account_limit: ticket_types
-                .iter()
-                .find(|ticket_type| ticket_type.id == item.ticket_type_id)
-                .map_or(0, |ticket_type| ticket_type.per_account_limit),
-        })
-        .collect();
+    let lines = LineItems::from(&current.basket);
     if !tx
         .inventory()
-        .try_take_quota(current.account_id, &holds)
+        .try_take_quota(current.account_id, &holds(&lines, &ticket_types)?)
         .await?
     {
         reject(&mut *tx, &current, RejectionReason::LimitExceeded, state).await?;
         return Ok(tx.commit().await?);
     }
-    if !tx.inventory().try_hold(current.basket.items()).await? {
+    if !tx.inventory().try_hold(&lines).await? {
         tx.inventory()
-            .return_quota(current.account_id, current.basket.items())
+            .return_quota(current.account_id, &lines)
             .await?;
         reject(&mut *tx, &current, RejectionReason::SoldOut, state).await?;
         return Ok(tx.commit().await?);

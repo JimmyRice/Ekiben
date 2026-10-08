@@ -3,8 +3,8 @@ use kippu_domain::purchase::{LineItem, PurchaseRequest, PurchaseStatus};
 use kippu_domain::reservation::Reservation;
 use kippu_domain::{AccountId, PurchaseRequestId, ReservationId, SaleId, Timestamp};
 use kippu_store::{
-    Hold, Insertion, InventoryTx, Keyset, Lease, PageRequest, PurchaseStore, PurchasesTx,
-    ReservationsTx, StoreError, StoreResult,
+    Hold, Holds, Insertion, InventoryTx, Keyset, Lease, LineItems, PageRequest, PurchaseStore,
+    PurchasesTx, ReservationsTx, StoreError, StoreResult,
 };
 use sqlx::types::Json;
 use uuid::Uuid;
@@ -255,7 +255,7 @@ fn bind_item(query: PgQuery<'_>, item: LineItem) -> PgQuery<'_> {
 
 #[async_trait]
 impl InventoryTx for PostgresTx {
-    async fn try_hold(&mut self, items: &[LineItem]) -> StoreResult<bool> {
+    async fn try_hold(&mut self, items: &LineItems) -> StoreResult<bool> {
         self.all_or_nothing(
             items,
             "UPDATE inventory SET held = held + $2
@@ -266,7 +266,7 @@ impl InventoryTx for PostgresTx {
         .await
     }
 
-    async fn release_held(&mut self, items: &[LineItem]) -> StoreResult<()> {
+    async fn release_held(&mut self, items: &LineItems) -> StoreResult<()> {
         self.for_each_item(
             items,
             "UPDATE inventory SET held = held - $2 WHERE ticket_type_id = $1",
@@ -274,7 +274,7 @@ impl InventoryTx for PostgresTx {
         .await
     }
 
-    async fn sell_held(&mut self, items: &[LineItem]) -> StoreResult<()> {
+    async fn sell_held(&mut self, items: &LineItems) -> StoreResult<()> {
         self.for_each_item(
             items,
             "UPDATE inventory SET held = held - $2, sold = sold + $2 WHERE ticket_type_id = $1",
@@ -282,7 +282,7 @@ impl InventoryTx for PostgresTx {
         .await
     }
 
-    async fn return_sold(&mut self, items: &[LineItem]) -> StoreResult<()> {
+    async fn return_sold(&mut self, items: &LineItems) -> StoreResult<()> {
         // `CHECK (sold >= 0)` refuses returning more than was sold.
         self.for_each_item(
             items,
@@ -291,7 +291,7 @@ impl InventoryTx for PostgresTx {
         .await
     }
 
-    async fn try_sell(&mut self, items: &[LineItem]) -> StoreResult<bool> {
+    async fn try_sell(&mut self, items: &LineItems) -> StoreResult<bool> {
         self.all_or_nothing(
             items,
             "UPDATE inventory SET sold = sold + $2
@@ -302,7 +302,7 @@ impl InventoryTx for PostgresTx {
         .await
     }
 
-    async fn try_take_quota(&mut self, account: AccountId, holds: &[Hold]) -> StoreResult<bool> {
+    async fn try_take_quota(&mut self, account: AccountId, holds: &Holds) -> StoreResult<bool> {
         for hold in holds {
             sqlx::query(
                 "INSERT INTO quotas (account_id, ticket_type_id, taken) VALUES ($1, $2, 0)
@@ -331,7 +331,7 @@ impl InventoryTx for PostgresTx {
         .await
     }
 
-    async fn return_quota(&mut self, account: AccountId, items: &[LineItem]) -> StoreResult<()> {
+    async fn return_quota(&mut self, account: AccountId, items: &LineItems) -> StoreResult<()> {
         for item in items {
             sqlx::query(
                 "UPDATE quotas SET taken = taken - $3 WHERE account_id = $1 AND ticket_type_id = $2",

@@ -45,8 +45,8 @@ use kippu_domain::{
 };
 
 use crate::{
-    AuditEntry, EventFilter, EventOrder, Hold, Insertion, Keyset, Lease, PageRequest, Session,
-    SessionRenewal, Store, StoreError, Unlink, WebhookRun,
+    AuditEntry, EventFilter, EventOrder, Holds, Insertion, Keyset, Lease, LineItems, PageRequest,
+    Session, SessionRenewal, Store, StoreError, Unlink, WebhookRun,
 };
 
 /// A store under test, plus whatever must outlive it (e.g. a temporary directory).
@@ -262,6 +262,10 @@ fn line(ticket_type: TicketTypeId, quantity: u32) -> LineItem {
     }
 }
 
+fn lines<const N: usize>(lines: [LineItem; N]) -> LineItems {
+    LineItems::new(lines)
+}
+
 fn purchase_request(account: AccountId, catalog: &Catalog, key: &str) -> PurchaseRequest {
     let key = IdempotencyKey::new(key).unwrap();
     PurchaseRequest {
@@ -406,7 +410,7 @@ pub async fn inventory_never_oversells(store: Arc<dyn Store>) {
             let mut tx = store.begin().await.unwrap();
             let held = tx
                 .inventory()
-                .try_hold(&[line(ticket_type, 1)])
+                .try_hold(&lines([line(ticket_type, 1)]))
                 .await
                 .unwrap();
             tx.commit().await.unwrap();
@@ -435,7 +439,7 @@ pub async fn holds_are_all_or_nothing(store: Arc<dyn Store>) {
     let mut tx = store.begin().await.unwrap();
     let held = tx
         .inventory()
-        .try_hold(&[line(first, 2), line(second, 2)])
+        .try_hold(&lines([line(first, 2), line(second, 2)]))
         .await
         .unwrap();
     assert!(!held, "the second ticket type has only one ticket");
@@ -445,13 +449,13 @@ pub async fn holds_are_all_or_nothing(store: Arc<dyn Store>) {
     let mut tx = store.begin().await.unwrap();
     assert!(
         !tx.inventory()
-            .try_sell(&[line(first, 1), line(second, 2)])
+            .try_sell(&lines([line(first, 1), line(second, 2)]))
             .await
             .unwrap()
     );
     assert!(
         tx.inventory()
-            .try_sell(&[line(first, 1), line(second, 1)])
+            .try_sell(&lines([line(first, 1), line(second, 1)]))
             .await
             .unwrap()
     );
@@ -467,39 +471,43 @@ pub async fn quotas_are_enforced_and_all_or_nothing(store: Arc<dyn Store>) {
     let catalog = catalog(store.as_ref(), &[100, 100]).await;
     let (first, second) = (catalog.ticket_types[0], catalog.ticket_types[1]);
     let buyer = account(store.as_ref()).await;
-    let hold = |ticket_type, quantity| Hold {
-        ticket_type_id: ticket_type,
-        quantity,
-        per_account_limit: 4,
+    // Every type allows four tickets per account.
+    let hold = |claims: &[(TicketTypeId, u32)]| {
+        let items = LineItems::new(
+            claims
+                .iter()
+                .map(|&(ticket_type, quantity)| line(ticket_type, quantity)),
+        );
+        Holds::new(&items, |_| Some(4)).unwrap()
     };
 
     let mut tx = store.begin().await.unwrap();
     assert!(
         tx.inventory()
-            .try_take_quota(buyer, &[hold(first, 3)])
+            .try_take_quota(buyer, &hold(&[(first, 3)]))
             .await
             .unwrap()
     );
     // 3 + 2 > 4 on the first type: nothing may be taken on the second either.
     assert!(
         !tx.inventory()
-            .try_take_quota(buyer, &[hold(first, 2), hold(second, 4)])
+            .try_take_quota(buyer, &hold(&[(first, 2), (second, 4)]))
             .await
             .unwrap()
     );
     assert!(
         tx.inventory()
-            .try_take_quota(buyer, &[hold(second, 4)])
+            .try_take_quota(buyer, &hold(&[(second, 4)]))
             .await
             .unwrap()
     );
     tx.inventory()
-        .return_quota(buyer, &[line(first, 3)])
+        .return_quota(buyer, &lines([line(first, 3)]))
         .await
         .unwrap();
     assert!(
         tx.inventory()
-            .try_take_quota(buyer, &[hold(first, 4)])
+            .try_take_quota(buyer, &hold(&[(first, 4)]))
             .await
             .unwrap()
     );
@@ -513,7 +521,7 @@ pub async fn dropped_transactions_roll_back(store: Arc<dyn Store>) {
         let mut tx = store.begin().await.unwrap();
         assert!(
             tx.inventory()
-                .try_hold(&[line(ticket_type, 3)])
+                .try_hold(&lines([line(ticket_type, 3)]))
                 .await
                 .unwrap()
         );
@@ -812,7 +820,7 @@ pub async fn capacity_cannot_drop_below_stock_in_use(store: Arc<dyn Store>) {
     let mut tx = store.begin().await.unwrap();
     assert!(
         tx.inventory()
-            .try_hold(&[line(ticket_type, 6)])
+            .try_hold(&lines([line(ticket_type, 6)]))
             .await
             .unwrap()
     );
@@ -1756,7 +1764,7 @@ pub async fn audit_log_reads_newest_first_in_pages(store: Arc<dyn Store>) {
 async fn issued(store: &dyn Store, catalog: &Catalog, count: u32) -> (Reservation, Vec<Ticket>) {
     let mut reservation = reservation(store, catalog, ReservationStatus::Issued, now()).await;
     reservation.items[0].quantity = count;
-    let items = [line(catalog.ticket_types[0], count)];
+    let items = lines([line(catalog.ticket_types[0], count)]);
     let tickets: Vec<Ticket> = (0..count)
         .map(|_| Ticket {
             id: TicketId::generate(),
@@ -1847,7 +1855,7 @@ pub async fn refunded_tickets_return_to_stock(store: Arc<dyn Store>) {
 
     let mut tx = store.begin().await.unwrap();
     tx.inventory()
-        .return_sold(&[line(ticket_type, 2)])
+        .return_sold(&lines([line(ticket_type, 2)]))
         .await
         .unwrap();
     tx.commit().await.unwrap();
@@ -1858,7 +1866,7 @@ pub async fn refunded_tickets_return_to_stock(store: Arc<dyn Store>) {
     let mut tx = store.begin().await.unwrap();
     assert!(
         tx.inventory()
-            .try_hold(&[line(ticket_type, 2)])
+            .try_hold(&lines([line(ticket_type, 2)]))
             .await
             .unwrap()
     );
@@ -1866,7 +1874,7 @@ pub async fn refunded_tickets_return_to_stock(store: Arc<dyn Store>) {
     let mut tx = store.begin().await.unwrap();
     assert!(
         tx.inventory()
-            .return_sold(&[line(ticket_type, 2)])
+            .return_sold(&lines([line(ticket_type, 2)]))
             .await
             .is_err()
     );
