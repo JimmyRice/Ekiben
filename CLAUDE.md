@@ -38,7 +38,7 @@ Keep the repository root uncluttered and do not add speculative `.gitignore` ent
 ## Commands
 
 ```bash
-cargo test --workspace --all-features                                   # 290 tests incl. e2e over TCP
+cargo test --workspace --all-features                                   # 311 tests incl. e2e over TCP
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets           # default features too
 cargo fmt --all
@@ -68,7 +68,9 @@ EKIBEN_TEST_BACKEND=postgres cargo test -p kippu-core                    # HTTP 
 EKIBEN_TEST_BACKEND=mysql cargo test -p kippu-core                       # … and on MySQL
 ```
 
-Run all of the checks before every commit. Tests for HTTP behaviour live in
+Run all of the checks before every commit. `tests/statements.rs` (kippu-core) bounds how many
+database statements the busiest paths run on each backend; lower its bounds when a change
+saves statements, never raise them to make a change pass. Tests for HTTP behaviour live in
 `crates/kippu/core/tests/` (in-process router + SQLite, `tests/support/mod.rs` has helpers such
 as `shop`, `attestor`, `reserve`, `drain`); the full journey over real TCP is
 `crates/kippu/server/tests/e2e_purchase.rs`.
@@ -280,7 +282,6 @@ Do not change these unless the user explicitly asks.
 
 ## Open tasks
 
-- Purchase worker: process in parallel when `StoreCapabilities::concurrent_writers`.
 - CI: run the three UniFFI packaging flows (swift-package, kotlin, nuget) and add size budgets;
   run the Android AAR on a device or emulator (it has only been built).
 - `kaisatsu-wasm` published as an npm package.
