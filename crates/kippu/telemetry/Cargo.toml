@@ -9,13 +9,20 @@ publish.workspace = true
 [features]
 ## The log layer and its formats (pretty, compact, json); everything a launcher needs.
 ## Without it the crate is only the span contract, which is all a library has to depend on.
-layer = ["dep:http", "dep:serde_json", "dep:time", "dep:tracing-subscriber"]
+layer = [
+    "dep:http",
+    "dep:serde_json",
+    "dep:time",
+    "dep:tracing-appender",
+    "dep:tracing-subscriber",
+]
 
 [dependencies]
 http = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 time = { workspace = true, optional = true, features = ["formatting"] }
 tracing.workspace = true
+tracing-appender = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true, features = ["env-filter"] }
 
 [lints]
