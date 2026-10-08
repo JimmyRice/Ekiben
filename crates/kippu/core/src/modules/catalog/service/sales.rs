@@ -1,11 +1,11 @@
 //! Sales: the windows in which an event's tickets are sold.
 
 use kippu_domain::admission::AdmissionPolicy;
-use kippu_domain::catalog::{EventSummary, Sale, TicketType};
+use kippu_domain::catalog::{EventSummary, Inventory, Sale, TicketType};
 use kippu_domain::payment::Environment;
 use kippu_domain::{AttestorId, EventId, SaleId, Timestamp};
 
-use super::{availability, check_version, visible_event, writable_event};
+use super::{check_version, visible_event, writable_event};
 use crate::app::AppState;
 use crate::auth::Principal;
 use crate::error::{ApiError, ApiResult};
@@ -118,12 +118,25 @@ pub async fn writable_sale(
     Ok((sale, event))
 }
 
-/// A sale with its ticket types and their availability.
+/// A sale with its ticket types and their availability, in two reads whatever the number of
+/// ticket types.
 async fn offer(state: &AppState, sale: Sale) -> ApiResult<SaleOffer> {
-    let mut ticket_types = Vec::new();
-    for ticket_type in state.store().list_ticket_types(sale.id).await? {
-        ticket_types.push(availability(state, ticket_type).await?);
-    }
+    let store = state.store();
+    let ticket_types = store.list_ticket_types(sale.id).await?;
+    let stock = store.sale_inventory(sale.id).await?;
+    let ticket_types = ticket_types
+        .into_iter()
+        .map(|ticket_type| {
+            let available = stock
+                .iter()
+                .find(|inventory| inventory.ticket_type_id == ticket_type.id)
+                .map_or(0, Inventory::available);
+            TicketTypeAvailability {
+                ticket_type,
+                available,
+            }
+        })
+        .collect();
     Ok(SaleOffer { sale, ticket_types })
 }
 

@@ -86,6 +86,7 @@ macro_rules! conformance_tests {
             purchase_requests_are_idempotent,
             inventory_never_oversells,
             holds_are_all_or_nothing,
+            sale_inventory_reads_every_type_at_once,
             quotas_are_enforced_and_all_or_nothing,
             dropped_transactions_roll_back,
             claims_are_exclusive_until_the_lease_lapses,
@@ -429,6 +430,36 @@ pub async fn inventory_never_oversells(store: Arc<dyn Store>) {
     assert_eq!(
         (inventory.held, inventory.sold, inventory.available()),
         (100, 0, 0)
+    );
+}
+
+pub async fn sale_inventory_reads_every_type_at_once(store: Arc<dyn Store>) {
+    let catalog = catalog(store.as_ref(), &[5, 7, 9]).await;
+    let other = catalog_in(store.as_ref(), organization(store.as_ref()).await, &[3]).await;
+    let mut tx = store.begin().await.unwrap();
+    assert!(
+        tx.inventory()
+            .try_hold(&lines([line(catalog.ticket_types[1], 2)]))
+            .await
+            .unwrap()
+    );
+    tx.commit().await.unwrap();
+
+    let mut one_by_one = Vec::new();
+    for &ticket_type in &catalog.ticket_types {
+        one_by_one.push(store.inventory(ticket_type).await.unwrap().unwrap());
+    }
+    assert_eq!(
+        store.sale_inventory(catalog.sale).await.unwrap(),
+        one_by_one
+    );
+    assert_eq!(store.sale_inventory(other.sale).await.unwrap().len(), 1);
+    assert!(
+        store
+            .sale_inventory(SaleId::generate())
+            .await
+            .unwrap()
+            .is_empty()
     );
 }
 

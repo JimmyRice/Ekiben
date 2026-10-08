@@ -127,7 +127,7 @@ async fn hot_paths_run_a_fixed_number_of_statements() {
     let ((), three_requests) = statements.of(app.drain("purchases")).await;
 
     let counts = [
-        ("sale offer", offer_statements, 6),
+        ("sale offer", offer_statements, 4),
         ("admission", admission_statements, 3),
         ("purchase", purchase_statements, 4),
         ("worker, one request", one_request, 12),

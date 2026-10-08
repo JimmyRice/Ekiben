@@ -126,6 +126,9 @@ pub trait CatalogStore {
     async fn list_ticket_types(&self, sale: SaleId) -> StoreResult<Vec<TicketType>>;
     /// Current stock of a ticket type.
     async fn inventory(&self, ticket_type: TicketTypeId) -> StoreResult<Option<Inventory>>;
+    /// Current stock of every ticket type of a sale, in ticket type order: one read for what
+    /// [`CatalogStore::inventory`] would need one per type for.
+    async fn sale_inventory(&self, sale: SaleId) -> StoreResult<Vec<Inventory>>;
 
     /// Marks an event as a favourite of an account. Idempotent.
     async fn add_favorite(

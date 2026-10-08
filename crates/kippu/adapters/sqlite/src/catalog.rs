@@ -375,6 +375,19 @@ impl CatalogStore for SqliteStore {
         Ok(row.map(Inventory::from))
     }
 
+    async fn sale_inventory(&self, sale: SaleId) -> StoreResult<Vec<Inventory>> {
+        let rows = sqlx::query_as::<_, InventoryRow>(
+            "SELECT inventory.ticket_type_id, inventory.capacity, inventory.held, inventory.sold
+             FROM inventory JOIN ticket_types ON ticket_types.id = inventory.ticket_type_id
+             WHERE ticket_types.sale_id = ?1 ORDER BY inventory.ticket_type_id",
+        )
+        .bind(sale.as_uuid())
+        .fetch_all(&self.reader)
+        .await
+        .map_err(error)?;
+        Ok(rows.into_iter().map(Inventory::from).collect())
+    }
+
     async fn add_favorite(
         &self,
         account: AccountId,

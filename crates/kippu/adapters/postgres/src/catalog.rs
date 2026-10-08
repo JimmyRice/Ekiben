@@ -369,6 +369,19 @@ impl CatalogStore for PostgresStore {
         optional(row)
     }
 
+    async fn sale_inventory(&self, sale: SaleId) -> StoreResult<Vec<Inventory>> {
+        let rows = sqlx::query_as::<_, InventoryRow>(
+            "SELECT inventory.ticket_type_id, inventory.capacity, inventory.held, inventory.sold
+             FROM inventory JOIN ticket_types ON ticket_types.id = inventory.ticket_type_id
+             WHERE ticket_types.sale_id = $1 ORDER BY inventory.ticket_type_id",
+        )
+        .bind(sale.as_uuid())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(error)?;
+        all(rows)
+    }
+
     async fn add_favorite(
         &self,
         account: AccountId,
