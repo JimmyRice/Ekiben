@@ -36,7 +36,7 @@ pub struct TicketDetails {
 /// The keys tickets are signed with.
 pub fn gate_keys(state: &AppState) -> GateKeys {
     GateKeys {
-        issuer: state.config().issuer.id.clone(),
+        issuer: state.config().issuer.id.to_string(),
         keys: state.tickets().published(),
     }
 }
@@ -136,7 +136,7 @@ fn claims(
 ) -> kaisatsu::Claims {
     let uuid = |id: uuid::Uuid| kaisatsu::Uuid::from_bytes(id.into_bytes());
     kaisatsu::Claims {
-        issuer: state.config().issuer.id.clone(),
+        issuer: state.config().issuer.id.to_string(),
         event_id: uuid(event_id.as_uuid()),
         ticket_id: kaisatsu::Uuid::from_bytes([0; 16]),
         ticket_type_id: uuid(ticket_type.id.as_uuid()),

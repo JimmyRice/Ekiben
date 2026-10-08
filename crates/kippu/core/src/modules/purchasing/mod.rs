@@ -59,12 +59,12 @@ impl Module for Purchasing {
         vec![
             BackgroundTask::every(
                 "purchases",
-                Duration::from_millis(workers.purchase_interval_ms),
+                Duration::from_millis(workers.purchase_interval_ms.get()),
                 service::process_batch,
             ),
             BackgroundTask::every(
                 "reservation-expiry",
-                Duration::from_millis(workers.expiry_interval_ms),
+                Duration::from_millis(workers.expiry_interval_ms.get()),
                 service::expire_batch,
             ),
         ]

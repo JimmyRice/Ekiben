@@ -69,4 +69,32 @@ mod tests {
         assert_eq!(database.url.expose_secret(), "sqlite://kippu.db");
         assert!(extract_database(&Figment::new()).is_err());
     }
+
+    #[test]
+    fn meaningless_values_are_refused_when_loading() {
+        let base = [
+            ("database.url", "sqlite://kippu.db"),
+            (
+                "keys.ticket_signing_key",
+                "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+            ),
+            (
+                "keys.token_signing_key",
+                "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+            ),
+        ]
+        .into_iter()
+        .fold(Figment::new(), |figment, (key, value)| {
+            with_override(figment, key, Some(value))
+        });
+        assert!(extract(&base).is_ok());
+
+        let zero = with_override(base.clone(), "workers.purchase_batch_size", Some(0));
+        let error = extract(&zero).unwrap_err().to_string();
+        assert!(error.contains("purchase_batch_size"), "{error}");
+
+        let long = with_override(base, "issuer.id", Some("x".repeat(65)));
+        let error = extract(&long).unwrap_err().to_string();
+        assert!(error.contains("1 to 64 bytes"), "{error}");
+    }
 }

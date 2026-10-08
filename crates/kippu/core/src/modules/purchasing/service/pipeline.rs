@@ -267,16 +267,16 @@ pub(crate) async fn process_batch(state: AppState) -> Result<Progress, BoxError>
     let now = state.now();
     let lease = Lease {
         now,
-        until: now + Duration::seconds(i64::from(workers.purchase_lease_seconds)),
+        until: now + Duration::seconds(i64::from(workers.purchase_lease_seconds.get())),
     };
-    let batch_size = workers.purchase_batch_size;
+    let batch_size = workers.purchase_batch_size.get();
     let claimed = state
         .store()
         .claim_purchase_requests(lease, batch_size)
         .await?;
     let full = claimed.len() >= batch_size as usize;
     let concurrency = if state.store().capabilities().concurrent_writers {
-        workers.purchase_concurrency.max(1) as usize
+        workers.purchase_concurrency.get() as usize
     } else {
         1
     };

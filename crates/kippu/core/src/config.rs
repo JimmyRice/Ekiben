@@ -1,10 +1,30 @@
 //! Configuration. Every value can come from a file, the environment or the command line; the
 //! launcher (`kippu-server`) merges those sources into this structure.
 
+use std::fmt;
 use std::net::SocketAddr;
+use std::num::{NonZeroU32, NonZeroU64};
 
 use secrecy::SecretString;
 use serde::Deserialize;
+
+use crate::keys::ConfigError;
+
+/// `n` as a [`NonZeroU32`]; call it in a `const` block so a zero fails to compile.
+const fn nonzero(n: u32) -> NonZeroU32 {
+    match NonZeroU32::new(n) {
+        Some(n) => n,
+        None => panic!("a default must not be zero"),
+    }
+}
+
+/// `n` as a [`NonZeroU64`]; call it in a `const` block so a zero fails to compile.
+const fn nonzero64(n: u64) -> NonZeroU64 {
+    match NonZeroU64::new(n) {
+        Some(n) => n,
+        None => panic!("a default must not be zero"),
+    }
+}
 
 /// Everything a Kippu instance needs to know.
 #[derive(Debug, Clone, Deserialize)]
@@ -47,7 +67,7 @@ pub struct ServerConfig {
     /// Address to listen on.
     pub listen: SocketAddr,
     /// Requests running longer than this are answered with 408.
-    pub request_timeout_seconds: u64,
+    pub request_timeout_seconds: NonZeroU64,
     /// Largest accepted request body.
     pub max_body_bytes: usize,
     /// Origins allowed to call the API from a browser. Empty disables CORS.
@@ -58,7 +78,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             listen: SocketAddr::from(([0, 0, 0, 0], 8080)),
-            request_timeout_seconds: 30,
+            request_timeout_seconds: const { nonzero64(30) },
             max_body_bytes: 1024 * 1024,
             cors_allowed_origins: Vec::new(),
         }
@@ -87,14 +107,61 @@ const fn enabled() -> bool {
 pub struct IssuerConfig {
     /// Written into every ticket's `issuer` claim and required as the `aud` of root tokens,
     /// e.g. `kippu.example.org`.
-    pub id: String,
+    pub id: IssuerId,
 }
 
 impl Default for IssuerConfig {
     fn default() -> Self {
         Self {
-            id: "kippu".to_owned(),
+            id: IssuerId(DEFAULT_ISSUER.to_owned()),
         }
+    }
+}
+
+const DEFAULT_ISSUER: &str = "kippu";
+
+/// A deployment's issuer id: 1 to 64 bytes, as a ticket's `issuer` claim allows. Checked
+/// when the configuration is read, not when the first ticket is signed.
+#[derive(Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "String")]
+pub struct IssuerId(String);
+
+impl IssuerId {
+    /// Checks an issuer id.
+    pub fn new(id: impl Into<String>) -> Result<Self, ConfigError> {
+        let id = id.into();
+        if id.is_empty() || id.len() > kaisatsu::wire::MAX_ISSUER_LEN {
+            return Err(ConfigError {
+                name: "issuer.id".to_owned(),
+                reason: "must be 1 to 64 bytes",
+            });
+        }
+        Ok(Self(id))
+    }
+
+    /// The id.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for IssuerId {
+    type Error = ConfigError;
+
+    fn try_from(id: String) -> Result<Self, Self::Error> {
+        Self::new(id)
+    }
+}
+
+impl fmt::Debug for IssuerId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.0, f)
+    }
+}
+
+impl fmt::Display for IssuerId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
     }
 }
 
@@ -125,14 +192,14 @@ pub struct RootConfig {
     /// Trusted root public keys.
     pub keys: Vec<RootKey>,
     /// Longest lifetime a root token may claim.
-    pub max_token_ttl_seconds: u32,
+    pub max_token_ttl_seconds: NonZeroU32,
 }
 
 impl Default for RootConfig {
     fn default() -> Self {
         Self {
             keys: Vec::new(),
-            max_token_ttl_seconds: 600,
+            max_token_ttl_seconds: const { nonzero(600) },
         }
     }
 }
@@ -152,13 +219,13 @@ pub struct RootKey {
 #[serde(default, deny_unknown_fields)]
 pub struct AuthConfig {
     /// Lifetime of access tokens.
-    pub access_token_ttl_seconds: u32,
+    pub access_token_ttl_seconds: NonZeroU32,
     /// Lifetime of refresh tokens (sessions).
-    pub refresh_token_ttl_seconds: u32,
+    pub refresh_token_ttl_seconds: NonZeroU32,
     /// How long a waiting-room queue ticket stays usable.
-    pub queue_ticket_ttl_seconds: u32,
+    pub queue_ticket_ttl_seconds: NonZeroU32,
     /// How long an admission pass lets its holder submit purchase requests.
-    pub admission_pass_ttl_seconds: u32,
+    pub admission_pass_ttl_seconds: NonZeroU32,
     /// Link an external sign-in to the existing account with the same email, when the
     /// provider verified that email. Off by default: Kippu does not verify the emails people
     /// register with, so whoever registered an address first would gain the provider's
@@ -169,10 +236,10 @@ pub struct AuthConfig {
 impl Default for AuthConfig {
     fn default() -> Self {
         Self {
-            access_token_ttl_seconds: 15 * 60,
-            refresh_token_ttl_seconds: 30 * 24 * 60 * 60,
-            queue_ticket_ttl_seconds: 6 * 60 * 60,
-            admission_pass_ttl_seconds: 10 * 60,
+            access_token_ttl_seconds: const { nonzero(15 * 60) },
+            refresh_token_ttl_seconds: const { nonzero(30 * 24 * 60 * 60) },
+            queue_ticket_ttl_seconds: const { nonzero(6 * 60 * 60) },
+            admission_pass_ttl_seconds: const { nonzero(10 * 60) },
             link_by_verified_email: false,
         }
     }
@@ -191,11 +258,11 @@ pub struct QueueConfig {
     /// Publish integration events from the outbox to the queue.
     pub relay_events: bool,
     /// Requests moved from the queue to the database per run, at most.
-    pub inbox_batch_size: u32,
+    pub inbox_batch_size: NonZeroU32,
     /// Events published per run, at most.
-    pub relay_batch_size: u32,
+    pub relay_batch_size: NonZeroU32,
     /// How often both look for work when idle.
-    pub interval_ms: u64,
+    pub interval_ms: NonZeroU64,
 }
 
 impl Default for QueueConfig {
@@ -204,9 +271,9 @@ impl Default for QueueConfig {
             url: None,
             purchase_inbox: true,
             relay_events: true,
-            inbox_batch_size: 200,
-            relay_batch_size: 200,
-            interval_ms: 200,
+            inbox_batch_size: const { nonzero(200) },
+            relay_batch_size: const { nonzero(200) },
+            interval_ms: const { nonzero64(200) },
         }
     }
 }
@@ -252,13 +319,13 @@ impl Default for ImagesConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct WebhooksConfig {
     /// How often due webhooks are looked for.
-    pub interval_ms: u64,
+    pub interval_ms: NonZeroU64,
     /// Events delivered per webhook per run, at most.
-    pub batch_size: u32,
+    pub batch_size: NonZeroU32,
     /// How long one delivery may take before it counts as failed.
-    pub timeout_seconds: u64,
+    pub timeout_seconds: NonZeroU64,
     /// How long a worker holds a webhook while delivering to it.
-    pub lease_seconds: u32,
+    pub lease_seconds: NonZeroU32,
     /// Allow `http://` URLs. Off by default: deliveries carry business data.
     pub allow_http: bool,
     /// Allow URLs that point to loopback, private or link-local addresses (including cloud
@@ -267,13 +334,27 @@ pub struct WebhooksConfig {
     pub allow_private_networks: bool,
 }
 
+impl WebhooksConfig {
+    /// Checks that a webhook's lease leaves time for a delivery: with a lease no longer than
+    /// the timeout, a worker would claim webhooks and never start delivering.
+    pub(crate) fn check(&self) -> Result<(), ConfigError> {
+        if u64::from(self.lease_seconds.get()) <= self.timeout_seconds.get().saturating_add(1) {
+            return Err(ConfigError {
+                name: "webhooks.lease_seconds".to_owned(),
+                reason: "must be more than webhooks.timeout_seconds + 1",
+            });
+        }
+        Ok(())
+    }
+}
+
 impl Default for WebhooksConfig {
     fn default() -> Self {
         Self {
-            interval_ms: 1_000,
-            batch_size: 50,
-            timeout_seconds: 10,
-            lease_seconds: 60,
+            interval_ms: const { nonzero64(1_000) },
+            batch_size: const { nonzero(50) },
+            timeout_seconds: const { nonzero64(10) },
+            lease_seconds: const { nonzero(60) },
             allow_http: false,
             allow_private_networks: false,
         }
@@ -287,30 +368,52 @@ pub struct WorkersConfig {
     /// Run background tasks in this process. Disable to serve HTTP only.
     pub enabled: bool,
     /// Purchase requests claimed per batch.
-    pub purchase_batch_size: u32,
+    pub purchase_batch_size: NonZeroU32,
     /// Pause between purchase batches when the queue is empty.
-    pub purchase_interval_ms: u64,
+    pub purchase_interval_ms: NonZeroU64,
     /// How long a claimed purchase request is reserved for the claiming worker.
-    pub purchase_lease_seconds: u32,
+    pub purchase_lease_seconds: NonZeroU32,
     /// How many sales one batch processes at once, when the database allows concurrent
     /// writers (PostgreSQL, MySQL). Requests of the same sale are always processed in order.
-    pub purchase_concurrency: u32,
+    pub purchase_concurrency: NonZeroU32,
     /// How often overdue reservations are expired.
-    pub expiry_interval_ms: u64,
+    pub expiry_interval_ms: NonZeroU64,
     /// How often waiting rooms admit a batch.
-    pub admission_interval_ms: u64,
+    pub admission_interval_ms: NonZeroU64,
 }
 
 impl Default for WorkersConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            purchase_batch_size: 50,
-            purchase_interval_ms: 200,
-            purchase_lease_seconds: 30,
-            purchase_concurrency: 8,
-            expiry_interval_ms: 1_000,
-            admission_interval_ms: 1_000,
+            purchase_batch_size: const { nonzero(50) },
+            purchase_interval_ms: const { nonzero64(200) },
+            purchase_lease_seconds: const { nonzero(30) },
+            purchase_concurrency: const { nonzero(8) },
+            expiry_interval_ms: const { nonzero64(1_000) },
+            admission_interval_ms: const { nonzero64(1_000) },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_webhook_lease_must_outlast_a_delivery() {
+        assert!(WebhooksConfig::default().check().is_ok());
+        let config = WebhooksConfig {
+            timeout_seconds: const { nonzero64(60) },
+            ..WebhooksConfig::default()
+        };
+        assert!(config.check().is_err());
+    }
+
+    #[test]
+    fn issuer_ids_fit_the_ticket_claim() {
+        assert!(IssuerId::new("kippu.example.org").is_ok());
+        assert!(IssuerId::new("").is_err());
+        assert!(IssuerId::new("x".repeat(65)).is_err());
     }
 }

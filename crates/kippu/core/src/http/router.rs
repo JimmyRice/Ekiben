@@ -51,7 +51,7 @@ pub(crate) fn router(state: &AppState, modules: &[Arc<dyn Module>]) -> Router {
         .layer(CatchPanicLayer::new())
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
-            Duration::from_secs(server.request_timeout_seconds),
+            Duration::from_secs(server.request_timeout_seconds.get()),
         ))
         .layer(middleware::from_fn_with_state(
             Arc::new(BodyLimits {
