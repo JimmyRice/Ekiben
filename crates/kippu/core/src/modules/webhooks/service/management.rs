@@ -6,7 +6,7 @@ use kippu_domain::{OrganizationId, ValidationError, WebhookId};
 
 use crate::app::AppState;
 use crate::auth::{Principal, Scope};
-use crate::error::{ApiError, ApiResult, StatusCode};
+use crate::error::{ApiError, ApiResult, ProblemKind, StatusCode};
 use crate::modules::webhooks::delivery::refusal;
 use crate::modules::webhooks::permissions::{WEBHOOKS_MANAGE, WEBHOOKS_MANAGE_ALL};
 use crate::modules::webhooks::signature::key_id;
@@ -43,7 +43,7 @@ pub struct SigningKey {
 fn not_configured() -> ApiError {
     ApiError::new(
         StatusCode::NOT_IMPLEMENTED,
-        "webhooks-not-configured",
+        ProblemKind::WEBHOOKS_NOT_CONFIGURED,
         "this deployment has no webhook signing key (keys.webhook_signing_key)",
     )
 }

@@ -21,7 +21,7 @@ use axum::http::{StatusCode, header};
 use axum::middleware::Next;
 use axum::response::Response;
 
-use crate::error::Problem;
+use crate::error::{Problem, ProblemKind};
 
 /// The longest rejection text worth reading back as the problem's detail.
 const REJECTION_TEXT: usize = 512;
@@ -62,9 +62,12 @@ fn describe(status: StatusCode, text: String) -> (String, String) {
     let reason = status.canonical_reason().unwrap_or("error");
     let kind = match status {
         StatusCode::BAD_REQUEST if text.starts_with("Invalid URL") || text.contains("query") => {
-            "invalid-parameter".to_owned()
+            ProblemKind::INVALID_PARAMETER.as_str().to_owned()
         }
-        StatusCode::INTERNAL_SERVER_ERROR => "internal".to_owned(),
+        StatusCode::NOT_FOUND => ProblemKind::NOT_FOUND.as_str().to_owned(),
+        StatusCode::METHOD_NOT_ALLOWED => ProblemKind::METHOD_NOT_ALLOWED.as_str().to_owned(),
+        StatusCode::REQUEST_TIMEOUT => ProblemKind::REQUEST_TIMEOUT.as_str().to_owned(),
+        StatusCode::INTERNAL_SERVER_ERROR => ProblemKind::INTERNAL.as_str().to_owned(),
         _ => reason.to_ascii_lowercase().replace(' ', "-"),
     };
     let detail = match (status, text.is_empty()) {

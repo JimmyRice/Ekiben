@@ -23,7 +23,7 @@ use kippu_store::IdempotencyRecord;
 use sha2::{Digest, Sha256};
 
 use crate::app::AppState;
-use crate::error::ApiError;
+use crate::error::{ApiError, ProblemKind};
 
 /// The request header.
 pub const IDEMPOTENCY_KEY: &str = "idempotency-key";
@@ -141,7 +141,7 @@ fn replay(record: &IdempotencyRecord, fingerprint: &str) -> Response {
     if record.fingerprint != fingerprint {
         return ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
-            "idempotency-key-reused",
+            ProblemKind::IDEMPOTENCY_KEY_REUSED,
             "this Idempotency-Key was already used for a different request",
         )
         .into_response();

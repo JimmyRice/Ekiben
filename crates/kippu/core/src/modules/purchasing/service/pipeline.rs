@@ -11,7 +11,7 @@ use kippu_store::{BoxError, Insertion, Lease, LineItems, StoreTx};
 use tracing::Instrument;
 
 use crate::app::AppState;
-use crate::error::{ApiError, ApiResult, StatusCode};
+use crate::error::{ApiError, ApiResult, ProblemKind, StatusCode};
 use crate::module::Progress;
 use crate::modules::payments::service::{holds, line_items};
 
@@ -23,7 +23,7 @@ fn resubmitted(existing: PurchaseRequest, basket: &Basket) -> ApiResult<Purchase
     } else {
         Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
-            "idempotency-key-reused",
+            ProblemKind::IDEMPOTENCY_KEY_REUSED,
             "this Idempotency-Key was already used for a different purchase",
         ))
     }

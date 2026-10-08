@@ -24,7 +24,7 @@ use kippu_store::{Insertion, LineItems, StoreTx};
 
 use crate::app::AppState;
 use crate::auth::{Principal, Scope};
-use crate::error::{ApiError, ApiResult, StatusCode};
+use crate::error::{ApiError, ApiResult, ProblemKind, StatusCode};
 use crate::modules::payments::permissions::{PAYMENTS_MANUAL, REFUNDS_MANAGE, REFUNDS_REQUEST};
 
 /// What to refund.
@@ -116,7 +116,7 @@ fn chosen_tickets(tickets: Vec<Ticket>, named: &[TicketId]) -> ApiResult<Vec<Tic
         if valid.is_empty() {
             return Err(ApiError::new(
                 StatusCode::CONFLICT,
-                "nothing-to-refund",
+                ProblemKind::NOTHING_TO_REFUND,
                 "every ticket of this reservation is already refunded",
             ));
         }
@@ -130,7 +130,7 @@ fn chosen_tickets(tickets: Vec<Ticket>, named: &[TicketId]) -> ApiResult<Vec<Tic
     if chosen.len() != named.len() {
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
-            "ticket-not-in-reservation",
+            ProblemKind::TICKET_NOT_IN_RESERVATION,
             "a ticket to refund is not one of this reservation's",
         ));
     }
@@ -147,7 +147,7 @@ fn chosen_tickets(tickets: Vec<Ticket>, named: &[TicketId]) -> ApiResult<Vec<Tic
 fn already_revoked() -> ApiError {
     ApiError::new(
         StatusCode::CONFLICT,
-        "ticket-revoked",
+        ProblemKind::TICKET_REVOKED,
         "a ticket to refund is already revoked",
     )
 }
@@ -170,14 +170,14 @@ async fn check_refund_period(
             .ok_or_else(|| {
                 ApiError::new(
                     StatusCode::CONFLICT,
-                    "refund-not-allowed",
+                    ProblemKind::REFUND_NOT_ALLOWED,
                     "these tickets cannot be refunded; ask the organizer",
                 )
             })?;
         if now >= until || now >= ticket.valid_from || now >= event.starts_at {
             return Err(ApiError::new(
                 StatusCode::CONFLICT,
-                "refund-not-allowed",
+                ProblemKind::REFUND_NOT_ALLOWED,
                 "the refund period for these tickets has ended; ask the organizer",
             ));
         }
@@ -298,7 +298,7 @@ pub async fn request_refund(
     if reservation.status != ReservationStatus::Issued {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
-            "reservation-not-issued",
+            ProblemKind::RESERVATION_NOT_ISSUED,
             "only a reservation whose tickets were issued can be refunded",
         ));
     }
@@ -393,7 +393,7 @@ pub async fn confirm_manual_refund(
     if refund.attestor_id != AttestorId::MANUAL {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
-            "refund-not-manual",
+            ProblemKind::REFUND_NOT_MANUAL,
             "only refunds of payments taken in person are confirmed by organizers",
         ));
     }

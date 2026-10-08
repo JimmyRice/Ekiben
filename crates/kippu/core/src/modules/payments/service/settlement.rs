@@ -20,7 +20,7 @@ use super::refunds::{new_refund, revoke};
 
 use crate::app::AppState;
 use crate::auth::{Principal, Scope};
-use crate::error::{ApiError, ApiResult, StatusCode};
+use crate::error::{ApiError, ApiResult, ProblemKind, StatusCode};
 use crate::modules::payments::permissions::PAYMENTS_MANUAL;
 use crate::modules::ticketing::service::issue_tickets;
 
@@ -220,7 +220,7 @@ pub async fn settle(
     if !attestor.id.is_builtin() && !sale.accepts(attestor.id) {
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,
-            "attestor-not-accepted",
+            ProblemKind::ATTESTOR_NOT_ACCEPTED,
             "this sale does not accept payments from this attestor",
         ));
     }
@@ -228,14 +228,14 @@ pub async fn settle(
     {
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,
-            "environment-mismatch",
+            ProblemKind::ENVIRONMENT_MISMATCH,
             "a sandbox attestor cannot settle a live sale",
         ));
     }
     if payment.amount != reservation.total {
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
-            "amount-mismatch",
+            ProblemKind::AMOUNT_MISMATCH,
             format!(
                 "the reservation costs {}, not {}",
                 reservation.total, payment.amount
@@ -409,7 +409,7 @@ pub async fn confirm_refund(
         PaymentDisposition::Applied => {
             return Err(ApiError::new(
                 StatusCode::CONFLICT,
-                "payment-applied",
+                ProblemKind::PAYMENT_APPLIED,
                 "this payment paid for issued tickets: confirm a refund of them with its \
                  refund_id, or report a reversal",
             ));

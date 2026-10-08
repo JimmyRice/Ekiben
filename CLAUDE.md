@@ -97,8 +97,9 @@ as `shop`, `attestor`, `reserve`, `drain`); the full journey over real TCP is
 - **Authorization:** `state.authorize(&principal, PERMISSION, Scope::…)`. Grants inherit
   upward; organizers are confined to their organizations, users to their own records. Hide
   other people's records as 404, not 403.
-- **Errors:** `ApiError::new(status, "kebab-kind", detail)` → `urn:kippu:problem:<kind>`. Kinds
-  are API: never rename them. Take bodies with `crate::http::Json`, never `axum::Json`, so
+- **Errors:** `ApiError::new(status, ProblemKind::SALE_CLOSED, detail)` →
+  `urn:kippu:problem:<kind>`. Kinds are API: a new one is a `ProblemKind` constant added to
+  `ProblemKind::ALL` and to the `kinds_are_never_renamed` list; never rename one. Take bodies with `crate::http::Json`, never `axum::Json`, so
   unreadable bodies are problems too (`invalid-json`, `unsupported-media-type`,
   `payload-too-large`). Errors the framework answers (unknown route, wrong method, bad path
   parameter, panic, timeout) are rewritten into problems by `http/problems.rs`; clients see one

@@ -21,7 +21,7 @@ use kippu_domain::payment::Attestor;
 use sha2::{Digest, Sha256};
 
 use crate::app::AppState;
-use crate::error::{ApiError, ApiResult};
+use crate::error::{ApiError, ApiResult, ProblemKind};
 
 /// The request header carrying the signature.
 pub const SIGNATURE_HEADER: &str = "kippu-signature";
@@ -96,7 +96,7 @@ impl Attested {
         serde_json::from_slice(&self.body).map_err(|error| {
             ApiError::new(
                 axum::http::StatusCode::BAD_REQUEST,
-                "invalid-json",
+                ProblemKind::INVALID_JSON,
                 error.to_string(),
             )
         })

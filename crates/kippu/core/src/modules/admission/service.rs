@@ -8,7 +8,7 @@ use kippu_store::BoxError;
 use crate::app::AppState;
 use crate::auth::tokens::IssuedToken;
 use crate::auth::{Principal, Scope};
-use crate::error::{ApiError, ApiResult, StatusCode};
+use crate::error::{ApiError, ApiResult, ProblemKind, StatusCode};
 use crate::module::Progress;
 use crate::modules::catalog::service::visible_sale;
 use crate::modules::purchasing::permissions::PURCHASES_CREATE;
@@ -39,7 +39,7 @@ pub enum Admission {
 fn admission_required() -> ApiError {
     ApiError::new(
         StatusCode::FORBIDDEN,
-        "admission-required",
+        ProblemKind::ADMISSION_REQUIRED,
         "join the waiting room first",
     )
 }
@@ -57,7 +57,7 @@ pub async fn join_waiting_room(
     if !matches!(sale.admission, AdmissionPolicy::WaitingRoom { .. }) {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
-            "no-waiting-room",
+            ProblemKind::NO_WAITING_ROOM,
             "this sale has no waiting room",
         ));
     }

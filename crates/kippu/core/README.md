@@ -25,7 +25,7 @@ existing one:
 A service function takes the [`AppState`], the caller (`&Principal`, or
 `Option<&Principal>` for public reads), ids and a plain input struct of its own (`NewEvent`,
 `EventChanges`, …), and returns domain types or its own output structs; errors are
-[`ApiError`]s (problem kinds are part of the API). Services are public, so your own modules
+[`ApiError`]s whose [`ProblemKind`] is part of the API. Services are public, so your own modules
 can reuse them — for example `catalog::service::writable_event` to check that the caller may
 edit an event.
 
