@@ -135,6 +135,67 @@ async fn sales_and_ticket_types_can_be_patched() {
 }
 
 #[tokio::test]
+async fn a_sale_sells_in_one_currency() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let now = app.now();
+    let ticket_type = |currency: &str| {
+        json!({
+            "name": "Day 2",
+            "price": { "amount_minor": 100, "currency": currency },
+            "capacity": 10,
+            "valid_from": (now + kippu_domain::Duration::days(30)).to_string(),
+            "valid_until": (now + kippu_domain::Duration::days(31)).to_string(),
+        })
+    };
+    let path = format!("/v1/sales/{}/ticket-types", shop.sale_id);
+
+    let yuan = app
+        .call(
+            Method::POST,
+            &path,
+            Some(&shop.organizer),
+            Some(ticket_type("CNY")),
+        )
+        .await;
+    assert_eq!(
+        yuan.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{:?}",
+        yuan.body
+    );
+    assert_eq!(yuan.body["type"], "urn:kippu:problem:invalid-request");
+    let yen = app
+        .call(
+            Method::POST,
+            &path,
+            Some(&shop.organizer),
+            Some(ticket_type("JPY")),
+        )
+        .await;
+    assert_eq!(yen.status, StatusCode::CREATED, "{:?}", yen.body);
+
+    // Moving one of two ticket types to another currency is refused too.
+    let moved = app
+        .call(
+            Method::PATCH,
+            &format!("/v1/ticket-types/{}", shop.ticket_type_id),
+            Some(&shop.organizer),
+            Some(json!({
+                "version": 1,
+                "price": { "amount_minor": 100, "currency": "CNY" },
+            })),
+        )
+        .await;
+    assert_eq!(
+        moved.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{:?}",
+        moved.body
+    );
+}
+
+#[tokio::test]
 async fn a_ticket_type_is_visible_wherever_its_event_is() {
     let app = TestApp::start().await;
     let shop = app.shop(10, 1_000, json!({})).await;

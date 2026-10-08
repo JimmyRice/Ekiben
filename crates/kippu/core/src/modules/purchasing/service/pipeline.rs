@@ -96,27 +96,24 @@ fn reserved_items(
     request: &PurchaseRequest,
     ticket_types: &[TicketType],
 ) -> ApiResult<(Vec<ReservedItem>, Money)> {
-    let mut items = Vec::new();
-    let mut total: Option<Money> = None;
-    for item in request.basket.items() {
-        let ticket_type = ticket_types
-            .iter()
-            .find(|ticket_type| ticket_type.id == item.ticket_type_id)
-            .ok_or_else(|| ApiError::internal("ticket type vanished"))?;
-        let line = ticket_type.price.checked_mul(item.quantity);
-        total = match (total, line) {
-            (None, Some(line)) => Some(line),
-            (Some(sum), Some(line)) => sum.checked_add(line),
-            _ => None,
-        };
-        items.push(ReservedItem {
-            ticket_type_id: item.ticket_type_id,
-            quantity: item.quantity,
-            unit_price: ticket_type.price,
-        });
-    }
-    let total =
-        total.ok_or_else(|| ApiError::internal("ticket prices mix currencies or overflow"))?;
+    let items = request
+        .basket
+        .items()
+        .iter()
+        .map(|item| {
+            let ticket_type = ticket_types
+                .iter()
+                .find(|ticket_type| ticket_type.id == item.ticket_type_id)
+                .ok_or_else(|| ApiError::internal("ticket type vanished"))?;
+            Ok(ReservedItem {
+                ticket_type_id: item.ticket_type_id,
+                quantity: item.quantity,
+                unit_price: ticket_type.price,
+            })
+        })
+        .collect::<ApiResult<Vec<_>>>()?;
+    let total = ReservedItem::total(&items)
+        .ok_or_else(|| ApiError::internal("ticket prices mix currencies or overflow"))?;
     Ok((items, total))
 }
 

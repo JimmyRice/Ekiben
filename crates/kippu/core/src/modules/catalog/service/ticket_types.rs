@@ -98,6 +98,22 @@ fn check_refund_period(ticket_type: &TicketType, event: &Event) -> ApiResult<()>
     }
 }
 
+/// Checks that `ticket_type` is priced in the currency of its sale's other ticket types: a
+/// reservation has one total, so one sale sells in one currency.
+async fn check_currency(state: &AppState, ticket_type: &TicketType) -> ApiResult<()> {
+    let others = state.store().list_ticket_types(ticket_type.sale_id).await?;
+    if others.iter().any(|other| {
+        other.id != ticket_type.id && other.price.currency != ticket_type.price.currency
+    }) {
+        return Err(ValidationError::new(
+            "price",
+            "must be in the currency of the sale's other ticket types",
+        )
+        .into());
+    }
+    Ok(())
+}
+
 /// A ticket type the caller may see, with its availability.
 #[tracing::instrument(skip_all)]
 pub async fn ticket_type_offer(
@@ -167,6 +183,7 @@ pub async fn create_ticket_type(
     };
     ticket_type.validate()?;
     check_refund_period(&ticket_type, &event)?;
+    check_currency(state, &ticket_type).await?;
     state.store().insert_ticket_type(&ticket_type).await?;
     Ok(ticket_type)
 }
@@ -206,6 +223,7 @@ pub async fn update_ticket_type(
     };
     ticket_type.validate()?;
     check_refund_period(&ticket_type, &event)?;
+    check_currency(state, &ticket_type).await?;
     state
         .store()
         .update_ticket_type(&ticket_type, expected_version)

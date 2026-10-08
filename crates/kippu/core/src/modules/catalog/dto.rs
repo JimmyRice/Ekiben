@@ -257,7 +257,7 @@ pub struct TicketTypeRequest {
     pub version: Option<i64>,
     /// Display name, e.g. "Day 1".
     pub name: String,
-    /// Price of one ticket.
+    /// Price of one ticket, in the same currency as the sale's other ticket types.
     pub price: Money,
     /// How many tickets exist. Can be raised, or lowered down to what is held and sold.
     pub capacity: u32,
@@ -345,7 +345,7 @@ pub struct TicketTypePatch {
     pub version: i64,
     /// Display name.
     pub name: Option<String>,
-    /// Price of one ticket.
+    /// Price of one ticket, in the same currency as the sale's other ticket types.
     pub price: Option<Money>,
     /// How many tickets exist. Can be raised, or lowered down to what is held and sold.
     pub capacity: Option<u32>,

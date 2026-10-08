@@ -200,6 +200,18 @@ pub struct ReservedItem {
     pub unit_price: Money,
 }
 
+impl ReservedItem {
+    /// What `items` cost together: `None` if there are none, they mix currencies or the sum
+    /// overflows. The first failure ends the sum.
+    pub fn total(items: &[Self]) -> Option<Money> {
+        let mut lines = items
+            .iter()
+            .map(|item| item.unit_price.checked_mul(item.quantity));
+        let first = lines.next()??;
+        lines.try_fold(first, |sum, line| sum.checked_add(line?))
+    }
+}
+
 /// A temporary hold on inventory for one buyer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -274,6 +286,35 @@ mod tests {
         assert!(Issued.cancel().is_err());
         assert!(Issued.expire().is_err());
         assert!(Issued.checkout().is_err());
+    }
+
+    fn line(amount_minor: i64, currency: &str, quantity: u32) -> ReservedItem {
+        ReservedItem {
+            ticket_type_id: TicketTypeId::generate(),
+            quantity,
+            unit_price: Money::new(amount_minor, currency.parse().unwrap()).unwrap(),
+        }
+    }
+
+    #[test]
+    fn totals_stop_at_the_first_failure() {
+        let total = ReservedItem::total(&[line(100, "JPY", 2), line(50, "JPY", 1)]).unwrap();
+        assert_eq!(total.amount_minor, 250);
+        // A failed line never restarts the sum with the lines after it.
+        let mixed = [
+            line(100, "JPY", 1),
+            line(100, "CNY", 1),
+            line(100, "CNY", 1),
+        ];
+        assert_eq!(ReservedItem::total(&mixed), None);
+        let overflow = [
+            line(i64::MAX, "JPY", 1),
+            line(1, "JPY", 1),
+            line(1, "JPY", 1),
+        ];
+        assert_eq!(ReservedItem::total(&overflow), None);
+        assert_eq!(ReservedItem::total(&[line(i64::MAX, "JPY", 2)]), None);
+        assert_eq!(ReservedItem::total(&[]), None);
     }
 
     #[test]
