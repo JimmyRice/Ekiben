@@ -8,10 +8,17 @@ use serde::{Deserialize, Serialize};
 use crate::ValidationError;
 
 /// An ISO 4217 currency code, such as `JPY` or `CNY`.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Deserialize)]
+#[serde(try_from = "String")]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema), schema(value_type = String, example = "JPY"))]
 pub struct Currency([u8; 3]);
+
+impl Serialize for Currency {
+    /// As the three-letter code, without allocating.
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
 
 impl Currency {
     /// Japanese yen.
