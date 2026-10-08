@@ -116,7 +116,8 @@ pub(crate) async fn admit_batches(state: AppState) -> Result<Progress, BoxError>
             continue;
         };
         let room = store.waiting_room(sale_id).await?;
-        let backlog = store.queued_purchase_count(sale_id).await?;
+        // Only whether the backlog reached the limit matters, so counting stops there.
+        let backlog = store.queued_purchase_count(sale_id, max_backlog).await?;
         let next = room.next_admitted_through(admit_per_tick, max_backlog, backlog);
         if next > room.admitted_through
             && store

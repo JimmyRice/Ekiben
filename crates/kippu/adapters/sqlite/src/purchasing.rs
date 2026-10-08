@@ -98,11 +98,13 @@ impl PurchaseStore for SqliteStore {
         Ok(requests)
     }
 
-    async fn queued_purchase_count(&self, sale: SaleId) -> StoreResult<u64> {
+    async fn queued_purchase_count(&self, sale: SaleId, cap: u32) -> StoreResult<u64> {
         let count = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM purchase_requests WHERE sale_id = ?1 AND status = 'queued'",
+            "SELECT COUNT(*) FROM (SELECT 1 FROM purchase_requests
+                                   WHERE sale_id = ?1 AND status = 'queued' LIMIT ?2) AS queued",
         )
         .bind(sale.as_uuid())
+        .bind(i64::from(cap))
         .fetch_one(&self.reader)
         .await
         .map_err(error)?;

@@ -31,8 +31,12 @@ pub trait PurchaseStore {
         limit: u32,
     ) -> StoreResult<Vec<PurchaseRequest>>;
 
-    /// How many requests of a sale are still queued: the backlog the waiting room watches.
-    async fn queued_purchase_count(&self, sale: SaleId) -> StoreResult<u64>;
+    /// How many requests of a sale are still queued, counting no further than `cap`: the
+    /// backlog the waiting room compares with its limit.
+    ///
+    /// **Contract:** returns `min(queued, cap)`, reading at most `cap` rows however long the
+    /// queue is.
+    async fn queued_purchase_count(&self, sale: SaleId, cap: u32) -> StoreResult<u64>;
 
     /// Looks a reservation up by id.
     async fn reservation(&self, id: ReservationId) -> StoreResult<Option<Reservation>>;

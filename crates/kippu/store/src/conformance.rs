@@ -398,7 +398,31 @@ pub async fn purchase_requests_are_idempotent(store: Arc<dyn Store>) {
             Insertion::Existing(request.clone())
         );
     }
-    assert_eq!(store.queued_purchase_count(catalog.sale).await.unwrap(), 1);
+    assert_eq!(
+        store
+            .queued_purchase_count(catalog.sale, 100)
+            .await
+            .unwrap(),
+        1
+    );
+    for key in ["second", "third"] {
+        store
+            .insert_purchase_request(&purchase_request(buyer, &catalog, key))
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        store
+            .queued_purchase_count(catalog.sale, 100)
+            .await
+            .unwrap(),
+        3
+    );
+    // Counting stops at the cap.
+    assert_eq!(
+        store.queued_purchase_count(catalog.sale, 2).await.unwrap(),
+        2
+    );
 }
 
 pub async fn inventory_never_oversells(store: Arc<dyn Store>) {
