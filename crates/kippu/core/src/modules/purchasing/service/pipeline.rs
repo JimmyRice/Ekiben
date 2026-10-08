@@ -1,6 +1,8 @@
 //! The pipeline behind the front door: workers turn queued requests into reservations or
 //! rejections, and expire reservations left unpaid.
 
+use std::collections::HashSet;
+
 use kippu_domain::catalog::{EventSummary, Sale, TicketType};
 use kippu_domain::outbox::IntegrationEvent;
 use kippu_domain::purchase::{Basket, PurchaseRequest, PurchaseStatus, RejectionReason};
@@ -116,19 +118,6 @@ fn reserved_items(
     Ok((items, total))
 }
 
-async fn reject(
-    tx: &mut dyn StoreTx,
-    request: &PurchaseRequest,
-    reason: RejectionReason,
-    state: &AppState,
-) -> ApiResult<()> {
-    tx.purchases()
-        .set_purchase_status(request.id, PurchaseStatus::Rejected { reason }, state.now())
-        .await?;
-    tracing::info!(request = %request.id, ?reason, "purchase request rejected");
-    Ok(())
-}
-
 /// What processing a sale's requests reads of the catalog, once per batch.
 struct SaleCatalog {
     sale: Sale,
@@ -154,97 +143,224 @@ async fn sale_catalog(state: &AppState, sale_id: SaleId) -> ApiResult<SaleCatalo
     })
 }
 
-/// Processes one queued request: reserves its tickets or rejects it, in one transaction.
-/// Processing a request that is no longer queued does nothing, so redelivery is harmless.
+/// What the first phase of processing decided for a request.
+enum Decision {
+    /// Rejected without touching stock.
+    Rejected(RejectionReason),
+    /// Its quota is taken; stock decides.
+    Quota {
+        items: Vec<ReservedItem>,
+        total: Money,
+        lines: LineItems,
+    },
+}
+
+/// What became of a request, for the log once its transaction is committed.
+enum Settled {
+    Rejected(RejectionReason),
+    Reserved(Reservation),
+}
+
+/// Processes queued requests of one sale, none of the same account, in one transaction:
+/// reserves their tickets or rejects them, as processing them one by one in the given order
+/// would. Requests no longer queued are skipped, so redelivery is harmless.
+///
+/// Every quota is taken first, in account order, then the stock of every type the group needs
+/// is locked in ticket type order, and only then is stock taken in the given order: quota
+/// before stock, each in a fixed order, is the lock order every transaction follows, so two
+/// workers' groups cannot deadlock. Accounts being distinct, no request's quota depends
+/// on another's, so the outcomes are those of the one-by-one order. One commit serves the
+/// whole group.
 #[tracing::instrument(skip_all)]
-async fn process(
+async fn process_group(
     state: &AppState,
     catalog: &SaleCatalog,
-    request: &PurchaseRequest,
+    requests: &[PurchaseRequest],
 ) -> ApiResult<()> {
-    let SaleCatalog {
-        sale,
-        ticket_types,
-        event,
-    } = catalog;
     let store = state.store();
-    let denied = store
-        .account_denied(event.organization_id, event.id, request.account_id)
-        .await?;
-
+    let mut denied = Vec::with_capacity(requests.len());
+    for request in requests {
+        denied.push(
+            store
+                .account_denied(
+                    catalog.event.organization_id,
+                    catalog.event.id,
+                    request.account_id,
+                )
+                .await?,
+        );
+    }
     let mut tx = store.begin().await?;
-    let Some(current) = tx.purchases().lock_purchase_request(request.id).await? else {
-        return Ok(());
-    };
-    if current.status != PurchaseStatus::Queued {
-        return Ok(());
-    }
-    let rejection = if denied {
-        Some(RejectionReason::AccountDenied)
-    } else {
-        precheck(&current, sale, ticket_types)
-    };
-    if let Some(reason) = rejection {
-        reject(&mut *tx, &current, reason, state).await?;
-        return Ok(tx.commit().await?);
-    }
-
-    let (items, total) = reserved_items(&current, ticket_types)?;
-    let lines = LineItems::from(&current.basket);
-    if !tx
-        .inventory()
-        .try_take_quota(current.account_id, &holds(&lines, ticket_types)?)
-        .await?
-    {
-        reject(&mut *tx, &current, RejectionReason::LimitExceeded, state).await?;
-        return Ok(tx.commit().await?);
-    }
-    if !tx.inventory().try_hold(&lines).await? {
-        tx.inventory()
-            .return_quota(current.account_id, &lines)
-            .await?;
-        reject(&mut *tx, &current, RejectionReason::SoldOut, state).await?;
-        return Ok(tx.commit().await?);
-    }
-
-    let now = state.now();
-    let reservation = Reservation {
-        id: ReservationId::generate(),
-        purchase_request_id: current.id,
-        account_id: current.account_id,
-        sale_id: sale.id,
-        event_id: sale.event_id,
-        items,
-        total,
-        environment: sale.environment,
-        status: ReservationStatus::Reserved,
-        attestor_id: None,
-        expires_at: now + Duration::seconds(i64::from(sale.reservation_ttl_seconds)),
-        created_at: now,
-        updated_at: now,
-    };
-    tx.reservations().insert_reservation(&reservation).await?;
-    tx.purchases()
-        .set_purchase_status(
-            current.id,
-            PurchaseStatus::Reserved {
-                reservation_id: reservation.id,
-            },
-            now,
-        )
-        .await?;
+    let decisions = decide(&mut *tx, catalog, requests, &denied).await?;
+    let settled = settle(&mut *tx, state, &catalog.sale, requests, decisions).await?;
     tx.commit().await?;
-    tracing::info!(
-        request = %current.id,
-        reservation = %reservation.id,
-        total = %reservation.total,
-        "tickets reserved"
-    );
+
+    for (request, outcome) in settled {
+        match outcome {
+            Settled::Rejected(reason) => {
+                tracing::info!(%request, ?reason, "purchase request rejected");
+            }
+            Settled::Reserved(reservation) => tracing::info!(
+                %request,
+                reservation = %reservation.id,
+                total = %reservation.total,
+                "tickets reserved"
+            ),
+        }
+    }
     Ok(())
 }
 
-/// Processes one sale's requests one after another, in the order given, reading the catalog
-/// once for all of them.
+/// The first phase: locks each request, in account order, and rejects it or takes its quota.
+/// `None` for a request that is no longer queued.
+async fn decide(
+    tx: &mut dyn StoreTx,
+    catalog: &SaleCatalog,
+    requests: &[PurchaseRequest],
+    denied: &[bool],
+) -> ApiResult<Vec<Option<Decision>>> {
+    let mut by_account: Vec<usize> = (0..requests.len()).collect();
+    by_account.sort_by_key(|&index| requests[index].account_id);
+    let mut decisions: Vec<Option<Decision>> = requests.iter().map(|_| None).collect();
+    for index in by_account {
+        let Some(current) = tx
+            .purchases()
+            .lock_purchase_request(requests[index].id)
+            .await?
+        else {
+            continue;
+        };
+        if current.status != PurchaseStatus::Queued {
+            continue;
+        }
+        let rejection = if denied[index] {
+            Some(RejectionReason::AccountDenied)
+        } else {
+            precheck(&current, &catalog.sale, &catalog.ticket_types)
+        };
+        decisions[index] = Some(if let Some(reason) = rejection {
+            Decision::Rejected(reason)
+        } else {
+            let (items, total) = reserved_items(&current, &catalog.ticket_types)?;
+            let lines = LineItems::from(&current.basket);
+            let quota = holds(&lines, &catalog.ticket_types)?;
+            if tx
+                .inventory()
+                .try_take_quota(current.account_id, &quota)
+                .await?
+            {
+                Decision::Quota {
+                    items,
+                    total,
+                    lines,
+                }
+            } else {
+                Decision::Rejected(RejectionReason::LimitExceeded)
+            }
+        });
+    }
+    Ok(decisions)
+}
+
+/// The second phase: takes stock in arrival order and records every request's outcome.
+async fn settle(
+    tx: &mut dyn StoreTx,
+    state: &AppState,
+    sale: &Sale,
+    requests: &[PurchaseRequest],
+    decisions: Vec<Option<Decision>>,
+) -> ApiResult<Vec<(PurchaseRequestId, Settled)>> {
+    // Stock is taken in arrival order, so one request's types may come before an earlier
+    // one's: every type is locked first, in ticket type order, as all other transactions do.
+    // A single request takes its own types in that order anyway.
+    let holding: Vec<&LineItems> = decisions
+        .iter()
+        .flatten()
+        .filter_map(|decision| match decision {
+            Decision::Quota { lines, .. } => Some(lines),
+            Decision::Rejected(_) => None,
+        })
+        .collect();
+    if holding.len() > 1 {
+        let stock = LineItems::new(holding.iter().flat_map(|lines| lines.iter().copied()));
+        tx.inventory().lock_stock(&stock).await?;
+    }
+
+    let mut settled = Vec::with_capacity(requests.len());
+    for (request, decision) in requests.iter().zip(decisions) {
+        let now = state.now();
+        let outcome = match decision {
+            None => continue,
+            Some(Decision::Rejected(reason)) => Settled::Rejected(reason),
+            Some(Decision::Quota {
+                items,
+                total,
+                lines,
+            }) => {
+                if tx.inventory().try_hold(&lines).await? {
+                    let reservation = Reservation {
+                        id: ReservationId::generate(),
+                        purchase_request_id: request.id,
+                        account_id: request.account_id,
+                        sale_id: sale.id,
+                        event_id: sale.event_id,
+                        items,
+                        total,
+                        environment: sale.environment,
+                        status: ReservationStatus::Reserved,
+                        attestor_id: None,
+                        expires_at: now
+                            + Duration::seconds(i64::from(sale.reservation_ttl_seconds)),
+                        created_at: now,
+                        updated_at: now,
+                    };
+                    tx.reservations().insert_reservation(&reservation).await?;
+                    Settled::Reserved(reservation)
+                } else {
+                    tx.inventory()
+                        .return_quota(request.account_id, &lines)
+                        .await?;
+                    Settled::Rejected(RejectionReason::SoldOut)
+                }
+            }
+        };
+        let status = match &outcome {
+            Settled::Rejected(reason) => PurchaseStatus::Rejected { reason: *reason },
+            Settled::Reserved(reservation) => PurchaseStatus::Reserved {
+                reservation_id: reservation.id,
+            },
+        };
+        tx.purchases()
+            .set_purchase_status(request.id, status, now)
+            .await?;
+        settled.push((request.id, outcome));
+    }
+    Ok(settled)
+}
+
+/// Splits one sale's requests, in order, into runs in which no account occurs twice: the
+/// groups [`process_group`] can decide together.
+fn runs(requests: &[PurchaseRequest]) -> Vec<&[PurchaseRequest]> {
+    let mut runs = Vec::new();
+    let mut start = 0;
+    let mut accounts = HashSet::new();
+    for (index, request) in requests.iter().enumerate() {
+        if !accounts.insert(request.account_id) {
+            runs.push(&requests[start..index]);
+            start = index;
+            accounts.clear();
+            accounts.insert(request.account_id);
+        }
+    }
+    if start < requests.len() {
+        runs.push(&requests[start..]);
+    }
+    runs
+}
+
+/// Processes one sale's requests in the order given, reading the catalog once for all of
+/// them and committing each run of distinct accounts at once. A group that fails is rolled
+/// back and processed again one request at a time, so one bad request delays no other.
 async fn process_in_order(state: &AppState, requests: &[PurchaseRequest]) {
     let Some(first) = requests.first() else {
         return;
@@ -257,9 +373,24 @@ async fn process_in_order(state: &AppState, requests: &[PurchaseRequest]) {
             return;
         }
     };
-    for request in requests {
-        if let Err(error) = process(state, &catalog, request).await {
+    for run in runs(requests) {
+        let Err(error) = process_group(state, &catalog, run).await else {
+            continue;
+        };
+        if let [request] = run {
             tracing::warn!(request = %request.id, %error, "purchase request not processed");
+            continue;
+        }
+        tracing::warn!(
+            requests = run.len(),
+            %error,
+            "purchase requests processed together failed; processing them one by one"
+        );
+        for request in run {
+            if let Err(error) = process_group(state, &catalog, std::slice::from_ref(request)).await
+            {
+                tracing::warn!(request = %request.id, %error, "purchase request not processed");
+            }
         }
     }
 }
@@ -410,6 +541,30 @@ mod tests {
             created_at: at,
             updated_at: at,
         }
+    }
+
+    #[test]
+    fn runs_never_repeat_an_account_and_keep_arrival_order() {
+        let sale = SaleId::generate();
+        let (a, b, c) = (
+            AccountId::generate(),
+            AccountId::generate(),
+            AccountId::generate(),
+        );
+        let requests: Vec<_> = [a, b, a, c, b, b]
+            .into_iter()
+            .enumerate()
+            .map(|(second, account)| PurchaseRequest {
+                account_id: account,
+                ..request(sale, i64::try_from(second).unwrap())
+            })
+            .collect();
+        let accounts: Vec<Vec<_>> = runs(&requests)
+            .iter()
+            .map(|run| run.iter().map(|request| request.account_id).collect())
+            .collect();
+        assert_eq!(accounts, vec![vec![a, b], vec![a, c, b], vec![b]]);
+        assert!(runs(&[]).is_empty());
     }
 
     #[test]

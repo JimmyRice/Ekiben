@@ -38,7 +38,7 @@ Keep the repository root uncluttered and do not add speculative `.gitignore` ent
 ## Commands
 
 ```bash
-cargo test --workspace --all-features                                   # 311 tests incl. e2e over TCP
+cargo test --workspace --all-features                                   # 316 tests incl. e2e over TCP
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets           # default features too
 cargo fmt --all
@@ -276,6 +276,12 @@ Do not change these unless the user explicitly asks.
   (`account_denied`) by the worker, not the front door; a reservation held before the denial
   can still be paid (its tickets are refused at the gate). Webhooks are not the channel for gates
   (they need an inbound public endpoint and give no snapshot).
+- **Purchase worker commits in groups:** a sale's requests are processed in runs without a
+  repeated account, one transaction per run: quotas first (account order), then
+  `InventoryTx::lock_stock` on every type the run needs (type order), then stock in arrival
+  order. Outcomes equal one-by-one processing; a run that fails is redone one request at a
+  time. Any transaction that changes several requests' stock must lock it up front the same
+  way (`stock_locked_up_front_never_deadlocks`).
 - **PostgreSQL queue numbers** come from a per-sale counter row (`INSERT … ON CONFLICT DO
   UPDATE`), not a sequence: an admission batch means "the next N people" and needs consecutive
   numbers.

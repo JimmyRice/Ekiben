@@ -257,6 +257,18 @@ fn bind_item(query: PgQuery<'_>, item: LineItem) -> PgQuery<'_> {
 
 #[async_trait]
 impl InventoryTx for PostgresTx {
+    async fn lock_stock(&mut self, items: &LineItems) -> StoreResult<()> {
+        // One row per statement, so the locks are taken exactly in the items' order.
+        for item in items {
+            sqlx::query("SELECT 1 FROM inventory WHERE ticket_type_id = $1 FOR UPDATE")
+                .bind(item.ticket_type_id.as_uuid())
+                .execute(&mut *self.conn)
+                .await
+                .map_err(error)?;
+        }
+        Ok(())
+    }
+
     async fn try_hold(&mut self, items: &LineItems) -> StoreResult<bool> {
         self.all_or_nothing(
             items,

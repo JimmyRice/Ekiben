@@ -317,6 +317,18 @@ impl MySqlTx {
 
 #[async_trait]
 impl InventoryTx for MySqlTx {
+    async fn lock_stock(&mut self, items: &LineItems) -> StoreResult<()> {
+        // One row per statement, so the locks are taken exactly in the items' order.
+        for item in items {
+            sqlx::query("SELECT 1 FROM inventory WHERE ticket_type_id = ? FOR UPDATE")
+                .bind(item.ticket_type_id.as_uuid())
+                .execute(&mut *self.conn)
+                .await
+                .map_err(error)?;
+        }
+        Ok(())
+    }
+
     async fn try_hold(&mut self, items: &LineItems) -> StoreResult<bool> {
         self.stock_all_or_nothing(items, &HOLD).await
     }
