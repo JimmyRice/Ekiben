@@ -9,7 +9,7 @@ use kippu_store::{ObjectError, StoredObject};
 use super::storage::ImageStorage;
 use crate::app::AppState;
 use crate::auth::Principal;
-use crate::error::{ApiError, ApiResult, StatusCode};
+use crate::error::{ApiError, ApiResult, ProblemKind, StatusCode};
 use crate::modules::catalog::service::{visible_event, writable_event};
 
 /// How long clients and CDNs may keep an image: forever, since an image id never gets other
@@ -46,7 +46,7 @@ pub fn storage(state: &AppState) -> ApiResult<&ImageStorage> {
     state.images().ok_or_else(|| {
         ApiError::new(
             StatusCode::NOT_IMPLEMENTED,
-            "images-not-configured",
+            ProblemKind::IMAGES_NOT_CONFIGURED,
             "this deployment has no object storage for images (images.url)",
         )
     })
@@ -93,7 +93,7 @@ pub async fn upload_image(
     let unsupported = |detail: &'static str| {
         ApiError::new(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            "unsupported-media-type",
+            ProblemKind::UNSUPPORTED_MEDIA_TYPE,
             detail,
         )
     };
@@ -111,7 +111,7 @@ pub async fn upload_image(
     if existing.len() >= limit as usize {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
-            "too-many-images",
+            ProblemKind::TOO_MANY_IMAGES,
             format!("an event has at most {limit} images"),
         ));
     }

@@ -12,22 +12,20 @@ use super::service::{self, AddedDenial};
 use crate::app::AppState;
 use crate::auth::Principal;
 use crate::error::{ApiResult, Problem};
-use crate::http::idempotency::IdempotentByDesign;
 use crate::http::{Json, Listing, ListingTag, PageQuery};
 
 const TAG: &str = "denials";
 
 /// 201 for a new denial, 200 for one that was already there. Safe to repeat without the
-/// idempotency middleware: the id is derived from organization, event and subject.
+/// idempotency middleware (the module declares these routes): the id is derived from
+/// organization, event and subject.
 fn added(added: AddedDenial) -> Response {
     let status = if added.created {
         StatusCode::CREATED
     } else {
         StatusCode::OK
     };
-    let mut response = (status, Json(added.denial)).into_response();
-    response.extensions_mut().insert(IdempotentByDesign);
-    response
+    (status, Json(added.denial)).into_response()
 }
 
 /// Refuse a ticket or an account entry to every event of an organization, present and

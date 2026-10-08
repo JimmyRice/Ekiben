@@ -3,8 +3,8 @@ use kippu_domain::purchase::{LineItem, PurchaseRequest, PurchaseStatus};
 use kippu_domain::reservation::Reservation;
 use kippu_domain::{AccountId, PurchaseRequestId, ReservationId, SaleId, TicketTypeId, Timestamp};
 use kippu_store::{
-    Hold, Insertion, InventoryTx, Keyset, Lease, PageRequest, PurchaseStore, PurchasesTx,
-    ReservationsTx, StoreError, StoreResult,
+    Holds, Insertion, InventoryTx, Keyset, Lease, LineItems, PageRequest, PurchaseStore,
+    PurchasesTx, ReservationsTx, StoreError, StoreResult,
 };
 use uuid::Uuid;
 
@@ -117,11 +117,13 @@ impl PurchaseStore for MySqlStore {
         Ok(requests)
     }
 
-    async fn queued_purchase_count(&self, sale: SaleId) -> StoreResult<u64> {
+    async fn queued_purchase_count(&self, sale: SaleId, cap: u32) -> StoreResult<u64> {
         let count = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM purchase_requests WHERE sale_id = ? AND status = 'queued'",
+            "SELECT COUNT(*) FROM (SELECT 1 FROM purchase_requests
+                                   WHERE sale_id = ? AND status = 'queued' LIMIT ?) AS queued",
         )
         .bind(sale.as_uuid())
+        .bind(i64::from(cap))
         .fetch_one(&self.pool)
         .await
         .map_err(error)?;
@@ -315,18 +317,18 @@ impl MySqlTx {
 
 #[async_trait]
 impl InventoryTx for MySqlTx {
-    async fn try_hold(&mut self, items: &[LineItem]) -> StoreResult<bool> {
+    async fn try_hold(&mut self, items: &LineItems) -> StoreResult<bool> {
         self.stock_all_or_nothing(items, &HOLD).await
     }
 
-    async fn release_held(&mut self, items: &[LineItem]) -> StoreResult<()> {
+    async fn release_held(&mut self, items: &LineItems) -> StoreResult<()> {
         for item in items {
             self.stock(HOLD.undo, item).await?;
         }
         Ok(())
     }
 
-    async fn sell_held(&mut self, items: &[LineItem]) -> StoreResult<()> {
+    async fn sell_held(&mut self, items: &LineItems) -> StoreResult<()> {
         for item in items {
             sqlx::query(
                 "UPDATE inventory SET held = held - ?, sold = sold + ? WHERE ticket_type_id = ?",
@@ -341,7 +343,7 @@ impl InventoryTx for MySqlTx {
         Ok(())
     }
 
-    async fn return_sold(&mut self, items: &[LineItem]) -> StoreResult<()> {
+    async fn return_sold(&mut self, items: &LineItems) -> StoreResult<()> {
         // Undoing a sale. `CHECK (sold >= 0)` refuses returning more than was sold: the
         // quantity is signed, so the subtraction goes negative instead of wrapping.
         for item in items {
@@ -350,11 +352,11 @@ impl InventoryTx for MySqlTx {
         Ok(())
     }
 
-    async fn try_sell(&mut self, items: &[LineItem]) -> StoreResult<bool> {
+    async fn try_sell(&mut self, items: &LineItems) -> StoreResult<bool> {
         self.stock_all_or_nothing(items, &SELL).await
     }
 
-    async fn try_take_quota(&mut self, account: AccountId, holds: &[Hold]) -> StoreResult<bool> {
+    async fn try_take_quota(&mut self, account: AccountId, holds: &Holds) -> StoreResult<bool> {
         for hold in holds {
             sqlx::query(
                 "INSERT INTO quotas (account_id, ticket_type_id, taken) VALUES (?, ?, 0)
@@ -392,7 +394,7 @@ impl InventoryTx for MySqlTx {
         Ok(true)
     }
 
-    async fn return_quota(&mut self, account: AccountId, items: &[LineItem]) -> StoreResult<()> {
+    async fn return_quota(&mut self, account: AccountId, items: &LineItems) -> StoreResult<()> {
         for item in items {
             self.quota(
                 account,
@@ -421,8 +423,8 @@ impl ReservationsTx for MySqlTx {
         .bind(reservation.sale_id.as_uuid())
         .bind(reservation.event_id.as_uuid())
         .bind(json(&reservation.items)?)
-        .bind(reservation.total.amount_minor)
-        .bind(reservation.total.currency.as_str())
+        .bind(reservation.total.amount_minor())
+        .bind(reservation.total.currency().as_str())
         .bind(reservation.environment.as_str())
         .bind(reservation.status.as_str())
         .bind(reservation.attestor_id.map(|id| id.as_uuid()))

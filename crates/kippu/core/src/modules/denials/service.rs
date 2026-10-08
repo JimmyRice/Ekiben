@@ -1,6 +1,6 @@
 //! Denial use cases, independent of HTTP: keeping deny lists, and listing what gates refuse.
 
-use kippu_domain::catalog::Event;
+use kippu_domain::catalog::EventSummary;
 use kippu_domain::denial::{Denial, DenialSubject, DeniedTicket};
 use kippu_domain::{DenialId, EventId, OrganizationId, ValidationError};
 use kippu_store::{Insertion, Keyset, Page, PageRequest};
@@ -43,7 +43,7 @@ async fn event_for(
     principal: &Principal,
     permission: Permission,
     id: EventId,
-) -> ApiResult<Event> {
+) -> ApiResult<EventSummary> {
     let event = visible_event(state, Some(principal), id).await?;
     state.authorize(
         principal,
@@ -74,7 +74,7 @@ async fn organization_for(
 async fn check_subject(
     state: &AppState,
     organization: OrganizationId,
-    event: Option<&Event>,
+    event: Option<&EventSummary>,
     subject: DenialSubject,
 ) -> ApiResult<()> {
     match subject {
@@ -85,7 +85,7 @@ async fn check_subject(
                     Some(event) => ticket.event_id == event.id,
                     None => state
                         .store()
-                        .event(ticket.event_id)
+                        .event_summary(ticket.event_id)
                         .await?
                         .is_some_and(|event| event.organization_id == organization),
                 },
@@ -116,7 +116,7 @@ async fn add(
     state: &AppState,
     principal: &Principal,
     organization: OrganizationId,
-    event: Option<&Event>,
+    event: Option<&EventSummary>,
     new: NewDenial,
 ) -> ApiResult<AddedDenial> {
     check_subject(state, organization, event, new.subject).await?;

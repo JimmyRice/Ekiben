@@ -193,6 +193,7 @@ impl Kippu {
             }
         }
 
+        config.webhooks.check()?;
         let ticket_key =
             parse_signing_key("keys.ticket_signing_key", &config.keys.ticket_signing_key)?;
         let retired = config

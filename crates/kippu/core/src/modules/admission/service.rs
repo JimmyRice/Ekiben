@@ -8,7 +8,7 @@ use kippu_store::BoxError;
 use crate::app::AppState;
 use crate::auth::tokens::IssuedToken;
 use crate::auth::{Principal, Scope};
-use crate::error::{ApiError, ApiResult, StatusCode};
+use crate::error::{ApiError, ApiResult, ProblemKind, StatusCode};
 use crate::module::Progress;
 use crate::modules::catalog::service::visible_sale;
 use crate::modules::purchasing::permissions::PURCHASES_CREATE;
@@ -39,7 +39,7 @@ pub enum Admission {
 fn admission_required() -> ApiError {
     ApiError::new(
         StatusCode::FORBIDDEN,
-        "admission-required",
+        ProblemKind::ADMISSION_REQUIRED,
         "join the waiting room first",
     )
 }
@@ -57,7 +57,7 @@ pub async fn join_waiting_room(
     if !matches!(sale.admission, AdmissionPolicy::WaitingRoom { .. }) {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
-            "no-waiting-room",
+            ProblemKind::NO_WAITING_ROOM,
             "this sale has no waiting room",
         ));
     }
@@ -116,7 +116,8 @@ pub(crate) async fn admit_batches(state: AppState) -> Result<Progress, BoxError>
             continue;
         };
         let room = store.waiting_room(sale_id).await?;
-        let backlog = store.queued_purchase_count(sale_id).await?;
+        // Only whether the backlog reached the limit matters, so counting stops there.
+        let backlog = store.queued_purchase_count(sale_id, max_backlog).await?;
         let next = room.next_admitted_through(admit_per_tick, max_backlog, backlog);
         if next > room.admitted_through
             && store

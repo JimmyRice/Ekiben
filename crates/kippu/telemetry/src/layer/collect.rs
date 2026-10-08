@@ -20,10 +20,6 @@ impl Fields {
         self.value(name).and_then(Value::as_u64)
     }
 
-    pub(super) fn float(&self, name: &str) -> Option<f64> {
-        self.value(name).and_then(Value::as_f64)
-    }
-
     fn value(&self, name: &str) -> Option<&Value> {
         self.0
             .iter()

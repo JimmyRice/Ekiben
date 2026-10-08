@@ -120,6 +120,14 @@ fn join_len(low: u8, high: u8) -> usize {
     usize::from(low & 0x7F) | (usize::from(high) << 7)
 }
 
+/// How many bytes a claim of `len` value bytes takes: tag, length and value.
+#[cfg(feature = "issuer")]
+pub(crate) const fn encoded_claim_len(len: usize) -> usize {
+    // Tag byte plus a one- or two-byte length.
+    let overhead = if len < 0x80 { 2 } else { 3 };
+    len.saturating_add(overhead)
+}
+
 /// Appends a canonical LEB128 encoding of `len` (at most [`MAX_CLAIM_LEN`]) to `out`.
 #[cfg(feature = "issuer")]
 #[expect(

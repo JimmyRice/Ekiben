@@ -25,7 +25,7 @@ use utoipa_axum::routes;
 
 use crate::app::AppState;
 use crate::auth::Permission;
-use crate::module::Module;
+use crate::module::{IdempotentRoute, Module};
 
 pub use dto::*;
 
@@ -80,5 +80,14 @@ impl Module for Payments {
             .routes(routes!(routes::refund_tickets, routes::reservation_refunds))
             .routes(routes!(routes::get_refund))
             .routes(routes!(routes::confirm_manual_refund))
+    }
+
+    fn idempotent_routes(&self) -> Vec<IdempotentRoute> {
+        // Attestations are unique per attestor; confirming a refund twice changes nothing.
+        vec![
+            IdempotentRoute::post("/v1/payment-attestations"),
+            IdempotentRoute::post("/v1/reservations/{reservation_id}/manual-payment"),
+            IdempotentRoute::post("/v1/refunds/{refund_id}/manual-confirmation"),
+        ]
     }
 }

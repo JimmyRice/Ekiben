@@ -181,7 +181,7 @@ impl TestApp {
                 auto_migrate: true,
             },
             issuer: IssuerConfig {
-                id: ISSUER.to_owned(),
+                id: ISSUER.to_owned().try_into().unwrap(),
             },
             keys: KeysConfig {
                 ticket_signing_key: STANDARD.encode([1; 32]).into(),
@@ -194,7 +194,7 @@ impl TestApp {
                     name: "owner".to_owned(),
                     public_key: STANDARD.encode(root_key.verifying_key().as_bytes()),
                 }],
-                max_token_ttl_seconds: 600,
+                max_token_ttl_seconds: 600.try_into().unwrap(),
             },
             auth: AuthConfig::default(),
             workers: WorkersConfig::default(),

@@ -47,7 +47,9 @@ pub(crate) fn hash_token(token: &str) -> String {
 pub async fn issue(state: &AppState, account: Account) -> ApiResult<SessionResponse> {
     let now = state.now();
     let refresh_token = random_token()?;
-    let ttl = Duration::seconds(i64::from(state.config().auth.refresh_token_ttl_seconds));
+    let ttl = Duration::seconds(i64::from(
+        state.config().auth.refresh_token_ttl_seconds.get(),
+    ));
     let session = Session {
         id: SessionId::generate(),
         account_id: account.id,
@@ -69,7 +71,9 @@ pub async fn issue(state: &AppState, account: Account) -> ApiResult<SessionRespo
 pub async fn refresh(state: &AppState, refresh_token: &str) -> ApiResult<SessionResponse> {
     let now = state.now();
     let next_token = random_token()?;
-    let ttl = Duration::seconds(i64::from(state.config().auth.refresh_token_ttl_seconds));
+    let ttl = Duration::seconds(i64::from(
+        state.config().auth.refresh_token_ttl_seconds.get(),
+    ));
     let next = SessionRenewal {
         id: SessionId::generate(),
         refresh_token_hash: hash_token(&next_token),

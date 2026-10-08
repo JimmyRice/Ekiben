@@ -38,7 +38,7 @@ Keep the repository root uncluttered and do not add speculative `.gitignore` ent
 ## Commands
 
 ```bash
-cargo test --workspace --all-features                                   # 290 tests incl. e2e over TCP
+cargo test --workspace --all-features                                   # 311 tests incl. e2e over TCP
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets           # default features too
 cargo fmt --all
@@ -68,7 +68,9 @@ EKIBEN_TEST_BACKEND=postgres cargo test -p kippu-core                    # HTTP 
 EKIBEN_TEST_BACKEND=mysql cargo test -p kippu-core                       # … and on MySQL
 ```
 
-Run all of the checks before every commit. Tests for HTTP behaviour live in
+Run all of the checks before every commit. `tests/statements.rs` (kippu-core) bounds how many
+database statements the busiest paths run on each backend; lower its bounds when a change
+saves statements, never raise them to make a change pass. Tests for HTTP behaviour live in
 `crates/kippu/core/tests/` (in-process router + SQLite, `tests/support/mod.rs` has helpers such
 as `shop`, `attestor`, `reserve`, `drain`); the full journey over real TCP is
 `crates/kippu/server/tests/e2e_purchase.rs`.
@@ -90,22 +92,24 @@ as `shop`, `attestor`, `reserve`, `drain`); the full journey over real TCP is
   Option<&Principal>, ids, its own input struct)` and does authorization, validation, store
   calls, audit and outbox events; it never imports `axum` or `dto` (build errors with
   `crate::error::StatusCode`). A handler extracts, converts with `dto`, calls **one** service
-  fn and shapes the response (status, headers, `IdempotentByDesign`); it never calls
+  fn and shapes the response (status, headers); it never calls
   `state.store()`, `authorize` or `audit`. Only failures of HTTP itself (an unreadable body)
   are raised in routes. PUT and PATCH map to the same `update_*(…, version, Changes)` service
   fn.
 - **Authorization:** `state.authorize(&principal, PERMISSION, Scope::…)`. Grants inherit
   upward; organizers are confined to their organizations, users to their own records. Hide
   other people's records as 404, not 403.
-- **Errors:** `ApiError::new(status, "kebab-kind", detail)` → `urn:kippu:problem:<kind>`. Kinds
-  are API: never rename them. Take bodies with `crate::http::Json`, never `axum::Json`, so
+- **Errors:** `ApiError::new(status, ProblemKind::SALE_CLOSED, detail)` →
+  `urn:kippu:problem:<kind>`. Kinds are API: a new one is a `ProblemKind` constant added to
+  `ProblemKind::ALL` and to the `kinds_are_never_renamed` list; never rename one. Take bodies with `crate::http::Json`, never `axum::Json`, so
   unreadable bodies are problems too (`invalid-json`, `unsupported-media-type`,
   `payload-too-large`). Errors the framework answers (unknown route, wrong method, bad path
   parameter, panic, timeout) are rewritten into problems by `http/problems.rs`; clients see one
   error format.
 - **Idempotency:** anything that may be retried must be safe to repeat (derived ids, unique
   keys returning `Insertion::Existing`, status checks before transitions). Handlers that are
-  idempotent by design insert `IdempotentByDesign` into the response extensions.
+  idempotent by design are declared in `Module::idempotent_routes`; the `Idempotency-Key`
+  middleware lets them through untouched.
 - **Money / time:** `Money` is integer minor units; `Timestamp` is UTC microseconds. Domain
   functions take `now` as an argument; only `Clock` reads time.
 - **Updates** use optimistic concurrency: the client sends the `version` it read; stale → 412.
@@ -278,7 +282,6 @@ Do not change these unless the user explicitly asks.
 
 ## Open tasks
 
-- Purchase worker: process in parallel when `StoreCapabilities::concurrent_writers`.
 - CI: run the three UniFFI packaging flows (swift-package, kotlin, nuget) and add size budgets;
   run the Android AAR on a device or emulator (it has only been built).
 - `kaisatsu-wasm` published as an npm package.

@@ -1,19 +1,19 @@
 //! The pipeline behind the front door: workers turn queued requests into reservations or
 //! rejections, and expire reservations left unpaid.
 
-use kippu_domain::catalog::{Sale, TicketType};
+use kippu_domain::catalog::{EventSummary, Sale, TicketType};
 use kippu_domain::outbox::IntegrationEvent;
 use kippu_domain::purchase::{Basket, PurchaseRequest, PurchaseStatus, RejectionReason};
 use kippu_domain::reservation::{Reservation, ReservationStatus, ReservedItem};
 use kippu_domain::validation::IdempotencyKey;
-use kippu_domain::{AccountId, Duration, Money, PurchaseRequestId, ReservationId};
-use kippu_store::{BoxError, Hold, Insertion, Lease, StoreTx};
+use kippu_domain::{AccountId, Duration, Money, PurchaseRequestId, ReservationId, SaleId};
+use kippu_store::{BoxError, Insertion, Lease, LineItems, StoreTx};
 use tracing::Instrument;
 
 use crate::app::AppState;
-use crate::error::{ApiError, ApiResult, StatusCode};
+use crate::error::{ApiError, ApiResult, ProblemKind, StatusCode};
 use crate::module::Progress;
-use crate::modules::payments::service::line_items;
+use crate::modules::payments::service::{holds, line_items};
 
 /// The answer to resubmitting a key: the same purchase again, or a different one.
 fn resubmitted(existing: PurchaseRequest, basket: &Basket) -> ApiResult<PurchaseRequest> {
@@ -23,7 +23,7 @@ fn resubmitted(existing: PurchaseRequest, basket: &Basket) -> ApiResult<Purchase
     } else {
         Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
-            "idempotency-key-reused",
+            ProblemKind::IDEMPOTENCY_KEY_REUSED,
             "this Idempotency-Key was already used for a different purchase",
         ))
     }
@@ -96,27 +96,23 @@ fn reserved_items(
     request: &PurchaseRequest,
     ticket_types: &[TicketType],
 ) -> ApiResult<(Vec<ReservedItem>, Money)> {
-    let mut items = Vec::new();
-    let mut total: Option<Money> = None;
-    for item in request.basket.items() {
-        let ticket_type = ticket_types
-            .iter()
-            .find(|ticket_type| ticket_type.id == item.ticket_type_id)
-            .ok_or_else(|| ApiError::internal("ticket type vanished"))?;
-        let line = ticket_type.price.checked_mul(item.quantity);
-        total = match (total, line) {
-            (None, Some(line)) => Some(line),
-            (Some(sum), Some(line)) => sum.checked_add(line),
-            _ => None,
-        };
-        items.push(ReservedItem {
-            ticket_type_id: item.ticket_type_id,
-            quantity: item.quantity,
-            unit_price: ticket_type.price,
-        });
-    }
-    let total =
-        total.ok_or_else(|| ApiError::internal("ticket prices mix currencies or overflow"))?;
+    let items = request
+        .basket
+        .items()
+        .iter()
+        .map(|item| {
+            let ticket_type = ticket_types
+                .iter()
+                .find(|ticket_type| ticket_type.id == item.ticket_type_id)
+                .ok_or_else(|| ApiError::internal("ticket type vanished"))?;
+            Ok(ReservedItem {
+                ticket_type_id: item.ticket_type_id,
+                quantity: item.quantity,
+                unit_price: ticket_type.price,
+            })
+        })
+        .collect::<ApiResult<Vec<_>>>()?;
+    let total = ReservedItem::total(&items).map_err(ApiError::internal)?;
     Ok((items, total))
 }
 
@@ -133,20 +129,45 @@ async fn reject(
     Ok(())
 }
 
-/// Processes one queued request: reserves its tickets or rejects it, in one transaction.
-/// Processing a request that is no longer queued does nothing, so redelivery is harmless.
-#[tracing::instrument(skip_all)]
-pub(crate) async fn process(state: &AppState, request: &PurchaseRequest) -> ApiResult<()> {
+/// What processing a sale's requests reads of the catalog, once per batch.
+struct SaleCatalog {
+    sale: Sale,
+    ticket_types: Vec<TicketType>,
+    event: EventSummary,
+}
+
+async fn sale_catalog(state: &AppState, sale_id: SaleId) -> ApiResult<SaleCatalog> {
     let store = state.store();
     let sale = store
-        .sale(request.sale_id)
+        .sale(sale_id)
         .await?
         .ok_or_else(|| ApiError::not_found("sale"))?;
     let ticket_types = store.list_ticket_types(sale.id).await?;
     let event = store
-        .event(sale.event_id)
+        .event_summary(sale.event_id)
         .await?
         .ok_or_else(|| ApiError::not_found("event"))?;
+    Ok(SaleCatalog {
+        sale,
+        ticket_types,
+        event,
+    })
+}
+
+/// Processes one queued request: reserves its tickets or rejects it, in one transaction.
+/// Processing a request that is no longer queued does nothing, so redelivery is harmless.
+#[tracing::instrument(skip_all)]
+async fn process(
+    state: &AppState,
+    catalog: &SaleCatalog,
+    request: &PurchaseRequest,
+) -> ApiResult<()> {
+    let SaleCatalog {
+        sale,
+        ticket_types,
+        event,
+    } = catalog;
+    let store = state.store();
     let denied = store
         .account_denied(event.organization_id, event.id, request.account_id)
         .await?;
@@ -161,38 +182,26 @@ pub(crate) async fn process(state: &AppState, request: &PurchaseRequest) -> ApiR
     let rejection = if denied {
         Some(RejectionReason::AccountDenied)
     } else {
-        precheck(&current, &sale, &ticket_types)
+        precheck(&current, sale, ticket_types)
     };
     if let Some(reason) = rejection {
         reject(&mut *tx, &current, reason, state).await?;
         return Ok(tx.commit().await?);
     }
 
-    let (items, total) = reserved_items(&current, &ticket_types)?;
-    let holds: Vec<Hold> = current
-        .basket
-        .items()
-        .iter()
-        .map(|item| Hold {
-            ticket_type_id: item.ticket_type_id,
-            quantity: item.quantity,
-            per_account_limit: ticket_types
-                .iter()
-                .find(|ticket_type| ticket_type.id == item.ticket_type_id)
-                .map_or(0, |ticket_type| ticket_type.per_account_limit),
-        })
-        .collect();
+    let (items, total) = reserved_items(&current, ticket_types)?;
+    let lines = LineItems::from(&current.basket);
     if !tx
         .inventory()
-        .try_take_quota(current.account_id, &holds)
+        .try_take_quota(current.account_id, &holds(&lines, ticket_types)?)
         .await?
     {
         reject(&mut *tx, &current, RejectionReason::LimitExceeded, state).await?;
         return Ok(tx.commit().await?);
     }
-    if !tx.inventory().try_hold(current.basket.items()).await? {
+    if !tx.inventory().try_hold(&lines).await? {
         tx.inventory()
-            .return_quota(current.account_id, current.basket.items())
+            .return_quota(current.account_id, &lines)
             .await?;
         reject(&mut *tx, &current, RejectionReason::SoldOut, state).await?;
         return Ok(tx.commit().await?);
@@ -234,11 +243,22 @@ pub(crate) async fn process(state: &AppState, request: &PurchaseRequest) -> ApiR
     Ok(())
 }
 
-/// Processes requests one after another, in the order given.
+/// Processes one sale's requests one after another, in the order given, reading the catalog
+/// once for all of them.
 async fn process_in_order(state: &AppState, requests: &[PurchaseRequest]) {
+    let Some(first) = requests.first() else {
+        return;
+    };
+    // The lease lapses and another attempt picks the requests up.
+    let catalog = match sale_catalog(state, first.sale_id).await {
+        Ok(catalog) => catalog,
+        Err(error) => {
+            tracing::warn!(sale = %first.sale_id, %error, "purchase requests not processed");
+            return;
+        }
+    };
     for request in requests {
-        if let Err(error) = process(state, request).await {
-            // The lease lapses and another attempt picks the request up.
+        if let Err(error) = process(state, &catalog, request).await {
             tracing::warn!(request = %request.id, %error, "purchase request not processed");
         }
     }
@@ -271,22 +291,24 @@ pub(crate) async fn process_batch(state: AppState) -> Result<Progress, BoxError>
     let now = state.now();
     let lease = Lease {
         now,
-        until: now + Duration::seconds(i64::from(workers.purchase_lease_seconds)),
+        until: now + Duration::seconds(i64::from(workers.purchase_lease_seconds.get())),
     };
-    let batch_size = workers.purchase_batch_size;
+    let batch_size = workers.purchase_batch_size.get();
     let claimed = state
         .store()
         .claim_purchase_requests(lease, batch_size)
         .await?;
     let full = claimed.len() >= batch_size as usize;
     let concurrency = if state.store().capabilities().concurrent_writers {
-        workers.purchase_concurrency.max(1) as usize
+        workers.purchase_concurrency.get() as usize
     } else {
         1
     };
 
     if concurrency == 1 {
-        process_in_order(&state, &claimed).await;
+        for group in by_sale(claimed) {
+            process_in_order(&state, &group).await;
+        }
     } else {
         let mut running = tokio::task::JoinSet::new();
         for group in by_sale(claimed) {

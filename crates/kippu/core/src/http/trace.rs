@@ -69,7 +69,7 @@ pub(crate) fn record_attestor(id: AttestorId) {
 
 /// Records an error response's problem, on the current request's span.
 pub(crate) fn record_problem(error: &ApiError) {
-    kippu_telemetry::record_problem(error.kind(), error.detail(), Some(error.origin()));
+    kippu_telemetry::record_problem(error.kind().as_str(), error.detail(), Some(error.origin()));
 }
 
 /// A background task's span. `outcome` is recorded with [`record_outcome`].

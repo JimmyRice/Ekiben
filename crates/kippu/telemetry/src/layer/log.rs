@@ -117,6 +117,65 @@ impl<W> LogLayer<W> {
     }
 }
 
+impl<W> LogLayer<W> {
+    /// Adds a statement to the request or task it ran in, and to the step that ran it.
+    fn count_statement<S>(event: &Event<'_>, ctx: &Context<'_, S>)
+    where
+        S: Subscriber + for<'lookup> LookupSpan<'lookup>,
+    {
+        let Some(scope) = ctx.event_scope(event) else {
+            return;
+        };
+        let mut step_index = None;
+        let mut unit = None;
+        for span in scope {
+            if span.extensions().get::<Unit>().is_some() {
+                unit = Some(span);
+                break;
+            }
+            if step_index.is_none() {
+                step_index = span
+                    .extensions()
+                    .get::<StepMark>()
+                    .and_then(|mark| mark.index);
+            }
+        }
+        let Some(unit) = unit else { return };
+        let mut statement = Statement::default();
+        event.record(&mut statement);
+        let time = Duration::from_secs_f64(statement.elapsed_secs);
+        if let Some(unit) = unit.extensions_mut().get_mut::<Unit>() {
+            unit.queries.add(&statement.summary, time);
+            if let Some(Item::Step(step)) = step_index.and_then(|index| unit.items.get_mut(index)) {
+                step.queries.add(&statement.summary, time);
+            }
+        }
+    }
+}
+
+/// The two fields of a statement event that counting needs.
+#[derive(Default)]
+struct Statement {
+    summary: String,
+    elapsed_secs: f64,
+}
+
+impl tracing::field::Visit for Statement {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "summary" {
+            value.clone_into(&mut self.summary);
+        }
+    }
+
+    fn record_f64(&mut self, field: &tracing::field::Field, value: f64) {
+        if field.name() == "elapsed_secs" {
+            self.elapsed_secs = value;
+        }
+    }
+
+    fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+}
+
 impl<W: for<'writer> MakeWriter<'writer>> LogLayer<W> {
     fn write(&self, text: &str) {
         // One `write_all` per unit: `Stdout` holds its lock for the whole call.
@@ -194,9 +253,16 @@ where
     }
 
     fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
+        // Statements are counted, not listed; only slow or failed ones (warnings) are events.
+        // Counting reads two fields and copies nothing else: sqlx sends one event per
+        // statement, with the whole SQL text.
+        let metadata = event.metadata();
+        if metadata.target().starts_with(QUERY_TARGET) && *metadata.level() > Level::WARN {
+            Self::count_statement(event, &ctx);
+            return;
+        }
         let mut collector = Collector::default();
         event.record(&mut collector);
-        let metadata = event.metadata();
         let mut entry = Entry {
             at: SystemTime::now(),
             level: *metadata.level(),
@@ -210,7 +276,6 @@ where
             fields: collector.fields,
         };
         let mut step = None;
-        let mut step_index = None;
         let mut unit = None;
         if let Some(scope) = ctx.event_scope(event) {
             for span in scope {
@@ -221,31 +286,10 @@ where
                 if let Some(mark) = span.extensions().get::<StepMark>() {
                     if step.is_none() {
                         step = Some(mark.label.clone());
-                        step_index = mark.index;
                     }
                     entry.depth += 1;
                 }
             }
-        }
-
-        // Statements are counted, not listed; only slow or failed ones (warnings) are events.
-        if entry.target.starts_with(QUERY_TARGET) && entry.level > Level::WARN {
-            let Some(unit) = unit else { return };
-            let summary = entry.fields.get("summary").unwrap_or_default();
-            let time = entry
-                .fields
-                .float("elapsed_secs")
-                .map(Duration::from_secs_f64)
-                .unwrap_or_default();
-            if let Some(unit) = unit.extensions_mut().get_mut::<Unit>() {
-                unit.queries.add(&summary, time);
-                if let Some(Item::Step(step)) =
-                    step_index.and_then(|index| unit.items.get_mut(index))
-                {
-                    step.queries.add(&summary, time);
-                }
-            }
-            return;
         }
 
         match (self.format, unit) {

@@ -41,7 +41,7 @@ impl Module for Admission {
     fn tasks(&self, config: &Config) -> Vec<BackgroundTask> {
         vec![BackgroundTask::every(
             "admission",
-            Duration::from_millis(config.workers.admission_interval_ms),
+            Duration::from_millis(config.workers.admission_interval_ms.get()),
             service::admit_batches,
         )]
     }

@@ -24,8 +24,8 @@ impl ValidationError {
 macro_rules! validated_string {
     ($(#[$meta:meta])* $name:ident, $validate:expr) => {
         $(#[$meta])*
-        #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-        #[serde(try_from = "String", into = "String")]
+        #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Deserialize)]
+        #[serde(try_from = "String")]
         #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema), schema(value_type = String))]
         pub struct $name(String);
 
@@ -53,6 +53,13 @@ macro_rules! validated_string {
         impl From<$name> for String {
             fn from(value: $name) -> Self {
                 value.0
+            }
+        }
+
+        impl Serialize for $name {
+            /// As the plain string, borrowed rather than copied.
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                serializer.serialize_str(&self.0)
             }
         }
 
@@ -175,6 +182,19 @@ pub fn non_empty(field: &'static str, value: &str, max_len: usize) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validated_strings_serialize_as_plain_strings() {
+        let email = Email::new("Miku@Example.org").unwrap();
+        assert_eq!(
+            serde_json::to_string(&email).unwrap(),
+            r#""miku@example.org""#
+        );
+        assert_eq!(
+            serde_json::from_str::<Email>(r#""miku@example.org""#).unwrap(),
+            email
+        );
+    }
 
     #[test]
     fn country_codes_are_two_letters() {

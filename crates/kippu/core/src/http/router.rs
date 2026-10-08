@@ -51,7 +51,7 @@ pub(crate) fn router(state: &AppState, modules: &[Arc<dyn Module>]) -> Router {
         .layer(CatchPanicLayer::new())
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
-            Duration::from_secs(server.request_timeout_seconds),
+            Duration::from_secs(server.request_timeout_seconds.get()),
         ))
         .layer(middleware::from_fn_with_state(
             Arc::new(BodyLimits {
@@ -71,7 +71,13 @@ pub(crate) fn router(state: &AppState, modules: &[Arc<dyn Module>]) -> Router {
             get(move || async move { Json(openapi.as_ref().clone()) }),
         )
         .layer(middleware::from_fn_with_state(
-            state.clone(),
+            Arc::new(idempotency::Idempotency {
+                state: state.clone(),
+                by_design: modules
+                    .iter()
+                    .flat_map(|module| module.idempotent_routes())
+                    .collect(),
+            }),
             idempotency::middleware,
         ))
         .layer(cross_cutting)

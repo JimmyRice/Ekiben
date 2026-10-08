@@ -45,7 +45,8 @@ impl Launcher {
     /// Parses the command line, runs the chosen command and returns the exit code.
     pub fn run(self) -> ExitCode {
         let cli = Cli::parse();
-        kippu_telemetry::layer::init(cli.log_format.into());
+        // Held to the end, so what is still queued is written out before the process exits.
+        let _logs = kippu_telemetry::layer::init(cli.log_format.into());
         let runtime = match tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()

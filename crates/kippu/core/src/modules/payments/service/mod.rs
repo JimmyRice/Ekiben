@@ -11,9 +11,9 @@ pub use feed::*;
 pub use refunds::{
     RefundRequest, confirm_manual_refund, refund, request_refund, reservation_refunds,
 };
-pub(crate) use settlement::line_items;
 pub use settlement::{
     AttestorReport, IncomingPayment, ManualPayment, PaymentResult, confirm_refund,
     confirm_ticket_refund, manual_payment, record_attestation, reservation_for_attestor, reverse,
     settle,
 };
+pub(crate) use settlement::{holds, line_items};

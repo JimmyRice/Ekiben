@@ -45,8 +45,8 @@ pub struct LineItem {
 
 /// The tickets a purchase request asks for, in canonical form: sorted by ticket type, one line
 /// per type, every quantity positive.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(try_from = "Vec<LineItem>", into = "Vec<LineItem>")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
+#[serde(try_from = "Vec<LineItem>")]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema), schema(value_type = Vec<LineItem>))]
 pub struct Basket(Vec<LineItem>);
 
@@ -111,6 +111,13 @@ impl TryFrom<Vec<LineItem>> for Basket {
 impl From<Basket> for Vec<LineItem> {
     fn from(basket: Basket) -> Self {
         basket.0
+    }
+}
+
+impl Serialize for Basket {
+    /// As the list of line items, borrowed rather than copied.
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(serializer)
     }
 }
 
@@ -213,6 +220,14 @@ mod tests {
             ticket_type_id: TicketTypeId::from_uuid(Uuid::from_bytes([byte; 16])),
             quantity,
         }
+    }
+
+    #[test]
+    fn baskets_serialize_as_their_lines() {
+        let basket = Basket::new(vec![line(2, 1), line(1, 3)]).unwrap();
+        let json = serde_json::to_value(&basket).unwrap();
+        assert_eq!(json, serde_json::to_value(basket.items()).unwrap());
+        assert_eq!(serde_json::from_value::<Basket>(json).unwrap(), basket);
     }
 
     #[test]

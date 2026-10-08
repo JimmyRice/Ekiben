@@ -11,21 +11,20 @@
 //! money to return and complete at once; cash taken in person is confirmed by an organizer. A
 //! partial refund made outside Kippu has no other way in: it is asked of Kippu like any other.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
-use kippu_domain::catalog::Event;
+use kippu_domain::catalog::EventSummary;
 use kippu_domain::outbox::IntegrationEvent;
 use kippu_domain::payment::{PaymentAttestation, PaymentDisposition};
-use kippu_domain::purchase::LineItem;
 use kippu_domain::refund::{Refund, RefundReason, RefundStatus};
 use kippu_domain::reservation::{Reservation, ReservationStatus};
 use kippu_domain::ticket::{Ticket, TicketStatus};
 use kippu_domain::{AttestorId, Money, RefundId, ReservationId, TicketId, Timestamp};
-use kippu_store::{Insertion, StoreTx};
+use kippu_store::{Insertion, LineItems, StoreTx};
 
 use crate::app::AppState;
 use crate::auth::{Principal, Scope};
-use crate::error::{ApiError, ApiResult, StatusCode};
+use crate::error::{ApiError, ApiResult, ProblemKind, StatusCode};
 use crate::modules::payments::permissions::{PAYMENTS_MANUAL, REFUNDS_MANAGE, REFUNDS_REQUEST};
 
 /// What to refund.
@@ -50,7 +49,7 @@ fn acting(
     state: &AppState,
     principal: &Principal,
     reservation: &Reservation,
-    event: &Event,
+    event: &EventSummary,
 ) -> Option<Acting> {
     let policy = state.policy();
     if policy.permits(
@@ -77,7 +76,7 @@ async fn refundable_reservation(
     principal: &Principal,
     id: ReservationId,
     what: &'static str,
-) -> ApiResult<(Reservation, Event, Acting)> {
+) -> ApiResult<(Reservation, EventSummary, Acting)> {
     let reservation = state
         .store()
         .reservation(id)
@@ -85,7 +84,7 @@ async fn refundable_reservation(
         .ok_or_else(|| ApiError::not_found(what))?;
     let event = state
         .store()
-        .event(reservation.event_id)
+        .event_summary(reservation.event_id)
         .await?
         .ok_or_else(|| ApiError::not_found(what))?;
     let acting =
@@ -117,7 +116,7 @@ fn chosen_tickets(tickets: Vec<Ticket>, named: &[TicketId]) -> ApiResult<Vec<Tic
         if valid.is_empty() {
             return Err(ApiError::new(
                 StatusCode::CONFLICT,
-                "nothing-to-refund",
+                ProblemKind::NOTHING_TO_REFUND,
                 "every ticket of this reservation is already refunded",
             ));
         }
@@ -131,7 +130,7 @@ fn chosen_tickets(tickets: Vec<Ticket>, named: &[TicketId]) -> ApiResult<Vec<Tic
     if chosen.len() != named.len() {
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
-            "ticket-not-in-reservation",
+            ProblemKind::TICKET_NOT_IN_RESERVATION,
             "a ticket to refund is not one of this reservation's",
         ));
     }
@@ -148,7 +147,7 @@ fn chosen_tickets(tickets: Vec<Ticket>, named: &[TicketId]) -> ApiResult<Vec<Tic
 fn already_revoked() -> ApiError {
     ApiError::new(
         StatusCode::CONFLICT,
-        "ticket-revoked",
+        ProblemKind::TICKET_REVOKED,
         "a ticket to refund is already revoked",
     )
 }
@@ -158,7 +157,7 @@ fn already_revoked() -> ApiError {
 async fn check_refund_period(
     state: &AppState,
     reservation: &Reservation,
-    event: &Event,
+    event: &EventSummary,
     tickets: &[Ticket],
     now: Timestamp,
 ) -> ApiResult<()> {
@@ -171,14 +170,14 @@ async fn check_refund_period(
             .ok_or_else(|| {
                 ApiError::new(
                     StatusCode::CONFLICT,
-                    "refund-not-allowed",
+                    ProblemKind::REFUND_NOT_ALLOWED,
                     "these tickets cannot be refunded; ask the organizer",
                 )
             })?;
         if now >= until || now >= ticket.valid_from || now >= event.starts_at {
             return Err(ApiError::new(
                 StatusCode::CONFLICT,
-                "refund-not-allowed",
+                ProblemKind::REFUND_NOT_ALLOWED,
                 "the refund period for these tickets has ended; ask the organizer",
             ));
         }
@@ -188,7 +187,7 @@ async fn check_refund_period(
 
 /// What the tickets were bought for: the reservation's price of each ticket's type.
 fn price_of(reservation: &Reservation, tickets: &[Ticket]) -> ApiResult<Money> {
-    let mut amount = Money::zero(reservation.total.currency);
+    let mut amount = Money::zero(reservation.total.currency());
     for ticket in tickets {
         let unit_price = reservation
             .items
@@ -196,9 +195,7 @@ fn price_of(reservation: &Reservation, tickets: &[Ticket]) -> ApiResult<Money> {
             .find(|item| item.ticket_type_id == ticket.ticket_type_id)
             .map(|item| item.unit_price)
             .ok_or_else(|| ApiError::internal("a ticket's type is not in its reservation"))?;
-        amount = amount
-            .checked_add(unit_price)
-            .ok_or_else(|| ApiError::internal("refund amount overflows"))?;
+        amount = amount.try_add(unit_price).map_err(ApiError::internal)?;
     }
     Ok(amount)
 }
@@ -256,19 +253,9 @@ pub(super) async fn revoke(
     if revoked != u64::try_from(refund.ticket_ids.len()).unwrap_or(u64::MAX) {
         return Err(already_revoked());
     }
-    let mut counts: BTreeMap<_, u32> = BTreeMap::new();
-    for ticket in tickets {
-        *counts.entry(ticket.ticket_type_id).or_default() += 1;
-    }
-    let items: Vec<LineItem> = counts
-        .into_iter()
-        .map(|(ticket_type_id, quantity)| LineItem {
-            ticket_type_id,
-            quantity,
-        })
-        .collect();
-    // Quota before stock, each in ticket type order: the order purchases and late payments
-    // take them in, so a refund cannot deadlock with the same buyer's purchase.
+    let items = LineItems::count(tickets.iter().map(|ticket| ticket.ticket_type_id));
+    // Quota before stock: the order purchases and late payments take them in, so a refund
+    // cannot deadlock with the same buyer's purchase.
     tx.inventory()
         .return_quota(reservation.account_id, &items)
         .await?;
@@ -311,7 +298,7 @@ pub async fn request_refund(
     if reservation.status != ReservationStatus::Issued {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
-            "reservation-not-issued",
+            ProblemKind::RESERVATION_NOT_ISSUED,
             "only a reservation whose tickets were issued can be refunded",
         ));
     }
@@ -395,7 +382,7 @@ pub async fn confirm_manual_refund(
     let refund = refund(state, principal, id).await?;
     let event = state
         .store()
-        .event(refund.event_id)
+        .event_summary(refund.event_id)
         .await?
         .ok_or_else(|| ApiError::not_found("refund"))?;
     state.authorize(
@@ -406,7 +393,7 @@ pub async fn confirm_manual_refund(
     if refund.attestor_id != AttestorId::MANUAL {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
-            "refund-not-manual",
+            ProblemKind::REFUND_NOT_MANUAL,
             "only refunds of payments taken in person are confirmed by organizers",
         ));
     }

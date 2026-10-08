@@ -12,7 +12,7 @@ use kippu_store::{Keyset, Page, PageRequest};
 use super::pipeline::{release, submit};
 use crate::app::AppState;
 use crate::auth::{Principal, Scope};
-use crate::error::{ApiError, ApiResult, StatusCode};
+use crate::error::{ApiError, ApiResult, ProblemKind, StatusCode};
 use crate::modules::catalog::service::visible_sale;
 use crate::modules::payments::service::{IncomingPayment, settle};
 use crate::modules::purchasing::permissions::{PURCHASES_CREATE, RESERVATIONS_READ};
@@ -61,7 +61,7 @@ pub async fn submit_purchase(
     if !sale.is_open_at(now) {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
-            "sale-closed",
+            ProblemKind::SALE_CLOSED,
             "this sale is not open",
         ));
     }
@@ -69,7 +69,7 @@ pub async fn submit_purchase(
         let pass = submission.admission_pass.ok_or_else(|| {
             ApiError::new(
                 StatusCode::FORBIDDEN,
-                "admission-required",
+                ProblemKind::ADMISSION_REQUIRED,
                 "join the waiting room first",
             )
         })?;
@@ -232,7 +232,7 @@ pub async fn checkout(
         .ok_or_else(|| {
             ApiError::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
-                "attestor-not-accepted",
+                ProblemKind::ATTESTOR_NOT_ACCEPTED,
                 "this sale does not accept that payment method",
             )
         })?;
@@ -240,7 +240,7 @@ pub async fn checkout(
     {
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
-            "environment-mismatch",
+            ProblemKind::ENVIRONMENT_MISMATCH,
             "a sandbox payment method cannot pay for a live sale",
         ));
     }

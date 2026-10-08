@@ -176,7 +176,7 @@ pub(crate) fn root_token(cli: &Cli, args: &RootTokenArgs) -> Result<(), BoxError
         Some(audience) => audience.clone(),
         None => config::sources(cli.config.as_deref())
             .extract_inner::<String>("issuer.id")
-            .unwrap_or_else(|_| kippu_core::config::IssuerConfig::default().id),
+            .unwrap_or_else(|_| kippu_core::config::IssuerConfig::default().id.to_string()),
     };
     let mut key_text = String::new();
     if args.key.as_os_str() == "-" {

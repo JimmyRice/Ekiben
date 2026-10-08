@@ -12,7 +12,7 @@ use crate::module::{BackgroundTask, Progress};
 
 /// The tasks for whichever of the inbox and the bus this instance has.
 pub(crate) fn tasks(config: &Config, inbox: bool, bus: bool) -> Vec<BackgroundTask> {
-    let interval = Duration::from_millis(config.queue.interval_ms);
+    let interval = Duration::from_millis(config.queue.interval_ms.get());
     let mut tasks = Vec::new();
     if inbox {
         tasks.push(BackgroundTask::every(
@@ -33,7 +33,7 @@ async fn persist_inbox(state: AppState) -> Result<Progress, BoxError> {
     let Some(inbox) = state.inbox() else {
         return Ok(Progress::Idle);
     };
-    let limit = state.config().queue.inbox_batch_size as usize;
+    let limit = state.config().queue.inbox_batch_size.get() as usize;
     let deliveries = inbox.receive(limit).await?;
     let full = deliveries.len() >= limit;
     let mut persisted = 0_usize;
@@ -64,7 +64,7 @@ async fn relay_events(state: AppState) -> Result<Progress, BoxError> {
     let Some(bus) = state.event_bus() else {
         return Ok(Progress::Idle);
     };
-    let limit = state.config().queue.relay_batch_size;
+    let limit = state.config().queue.relay_batch_size.get();
     let after = bus.last_published().await?;
     let records = state.store().outbox_after(after, limit).await?;
     for record in &records {

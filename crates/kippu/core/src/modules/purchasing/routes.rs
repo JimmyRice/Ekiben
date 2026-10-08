@@ -14,7 +14,7 @@ use super::service::{self, PurchaseSubmission};
 use crate::app::AppState;
 use crate::auth::Principal;
 use crate::error::{ApiResult, Problem};
-use crate::http::idempotency::{IDEMPOTENCY_KEY, IdempotentByDesign};
+use crate::http::idempotency::IDEMPOTENCY_KEY;
 use crate::http::{Json, Listing, ListingTag, PageQuery};
 use crate::modules::admission::ADMISSION_PASS;
 
@@ -70,7 +70,6 @@ pub(crate) async fn create_purchase_request(
     if let Ok(location) = HeaderValue::from_str(&location) {
         response.headers_mut().insert(LOCATION, location);
     }
-    response.extensions_mut().insert(IdempotentByDesign);
     Ok(response)
 }
 
