@@ -104,7 +104,7 @@ fn check_refund_period(ticket_type: &TicketType, event: &Event) -> ApiResult<()>
 async fn check_currency(state: &AppState, ticket_type: &TicketType) -> ApiResult<()> {
     let others = state.store().list_ticket_types(ticket_type.sale_id).await?;
     if others.iter().any(|other| {
-        other.id != ticket_type.id && other.price.currency != ticket_type.price.currency
+        other.id != ticket_type.id && other.price.currency() != ticket_type.price.currency()
     }) {
         return Err(ValidationError::new(
             "price",

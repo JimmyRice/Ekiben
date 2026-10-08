@@ -18,8 +18,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::payment::Environment;
 use crate::{
-    AccountId, AttestorId, EventId, Money, PurchaseRequestId, ReservationId, SaleId, TicketTypeId,
-    Timestamp, ValidationError,
+    AccountId, AttestorId, EventId, Money, MoneyError, PurchaseRequestId, ReservationId, SaleId,
+    TicketTypeId, Timestamp, ValidationError,
 };
 
 /// Where a reservation stands.
@@ -201,14 +201,13 @@ pub struct ReservedItem {
 }
 
 impl ReservedItem {
-    /// What `items` cost together: `None` if there are none, they mix currencies or the sum
-    /// overflows. The first failure ends the sum.
-    pub fn total(items: &[Self]) -> Option<Money> {
-        let mut lines = items
-            .iter()
-            .map(|item| item.unit_price.checked_mul(item.quantity));
-        let first = lines.next()??;
-        lines.try_fold(first, |sum, line| sum.checked_add(line?))
+    /// What `items` cost together. The first failure ends the sum.
+    pub fn total(items: &[Self]) -> Result<Money, MoneyError> {
+        Money::try_sum(
+            items
+                .iter()
+                .map(|item| item.unit_price.try_mul(item.quantity)),
+        )
     }
 }
 
@@ -299,22 +298,28 @@ mod tests {
     #[test]
     fn totals_stop_at_the_first_failure() {
         let total = ReservedItem::total(&[line(100, "JPY", 2), line(50, "JPY", 1)]).unwrap();
-        assert_eq!(total.amount_minor, 250);
+        assert_eq!(total.amount_minor(), 250);
         // A failed line never restarts the sum with the lines after it.
         let mixed = [
             line(100, "JPY", 1),
             line(100, "CNY", 1),
             line(100, "CNY", 1),
         ];
-        assert_eq!(ReservedItem::total(&mixed), None);
+        assert_eq!(
+            ReservedItem::total(&mixed),
+            Err(MoneyError::CurrencyMismatch)
+        );
         let overflow = [
             line(i64::MAX, "JPY", 1),
             line(1, "JPY", 1),
             line(1, "JPY", 1),
         ];
-        assert_eq!(ReservedItem::total(&overflow), None);
-        assert_eq!(ReservedItem::total(&[line(i64::MAX, "JPY", 2)]), None);
-        assert_eq!(ReservedItem::total(&[]), None);
+        assert_eq!(ReservedItem::total(&overflow), Err(MoneyError::Overflow));
+        assert_eq!(
+            ReservedItem::total(&[line(i64::MAX, "JPY", 2)]),
+            Err(MoneyError::Overflow)
+        );
+        assert_eq!(ReservedItem::total(&[]), Err(MoneyError::Empty));
     }
 
     #[test]

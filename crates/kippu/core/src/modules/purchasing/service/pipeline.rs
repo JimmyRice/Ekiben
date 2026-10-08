@@ -112,8 +112,7 @@ fn reserved_items(
             })
         })
         .collect::<ApiResult<Vec<_>>>()?;
-    let total = ReservedItem::total(&items)
-        .ok_or_else(|| ApiError::internal("ticket prices mix currencies or overflow"))?;
+    let total = ReservedItem::total(&items).map_err(ApiError::internal)?;
     Ok((items, total))
 }
 

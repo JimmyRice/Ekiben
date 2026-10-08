@@ -19,6 +19,6 @@ pub mod validation;
 pub mod webhook;
 
 pub use id::*;
-pub use money::{Currency, Money};
+pub use money::{Currency, Money, MoneyError};
 pub use timestamp::{Duration, ParseTimestampError, Timestamp};
 pub use validation::ValidationError;

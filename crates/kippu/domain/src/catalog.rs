@@ -336,9 +336,6 @@ impl TicketType {
     /// Checks the invariants of a ticket type's editable fields.
     pub fn validate(&self) -> Result<(), ValidationError> {
         non_empty("name", &self.name, 200)?;
-        if self.price.amount_minor < 0 {
-            return Err(ValidationError::new("price", "must not be negative"));
-        }
         if self.capacity == 0 {
             return Err(ValidationError::new("capacity", "must be positive"));
         }

@@ -188,7 +188,7 @@ async fn check_refund_period(
 
 /// What the tickets were bought for: the reservation's price of each ticket's type.
 fn price_of(reservation: &Reservation, tickets: &[Ticket]) -> ApiResult<Money> {
-    let mut amount = Money::zero(reservation.total.currency);
+    let mut amount = Money::zero(reservation.total.currency());
     for ticket in tickets {
         let unit_price = reservation
             .items
@@ -196,9 +196,7 @@ fn price_of(reservation: &Reservation, tickets: &[Ticket]) -> ApiResult<Money> {
             .find(|item| item.ticket_type_id == ticket.ticket_type_id)
             .map(|item| item.unit_price)
             .ok_or_else(|| ApiError::internal("a ticket's type is not in its reservation"))?;
-        amount = amount
-            .checked_add(unit_price)
-            .ok_or_else(|| ApiError::internal("refund amount overflows"))?;
+        amount = amount.try_add(unit_price).map_err(ApiError::internal)?;
     }
     Ok(amount)
 }
