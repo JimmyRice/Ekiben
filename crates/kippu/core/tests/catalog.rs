@@ -196,6 +196,44 @@ async fn a_sale_sells_in_one_currency() {
 }
 
 #[tokio::test]
+async fn ticket_types_whose_tickets_cannot_be_issued_are_refused() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let now = app.now();
+    let long = "x".repeat(512);
+    let extensions: serde_json::Map<String, serde_json::Value> = (128..133)
+        .map(|tag| (tag.to_string(), json!(long)))
+        .collect();
+    let refused = app
+        .call(
+            Method::POST,
+            &format!("/v1/sales/{}/ticket-types", shop.sale_id),
+            Some(&shop.organizer),
+            Some(json!({
+                "name": "Day 2",
+                "price": { "amount_minor": 100, "currency": "JPY" },
+                "capacity": 10,
+                "valid_from": (now + kippu_domain::Duration::days(30)).to_string(),
+                "valid_until": (now + kippu_domain::Duration::days(31)).to_string(),
+                "ticket_extensions": extensions,
+            })),
+        )
+        .await;
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{:?}",
+        refused.body
+    );
+    assert!(
+        refused.body["detail"]
+            .as_str()
+            .unwrap()
+            .contains("ticket_extensions")
+    );
+}
+
+#[tokio::test]
 async fn a_ticket_type_is_visible_wherever_its_event_is() {
     let app = TestApp::start().await;
     let shop = app.shop(10, 1_000, json!({})).await;

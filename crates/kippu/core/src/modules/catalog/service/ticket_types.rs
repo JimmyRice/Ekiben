@@ -9,6 +9,7 @@ use super::{TicketTypeAvailability, check_version, visible_sale, writable_sale};
 use crate::app::AppState;
 use crate::auth::Principal;
 use crate::error::{ApiError, ApiResult};
+use crate::modules::ticketing::service::check_ticket_length;
 
 /// A ticket type's settings.
 #[derive(Debug, Clone)]
@@ -183,6 +184,7 @@ pub async fn create_ticket_type(
     };
     ticket_type.validate()?;
     check_refund_period(&ticket_type, &event)?;
+    check_ticket_length(state, &ticket_type)?;
     check_currency(state, &ticket_type).await?;
     state.store().insert_ticket_type(&ticket_type).await?;
     Ok(ticket_type)
@@ -223,6 +225,7 @@ pub async fn update_ticket_type(
     };
     ticket_type.validate()?;
     check_refund_period(&ticket_type, &event)?;
+    check_ticket_length(state, &ticket_type)?;
     check_currency(state, &ticket_type).await?;
     state
         .store()

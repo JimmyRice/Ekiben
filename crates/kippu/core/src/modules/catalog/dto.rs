@@ -268,7 +268,8 @@ pub struct TicketTypeRequest {
     pub valid_from: Timestamp,
     /// Tickets are valid until (exclusive).
     pub valid_until: Timestamp,
-    /// Extension claims written into every ticket, keyed by tag (128-255).
+    /// Extension claims written into every ticket, keyed by tag (128-255). Values are at most
+    /// 512 bytes, and together they must leave a ticket within 2048 bytes.
     #[serde(default)]
     pub ticket_extensions: BTreeMap<u8, String>,
     /// Until when buyers may refund their tickets of this type themselves (exclusive); no
@@ -355,7 +356,8 @@ pub struct TicketTypePatch {
     pub valid_from: Option<Timestamp>,
     /// Tickets are valid until (exclusive).
     pub valid_until: Option<Timestamp>,
-    /// Extension claims written into every ticket, replaced as a whole.
+    /// Extension claims written into every ticket, replaced as a whole; a ticket must stay
+    /// within 2048 bytes.
     pub ticket_extensions: Option<BTreeMap<u8, String>>,
     /// Until when buyers may refund their tickets themselves; `null` makes the tickets
     /// non-refundable by buyers.

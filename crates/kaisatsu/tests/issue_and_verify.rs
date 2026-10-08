@@ -143,6 +143,18 @@ fn issuing_rejects_invalid_claims() {
 }
 
 #[test]
+fn encoded_len_is_the_length_of_the_issued_ticket() {
+    let issuer = issuer();
+    let mut claims = claims();
+    assert_eq!(claims.encoded_len(), issuer.issue(&claims).unwrap().len());
+    claims.extensions.insert(0x90, vec![0; 300]);
+    assert_eq!(claims.encoded_len(), issuer.issue(&claims).unwrap().len());
+    claims.extensions.insert(0x91, vec![0; 2000]);
+    assert!(claims.encoded_len() > kaisatsu::wire::MAX_TICKET_LEN);
+    assert_eq!(issuer.issue(&claims), Err(IssueError::TicketTooLong));
+}
+
+#[test]
 fn long_claims_use_two_byte_lengths() {
     let issuer = issuer();
     let mut claims = claims();

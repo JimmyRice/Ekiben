@@ -8,7 +8,8 @@ use ed25519_dalek::{Signer, SigningKey};
 use crate::key::{KeyId, TrustedKey};
 use crate::ticket::Uuid;
 use crate::wire::{
-    self, ALGORITHM_ED25519, MAGIC, MAX_CLAIM_LEN, MAX_ISSUER_LEN, MAX_TICKET_LEN, VERSION, tag,
+    self, ALGORITHM_ED25519, HEADER_LEN, MAGIC, MAX_CLAIM_LEN, MAX_ISSUER_LEN, MAX_TICKET_LEN,
+    SIGNATURE_LEN, VERSION, encoded_claim_len, tag,
 };
 
 /// Everything a ticket asserts.
@@ -70,7 +71,11 @@ impl Issuer {
     /// key always produce the same bytes.
     pub fn issue(&self, claims: &Claims) -> Result<Vec<u8>, IssueError> {
         claims.validate()?;
-        let mut ticket = Vec::with_capacity(256);
+        let len = claims.encoded_len();
+        if len > MAX_TICKET_LEN {
+            return Err(IssueError::TicketTooLong);
+        }
+        let mut ticket = Vec::with_capacity(len);
         ticket.extend_from_slice(&MAGIC);
         ticket.push(VERSION);
         ticket.push(ALGORITHM_ED25519);
@@ -99,11 +104,7 @@ impl Issuer {
             push_claim(&mut ticket, tag, value);
         }
 
-        let ticket = self.sign_unchecked(ticket);
-        if ticket.len() > MAX_TICKET_LEN {
-            return Err(IssueError::TicketTooLong);
-        }
-        Ok(ticket)
+        Ok(self.sign_unchecked(ticket))
     }
 
     /// Appends a signature to arbitrary `header ‖ claims` bytes without validating them.
@@ -126,6 +127,22 @@ impl fmt::Debug for Issuer {
 }
 
 impl Claims {
+    /// The length of the ticket these claims encode to, header and signature included.
+    /// [`Issuer::issue`] refuses claims longer than [`MAX_TICKET_LEN`]; checking this first
+    /// tells whether a ticket can be issued without signing one.
+    pub fn encoded_len(&self) -> usize {
+        let uuid = encoded_claim_len(16);
+        let seconds = encoded_claim_len(8);
+        self.extensions.values().fold(
+            HEADER_LEN
+                .saturating_add(encoded_claim_len(self.issuer.len()))
+                .saturating_add(uuid.saturating_mul(3))
+                .saturating_add(seconds.saturating_mul(3))
+                .saturating_add(SIGNATURE_LEN),
+            |len, value| len.saturating_add(encoded_claim_len(value.len())),
+        )
+    }
+
     fn validate(&self) -> Result<(), IssueError> {
         if self.issuer.is_empty() || self.issuer.len() > MAX_ISSUER_LEN {
             return Err(IssueError::InvalidIssuer);
