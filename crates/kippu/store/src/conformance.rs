@@ -479,12 +479,9 @@ pub async fn sale_inventory_reads_every_type_at_once(store: Arc<dyn Store>) {
         one_by_one
     );
     assert_eq!(store.sale_inventory(other.sale).await.unwrap().len(), 1);
-    assert!(
-        store
-            .sale_inventory(SaleId::generate())
-            .await
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        store.sale_inventory(SaleId::generate()).await.unwrap(),
+        Vec::new()
     );
 }
 

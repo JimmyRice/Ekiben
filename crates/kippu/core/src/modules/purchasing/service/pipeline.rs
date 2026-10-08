@@ -564,7 +564,7 @@ mod tests {
             .map(|run| run.iter().map(|request| request.account_id).collect())
             .collect();
         assert_eq!(accounts, vec![vec![a, b], vec![a, c, b], vec![b]]);
-        assert!(runs(&[]).is_empty());
+        assert_eq!(runs(&[]), Vec::<&[PurchaseRequest]>::new());
     }
 
     #[test]
