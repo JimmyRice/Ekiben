@@ -1,12 +1,12 @@
 //! The pipeline behind the front door: workers turn queued requests into reservations or
 //! rejections, and expire reservations left unpaid.
 
-use kippu_domain::catalog::{Sale, TicketType};
+use kippu_domain::catalog::{EventSummary, Sale, TicketType};
 use kippu_domain::outbox::IntegrationEvent;
 use kippu_domain::purchase::{Basket, PurchaseRequest, PurchaseStatus, RejectionReason};
 use kippu_domain::reservation::{Reservation, ReservationStatus, ReservedItem};
 use kippu_domain::validation::IdempotencyKey;
-use kippu_domain::{AccountId, Duration, Money, PurchaseRequestId, ReservationId};
+use kippu_domain::{AccountId, Duration, Money, PurchaseRequestId, ReservationId, SaleId};
 use kippu_store::{BoxError, Insertion, Lease, LineItems, StoreTx};
 use tracing::Instrument;
 
@@ -129,13 +129,17 @@ async fn reject(
     Ok(())
 }
 
-/// Processes one queued request: reserves its tickets or rejects it, in one transaction.
-/// Processing a request that is no longer queued does nothing, so redelivery is harmless.
-#[tracing::instrument(skip_all)]
-pub(crate) async fn process(state: &AppState, request: &PurchaseRequest) -> ApiResult<()> {
+/// What processing a sale's requests reads of the catalog, once per batch.
+struct SaleCatalog {
+    sale: Sale,
+    ticket_types: Vec<TicketType>,
+    event: EventSummary,
+}
+
+async fn sale_catalog(state: &AppState, sale_id: SaleId) -> ApiResult<SaleCatalog> {
     let store = state.store();
     let sale = store
-        .sale(request.sale_id)
+        .sale(sale_id)
         .await?
         .ok_or_else(|| ApiError::not_found("sale"))?;
     let ticket_types = store.list_ticket_types(sale.id).await?;
@@ -143,6 +147,27 @@ pub(crate) async fn process(state: &AppState, request: &PurchaseRequest) -> ApiR
         .event_summary(sale.event_id)
         .await?
         .ok_or_else(|| ApiError::not_found("event"))?;
+    Ok(SaleCatalog {
+        sale,
+        ticket_types,
+        event,
+    })
+}
+
+/// Processes one queued request: reserves its tickets or rejects it, in one transaction.
+/// Processing a request that is no longer queued does nothing, so redelivery is harmless.
+#[tracing::instrument(skip_all)]
+async fn process(
+    state: &AppState,
+    catalog: &SaleCatalog,
+    request: &PurchaseRequest,
+) -> ApiResult<()> {
+    let SaleCatalog {
+        sale,
+        ticket_types,
+        event,
+    } = catalog;
+    let store = state.store();
     let denied = store
         .account_denied(event.organization_id, event.id, request.account_id)
         .await?;
@@ -157,18 +182,18 @@ pub(crate) async fn process(state: &AppState, request: &PurchaseRequest) -> ApiR
     let rejection = if denied {
         Some(RejectionReason::AccountDenied)
     } else {
-        precheck(&current, &sale, &ticket_types)
+        precheck(&current, sale, ticket_types)
     };
     if let Some(reason) = rejection {
         reject(&mut *tx, &current, reason, state).await?;
         return Ok(tx.commit().await?);
     }
 
-    let (items, total) = reserved_items(&current, &ticket_types)?;
+    let (items, total) = reserved_items(&current, ticket_types)?;
     let lines = LineItems::from(&current.basket);
     if !tx
         .inventory()
-        .try_take_quota(current.account_id, &holds(&lines, &ticket_types)?)
+        .try_take_quota(current.account_id, &holds(&lines, ticket_types)?)
         .await?
     {
         reject(&mut *tx, &current, RejectionReason::LimitExceeded, state).await?;
@@ -218,11 +243,22 @@ pub(crate) async fn process(state: &AppState, request: &PurchaseRequest) -> ApiR
     Ok(())
 }
 
-/// Processes requests one after another, in the order given.
+/// Processes one sale's requests one after another, in the order given, reading the catalog
+/// once for all of them.
 async fn process_in_order(state: &AppState, requests: &[PurchaseRequest]) {
+    let Some(first) = requests.first() else {
+        return;
+    };
+    // The lease lapses and another attempt picks the requests up.
+    let catalog = match sale_catalog(state, first.sale_id).await {
+        Ok(catalog) => catalog,
+        Err(error) => {
+            tracing::warn!(sale = %first.sale_id, %error, "purchase requests not processed");
+            return;
+        }
+    };
     for request in requests {
-        if let Err(error) = process(state, request).await {
-            // The lease lapses and another attempt picks the request up.
+        if let Err(error) = process(state, &catalog, request).await {
             tracing::warn!(request = %request.id, %error, "purchase request not processed");
         }
     }
@@ -270,7 +306,9 @@ pub(crate) async fn process_batch(state: AppState) -> Result<Progress, BoxError>
     };
 
     if concurrency == 1 {
-        process_in_order(&state, &claimed).await;
+        for group in by_sale(claimed) {
+            process_in_order(&state, &group).await;
+        }
     } else {
         let mut running = tokio::task::JoinSet::new();
         for group in by_sale(claimed) {

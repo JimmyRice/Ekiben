@@ -131,7 +131,7 @@ async fn hot_paths_run_a_fixed_number_of_statements() {
         ("admission", admission_statements, 3),
         ("purchase", purchase_statements, 4),
         ("worker, one request", one_request, 12),
-        ("worker, three requests", three_requests, 30),
+        ("worker, three requests", three_requests, 24),
     ];
     for (path, measured, most) in counts {
         eprintln!("{path}: {measured} statements");
