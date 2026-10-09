@@ -213,26 +213,20 @@ opt-level = "s"
 panic = "abort"
 strip = "symbols"
 
-# Kippu server distribution builds (`cargo build --profile dist`): balance throughput and size.
-# Size-optimized by default (the code is dominated by SQL, TLS and glue that waits on I/O), with
-# the CPU-bound hot paths kept at full optimization. Symbols are stripped: errors carry their
-# origin through `#[track_caller]`, not backtraces. Unwinding stays on, as in `release`.
+# Kippu server distribution builds. Measured against `release` on SQLite (purchase journeys,
+# listings, ticket reads, logins). Symbols are stripped in both: errors carry their origin through
+# `#[track_caller]`, not backtraces. Unwinding stays on, as in `release`. Per-package opt-levels
+# do not help: fat LTO re-optimizes the whole program at the binary crate's level.
+#
+# `cargo build --profile dist`: smaller with no measurable cost (within noise everywhere).
 [profile.dist]
 inherits = "release"
-opt-level = "s"
+opt-level = 2
 strip = "symbols"
 
-[profile.dist.package]
-# Password hashing and ticket signing.
-argon2.opt-level = 3
-blake2.opt-level = 3
-curve25519-dalek.opt-level = 3
-ed25519-dalek.opt-level = 3
-sha2.opt-level = 3
-# Request path.
-bytes.opt-level = 3
-h2.opt-level = 3
-httparse.opt-level = 3
-hyper.opt-level = 3
-serde_json.opt-level = 3
-tokio.opt-level = 3
+# `cargo build --profile dist-min`: smallest binary; costs 10-15% of request throughput and ~20%
+# of password hashing (Argon2).
+[profile.dist-min]
+inherits = "release"
+opt-level = "z"
+strip = "symbols"

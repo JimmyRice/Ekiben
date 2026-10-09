@@ -13,6 +13,7 @@
 # FEATURES is the `ekiben` feature list from the root Cargo.toml (sqlite, postgres, mysql,
 # nats, s3, gcs, azure, base45, mimalloc). Default features are off, so only what is named is
 # compiled in. Keep `mimalloc`: musl's own allocator is slow under a multi-threaded server.
+# PROFILE is `dist` (release speed) or `dist-min` (smallest binary, 10-15% slower).
 
 ARG RUST_VERSION=1.98.1
 

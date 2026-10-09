@@ -49,8 +49,9 @@ cargo xtask c-example                                                   # C ABI 
 cargo xtask uniffi [swift-package|kotlin|nuget]                         # bindings into target/uniffi; no argument: run the vectors in Swift
 cargo build -p kaisatsu --target thumbv7em-none-eabihf                  # proves no_std
 cargo run -- serve --config <file>                                      # see kippu.example.toml
-cargo build --profile dist                                              # server distribution build (~13 MB vs ~21 MB)
-cargo build --profile dist --no-default-features --features sqlite,mimalloc   # only what you use (~8.6 MB)
+cargo build --profile dist                                              # server distribution build, release speed (~17.6 MB vs ~22 MB)
+cargo build --profile dist-min                                          # smallest server build, 10-15% slower (~10.3 MB)
+cargo build --profile dist --no-default-features --features sqlite,mimalloc   # only what you use (~11.6 MB; dist-min ~6.9 MB)
 ```
 
 Adapters that need a server run their conformance suite only when a URL is set, and the HTTP
