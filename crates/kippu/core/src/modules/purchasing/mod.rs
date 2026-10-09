@@ -14,7 +14,7 @@ use utoipa_axum::routes;
 use crate::app::AppState;
 use crate::auth::Permission;
 use crate::config::Config;
-use crate::module::{BackgroundTask, Module};
+use crate::module::{BackgroundTask, IdempotentRoute, Module};
 
 pub use dto::*;
 
@@ -54,17 +54,24 @@ impl Module for Purchasing {
             .routes(routes!(routes::cancel_reservation))
     }
 
+    fn idempotent_routes(&self) -> Vec<IdempotentRoute> {
+        // The request id is derived from the key.
+        vec![IdempotentRoute::post(
+            "/v1/sales/{sale_id}/purchase-requests",
+        )]
+    }
+
     fn tasks(&self, config: &Config) -> Vec<BackgroundTask> {
         let workers = &config.workers;
         vec![
             BackgroundTask::every(
                 "purchases",
-                Duration::from_millis(workers.purchase_interval_ms),
+                Duration::from_millis(workers.purchase_interval_ms.get()),
                 service::process_batch,
             ),
             BackgroundTask::every(
                 "reservation-expiry",
-                Duration::from_millis(workers.expiry_interval_ms),
+                Duration::from_millis(workers.expiry_interval_ms.get()),
                 service::expire_batch,
             ),
         ]

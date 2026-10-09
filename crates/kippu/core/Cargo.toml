@@ -48,6 +48,7 @@ object_store.workspace = true
 sqlx = { workspace = true, features = ["postgres", "mysql"] }
 tempfile.workspace = true
 tower = { workspace = true, features = ["util"] }
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true

@@ -135,6 +135,17 @@ impl CatalogStore for SqliteStore {
         optional(row)
     }
 
+    async fn event_summary(&self, id: EventId) -> StoreResult<Option<EventSummary>> {
+        let row = sqlx::query_as::<_, EventSummaryRow>(sqlx::AssertSqlSafe(format!(
+            "{EVENT_SUMMARY_COLUMNS} WHERE id = ?1"
+        )))
+        .bind(id.as_uuid())
+        .fetch_optional(&self.reader)
+        .await
+        .map_err(error)?;
+        optional(row)
+    }
+
     async fn list_events(
         &self,
         filter: &EventFilter,
@@ -259,8 +270,8 @@ impl CatalogStore for SqliteStore {
         .bind(ticket_type.sale_id.as_uuid())
         .bind(ticket_type.event_id.as_uuid())
         .bind(&ticket_type.name)
-        .bind(ticket_type.price.amount_minor)
-        .bind(ticket_type.price.currency.as_str())
+        .bind(ticket_type.price.amount_minor())
+        .bind(ticket_type.price.currency().as_str())
         .bind(ticket_type.capacity)
         .bind(ticket_type.per_account_limit)
         .bind(micros(ticket_type.valid_from))
@@ -302,8 +313,8 @@ impl CatalogStore for SqliteStore {
         )
         .bind(ticket_type.id.as_uuid())
         .bind(&ticket_type.name)
-        .bind(ticket_type.price.amount_minor)
-        .bind(ticket_type.price.currency.as_str())
+        .bind(ticket_type.price.amount_minor())
+        .bind(ticket_type.price.currency().as_str())
         .bind(ticket_type.capacity)
         .bind(ticket_type.per_account_limit)
         .bind(micros(ticket_type.valid_from))
@@ -362,6 +373,19 @@ impl CatalogStore for SqliteStore {
         .await
         .map_err(error)?;
         Ok(row.map(Inventory::from))
+    }
+
+    async fn sale_inventory(&self, sale: SaleId) -> StoreResult<Vec<Inventory>> {
+        let rows = sqlx::query_as::<_, InventoryRow>(
+            "SELECT inventory.ticket_type_id, inventory.capacity, inventory.held, inventory.sold
+             FROM inventory JOIN ticket_types ON ticket_types.id = inventory.ticket_type_id
+             WHERE ticket_types.sale_id = ?1 ORDER BY inventory.ticket_type_id",
+        )
+        .bind(sale.as_uuid())
+        .fetch_all(&self.reader)
+        .await
+        .map_err(error)?;
+        Ok(rows.into_iter().map(Inventory::from).collect())
     }
 
     async fn add_favorite(

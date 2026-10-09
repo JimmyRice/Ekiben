@@ -31,7 +31,9 @@ pub use objects::{ObjectError, ObjectStorage, StoredObject};
 pub use outbox::{OutboxRecord, OutboxStore, OutboxTx};
 pub use payments::{PaymentStore, PaymentsTx};
 pub use primitives::{Insertion, Keyset, Lease, Page, PageRequest};
-pub use purchasing::{Hold, InventoryTx, PurchaseStore, PurchasesTx, ReservationsTx};
+pub use purchasing::{
+    Hold, Holds, InventoryTx, LineItems, PurchaseStore, PurchasesTx, ReservationsTx,
+};
 pub use queue::{EventBus, InboxDelivery, PurchaseInbox};
 pub use store::{Store, StoreCapabilities, StoreTx};
 pub use ticketing::{TicketStore, TicketsTx};

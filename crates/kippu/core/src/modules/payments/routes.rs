@@ -18,7 +18,6 @@ use super::signature::Attested;
 use crate::app::AppState;
 use crate::auth::Principal;
 use crate::error::{ApiResult, Problem};
-use crate::http::idempotency::IdempotentByDesign;
 use crate::http::{Json, Listing};
 
 const TAG: &str = "payments";
@@ -26,11 +25,10 @@ const TAG: &str = "payments";
 /// How far the attestor feed was read: the `after` of the next poll.
 const FEED_POSITION: &str = "kippu-feed-position";
 
-/// A settlement response, marked as safe to repeat without the idempotency middleware.
+/// A settlement response. Safe to repeat without the idempotency middleware (the module
+/// declares these routes): attestations are unique per attestor.
 fn settlement(result: PaymentResult) -> Response {
-    let mut response = Json(SettlementView::from(result)).into_response();
-    response.extensions_mut().insert(IdempotentByDesign);
-    response
+    Json(SettlementView::from(result)).into_response()
 }
 
 fn feed(records: Vec<OutboxRecord>) -> Json<Vec<FeedEvent>> {
@@ -314,7 +312,5 @@ pub(crate) async fn confirm_manual_refund(
     Path(refund_id): Path<RefundId>,
 ) -> ApiResult<Response> {
     let refund = service::confirm_manual_refund(&state, &principal, refund_id).await?;
-    let mut response = Json(refund).into_response();
-    response.extensions_mut().insert(IdempotentByDesign);
-    Ok(response)
+    Ok(Json(refund).into_response())
 }

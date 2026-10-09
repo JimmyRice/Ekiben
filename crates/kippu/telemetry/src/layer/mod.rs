@@ -28,5 +28,5 @@ mod text;
 mod unit;
 
 pub use format::Format;
-pub use install::init;
+pub use install::{LogGuard, init};
 pub use log::LogLayer;

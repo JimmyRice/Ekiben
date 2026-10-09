@@ -111,7 +111,7 @@ pub(crate) fn client(config: &WebhooksConfig) -> Result<reqwest::Client, String>
     let mut builder = reqwest::Client::builder()
         .tls_backend_preconfigured(tls)
         .redirect(Policy::none())
-        .timeout(Duration::from_secs(config.timeout_seconds))
+        .timeout(Duration::from_secs(config.timeout_seconds.get()))
         .user_agent(concat!("kippu-webhooks/", env!("CARGO_PKG_VERSION")));
     if !config.allow_private_networks {
         builder = builder.dns_resolver(Arc::new(PublicOnly));

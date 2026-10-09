@@ -93,7 +93,7 @@ pub(crate) async fn get_event(
     Path(event_id): Path<EventId>,
 ) -> ApiResult<Json<Event>> {
     Ok(Json(
-        service::visible_event(&state, principal.as_ref(), event_id).await?,
+        service::event_details(&state, principal.as_ref(), event_id).await?,
     ))
 }
 

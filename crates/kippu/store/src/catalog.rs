@@ -89,6 +89,9 @@ pub trait CatalogStore {
     async fn update_event(&self, event: &Event, expected_version: i64) -> StoreResult<()>;
     /// Looks an event up by id.
     async fn event(&self, id: EventId) -> StoreResult<Option<Event>>;
+    /// Looks an event up by id, without its content: what checks of who may see or edit it
+    /// need, at a fraction of the read.
+    async fn event_summary(&self, id: EventId) -> StoreResult<Option<EventSummary>>;
     /// Lists the events matching `filter` in `order`, without their content, resuming after
     /// the position `page.after` (the sort time and id of [`EventOrder::position`]).
     async fn list_events(
@@ -123,6 +126,9 @@ pub trait CatalogStore {
     async fn list_ticket_types(&self, sale: SaleId) -> StoreResult<Vec<TicketType>>;
     /// Current stock of a ticket type.
     async fn inventory(&self, ticket_type: TicketTypeId) -> StoreResult<Option<Inventory>>;
+    /// Current stock of every ticket type of a sale, in ticket type order: one read for what
+    /// [`CatalogStore::inventory`] would need one per type for.
+    async fn sale_inventory(&self, sale: SaleId) -> StoreResult<Vec<Inventory>>;
 
     /// Marks an event as a favourite of an account. Idempotent.
     async fn add_favorite(

@@ -15,7 +15,7 @@ use kippu_store::{Keyset, Page, PageRequest};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
-use crate::error::{ApiError, StatusCode};
+use crate::error::{ApiError, ProblemKind, StatusCode};
 
 /// Items per page when the client does not say.
 const DEFAULT_LIMIT: u32 = 50;
@@ -113,7 +113,11 @@ pub fn decode_cursor<P: CursorPosition>(cursor: &str) -> Result<(ListingTag, P),
 /// The error for a cursor that cannot resume the listing it was sent to.
 #[track_caller]
 pub fn invalid_cursor(detail: &'static str) -> ApiError {
-    ApiError::new(StatusCode::BAD_REQUEST, "invalid-parameter", detail)
+    ApiError::new(
+        StatusCode::BAD_REQUEST,
+        ProblemKind::INVALID_PARAMETER,
+        detail,
+    )
 }
 
 /// Page parameters shared by paged listings.

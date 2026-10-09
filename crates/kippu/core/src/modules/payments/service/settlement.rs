@@ -14,13 +14,13 @@ use kippu_domain::refund::{Refund, RefundReason, RefundStatus};
 use kippu_domain::reservation::{Reservation, Settlement};
 use kippu_domain::ticket::TicketStatus;
 use kippu_domain::{AttestorId, Money, RefundId, ReservationId, TicketId, Timestamp};
-use kippu_store::{Hold, Insertion, StoreTx};
+use kippu_store::{Holds, Insertion, LineItems, StoreTx};
 
 use super::refunds::{new_refund, revoke};
 
 use crate::app::AppState;
 use crate::auth::{Principal, Scope};
-use crate::error::{ApiError, ApiResult, StatusCode};
+use crate::error::{ApiError, ApiResult, ProblemKind, StatusCode};
 use crate::modules::payments::permissions::PAYMENTS_MANUAL;
 use crate::modules::ticketing::service::issue_tickets;
 
@@ -83,31 +83,22 @@ pub struct PaymentResult {
 }
 
 /// The reserved items as inventory line items.
-pub(crate) fn line_items(reservation: &Reservation) -> Vec<LineItem> {
-    reservation
-        .items
-        .iter()
-        .map(|item| LineItem {
-            ticket_type_id: item.ticket_type_id,
-            quantity: item.quantity,
-        })
-        .collect()
+pub(crate) fn line_items(reservation: &Reservation) -> LineItems {
+    LineItems::new(reservation.items.iter().map(|item| LineItem {
+        ticket_type_id: item.ticket_type_id,
+        quantity: item.quantity,
+    }))
 }
 
-/// The reserved items as quota claims under each ticket type's per-account limit.
-pub(crate) fn holds(reservation: &Reservation, ticket_types: &[TicketType]) -> Vec<Hold> {
-    reservation
-        .items
-        .iter()
-        .map(|item| Hold {
-            ticket_type_id: item.ticket_type_id,
-            quantity: item.quantity,
-            per_account_limit: ticket_types
-                .iter()
-                .find(|ticket_type| ticket_type.id == item.ticket_type_id)
-                .map_or(0, |ticket_type| ticket_type.per_account_limit),
-        })
-        .collect()
+/// `items` as quota claims under each ticket type's per-account limit.
+pub(crate) fn holds(items: &LineItems, ticket_types: &[TicketType]) -> ApiResult<Holds> {
+    Holds::new(items, |id| {
+        ticket_types
+            .iter()
+            .find(|ticket_type| ticket_type.id == id)
+            .map(|ticket_type| ticket_type.per_account_limit)
+    })
+    .ok_or_else(|| ApiError::internal("a reserved ticket type no longer exists"))
 }
 
 /// A reservation an attestor may charge for: one of a sale that accepts it. Others look
@@ -174,7 +165,7 @@ pub async fn manual_payment(
         .ok_or_else(|| ApiError::not_found("reservation"))?;
     let event = state
         .store()
-        .event(reservation.event_id)
+        .event_summary(reservation.event_id)
         .await?
         .ok_or_else(|| ApiError::not_found("event"))?;
     state.authorize(
@@ -229,7 +220,7 @@ pub async fn settle(
     if !attestor.id.is_builtin() && !sale.accepts(attestor.id) {
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,
-            "attestor-not-accepted",
+            ProblemKind::ATTESTOR_NOT_ACCEPTED,
             "this sale does not accept payments from this attestor",
         ));
     }
@@ -237,14 +228,14 @@ pub async fn settle(
     {
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,
-            "environment-mismatch",
+            ProblemKind::ENVIRONMENT_MISMATCH,
             "a sandbox attestor cannot settle a live sale",
         ));
     }
     if payment.amount != reservation.total {
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
-            "amount-mismatch",
+            ProblemKind::AMOUNT_MISMATCH,
             format!(
                 "the reservation costs {}, not {}",
                 reservation.total, payment.amount
@@ -284,7 +275,7 @@ pub async fn settle(
             let account = reservation.account_id;
             let quota = tx
                 .inventory()
-                .try_take_quota(account, &holds(&reservation, &ticket_types))
+                .try_take_quota(account, &holds(&items, &ticket_types)?)
                 .await?;
             if quota && tx.inventory().try_sell(&items).await? {
                 issue(state, &mut *tx, reservation, &ticket_types, now).await?
@@ -418,7 +409,7 @@ pub async fn confirm_refund(
         PaymentDisposition::Applied => {
             return Err(ApiError::new(
                 StatusCode::CONFLICT,
-                "payment-applied",
+                ProblemKind::PAYMENT_APPLIED,
                 "this payment paid for issued tickets: confirm a refund of them with its \
                  refund_id, or report a reversal",
             ));

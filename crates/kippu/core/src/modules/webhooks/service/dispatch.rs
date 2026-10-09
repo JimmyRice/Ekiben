@@ -34,7 +34,7 @@ async fn organization_of(
     let organization = match state.store().reservation(reservation).await? {
         Some(reservation) => state
             .store()
-            .event(reservation.event_id)
+            .event_summary(reservation.event_id)
             .await?
             .map(|event| event.organization_id),
         None => None,
@@ -115,20 +115,20 @@ pub(crate) async fn deliver(
     let now = state.now();
     let lease = Lease {
         now,
-        until: now + Duration::seconds(i64::from(config.lease_seconds)),
+        until: now + Duration::seconds(i64::from(config.lease_seconds.get())),
     };
     let Some(webhook) = state.store().claim_webhook(lease).await? else {
         return Ok(Progress::Idle);
     };
     // Stop starting deliveries while one more could still finish within the lease.
-    let budget = StdDuration::from_secs(u64::from(config.lease_seconds)).saturating_sub(
-        StdDuration::from_secs(config.timeout_seconds.saturating_add(1)),
+    let budget = StdDuration::from_secs(u64::from(config.lease_seconds.get())).saturating_sub(
+        StdDuration::from_secs(config.timeout_seconds.get().saturating_add(1)),
     );
     let started = Instant::now();
 
     let records = state
         .store()
-        .outbox_after(webhook.delivered_through, config.batch_size)
+        .outbox_after(webhook.delivered_through, config.batch_size.get())
         .await?;
     let mut through = webhook.delivered_through;
     let mut delivered = 0_usize;
@@ -217,7 +217,7 @@ pub(crate) fn delivery_task(config: &Config) -> Option<BackgroundTask> {
     };
     Some(BackgroundTask::every(
         "webhooks",
-        StdDuration::from_millis(config.webhooks.interval_ms),
+        StdDuration::from_millis(config.webhooks.interval_ms.get()),
         move |state| deliver(state, client.clone()),
     ))
 }

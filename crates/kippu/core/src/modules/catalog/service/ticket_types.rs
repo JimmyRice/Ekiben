@@ -2,13 +2,14 @@
 
 use std::collections::BTreeMap;
 
-use kippu_domain::catalog::{Event, TicketType};
+use kippu_domain::catalog::{EventSummary, TicketType};
 use kippu_domain::{Money, SaleId, TicketTypeId, Timestamp, ValidationError};
 
 use super::{TicketTypeAvailability, check_version, visible_sale, writable_sale};
 use crate::app::AppState;
 use crate::auth::Principal;
 use crate::error::{ApiError, ApiResult};
+use crate::modules::ticketing::service::check_ticket_length;
 
 /// A ticket type's settings.
 #[derive(Debug, Clone)]
@@ -87,7 +88,7 @@ pub async fn visible_ticket_type(
 
 /// Checks that buyers' refunds of `ticket_type` end before `event` opens: after that a refund
 /// could follow an admission, which Kippu cannot see.
-fn check_refund_period(ticket_type: &TicketType, event: &Event) -> ApiResult<()> {
+fn check_refund_period(ticket_type: &TicketType, event: &EventSummary) -> ApiResult<()> {
     match ticket_type.refundable_until {
         Some(until) if until > event.starts_at => Err(ValidationError::new(
             "refundable_until",
@@ -96,6 +97,22 @@ fn check_refund_period(ticket_type: &TicketType, event: &Event) -> ApiResult<()>
         .into()),
         _ => Ok(()),
     }
+}
+
+/// Checks that `ticket_type` is priced in the currency of its sale's other ticket types: a
+/// reservation has one total, so one sale sells in one currency.
+async fn check_currency(state: &AppState, ticket_type: &TicketType) -> ApiResult<()> {
+    let others = state.store().list_ticket_types(ticket_type.sale_id).await?;
+    if others.iter().any(|other| {
+        other.id != ticket_type.id && other.price.currency() != ticket_type.price.currency()
+    }) {
+        return Err(ValidationError::new(
+            "price",
+            "must be in the currency of the sale's other ticket types",
+        )
+        .into());
+    }
+    Ok(())
 }
 
 /// A ticket type the caller may see, with its availability.
@@ -167,6 +184,8 @@ pub async fn create_ticket_type(
     };
     ticket_type.validate()?;
     check_refund_period(&ticket_type, &event)?;
+    check_ticket_length(state, &ticket_type)?;
+    check_currency(state, &ticket_type).await?;
     state.store().insert_ticket_type(&ticket_type).await?;
     Ok(ticket_type)
 }
@@ -206,6 +225,8 @@ pub async fn update_ticket_type(
     };
     ticket_type.validate()?;
     check_refund_period(&ticket_type, &event)?;
+    check_ticket_length(state, &ticket_type)?;
+    check_currency(state, &ticket_type).await?;
     state
         .store()
         .update_ticket_type(&ticket_type, expected_version)

@@ -146,13 +146,15 @@ impl Tokens {
         Ok(Self {
             verifying_key: signing_key.verifying_key(),
             signing_key,
-            issuer: config.issuer.id.clone(),
+            issuer: config.issuer.id.to_string(),
             root_keys,
-            root_max_ttl: i64::from(config.root.max_token_ttl_seconds),
-            access_ttl: Duration::seconds(i64::from(config.auth.access_token_ttl_seconds)),
-            queue_ticket_ttl: Duration::seconds(i64::from(config.auth.queue_ticket_ttl_seconds)),
+            root_max_ttl: i64::from(config.root.max_token_ttl_seconds.get()),
+            access_ttl: Duration::seconds(i64::from(config.auth.access_token_ttl_seconds.get())),
+            queue_ticket_ttl: Duration::seconds(i64::from(
+                config.auth.queue_ticket_ttl_seconds.get(),
+            )),
             admission_pass_ttl: Duration::seconds(i64::from(
-                config.auth.admission_pass_ttl_seconds,
+                config.auth.admission_pass_ttl_seconds.get(),
             )),
         })
     }

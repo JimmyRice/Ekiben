@@ -214,6 +214,13 @@ impl EventSummary {
     }
 }
 
+impl EventSummary {
+    /// Whether the public may see the event.
+    pub const fn is_public(&self) -> bool {
+        matches!(self.status, EventStatus::Published | EventStatus::Cancelled)
+    }
+}
+
 impl From<Event> for EventSummary {
     fn from(event: Event) -> Self {
         Self {
@@ -336,9 +343,6 @@ impl TicketType {
     /// Checks the invariants of a ticket type's editable fields.
     pub fn validate(&self) -> Result<(), ValidationError> {
         non_empty("name", &self.name, 200)?;
-        if self.price.amount_minor < 0 {
-            return Err(ValidationError::new("price", "must not be negative"));
-        }
         if self.capacity == 0 {
             return Err(ValidationError::new("capacity", "must be positive"));
         }

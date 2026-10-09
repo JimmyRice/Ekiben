@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use kippu_domain::catalog::TicketType;
 use kippu_domain::reservation::Reservation;
 use kippu_domain::ticket::{Ticket, TicketStatus};
-use kippu_domain::{TicketId, TicketTypeId, Timestamp};
+use kippu_domain::{EventId, TicketId, TicketTypeId, Timestamp, ValidationError};
 use kippu_store::{Keyset, Page, PageRequest};
 
 use super::permissions::TICKETS_READ;
@@ -36,7 +36,7 @@ pub struct TicketDetails {
 /// The keys tickets are signed with.
 pub fn gate_keys(state: &AppState) -> GateKeys {
     GateKeys {
-        issuer: state.config().issuer.id.clone(),
+        issuer: state.config().issuer.id.to_string(),
         keys: state.tickets().published(),
     }
 }
@@ -127,6 +127,49 @@ fn unix_seconds(instant: Timestamp) -> u64 {
     u64::try_from(instant.unix_seconds()).unwrap_or(0)
 }
 
+/// The claims of a ticket of `ticket_type`, with a placeholder ticket id.
+fn claims(
+    state: &AppState,
+    event_id: EventId,
+    ticket_type: &TicketType,
+    now: Timestamp,
+) -> kaisatsu::Claims {
+    let uuid = |id: uuid::Uuid| kaisatsu::Uuid::from_bytes(id.into_bytes());
+    kaisatsu::Claims {
+        issuer: state.config().issuer.id.to_string(),
+        event_id: uuid(event_id.as_uuid()),
+        ticket_id: kaisatsu::Uuid::from_bytes([0; 16]),
+        ticket_type_id: uuid(ticket_type.id.as_uuid()),
+        valid_from: unix_seconds(ticket_type.valid_from),
+        valid_until: unix_seconds(ticket_type.valid_until),
+        issued_at: unix_seconds(now),
+        extensions: ticket_type
+            .ticket_extensions
+            .iter()
+            .map(|(&tag, value)| (tag, value.as_bytes().to_vec()))
+            .collect(),
+    }
+}
+
+/// Checks that tickets of `ticket_type` can be issued: its extension claims must leave them
+/// within the ticket length limit. Every ticket of a type has the same length.
+pub(crate) fn check_ticket_length(state: &AppState, ticket_type: &TicketType) -> ApiResult<()> {
+    let claims = claims(
+        state,
+        ticket_type.event_id,
+        ticket_type,
+        Timestamp::UNIX_EPOCH,
+    );
+    if claims.encoded_len() > kaisatsu::wire::MAX_TICKET_LEN {
+        return Err(ValidationError::new(
+            "ticket_extensions",
+            "make tickets longer than 2048 bytes",
+        )
+        .into());
+    }
+    Ok(())
+}
+
 /// Signs one ticket per reserved seat. Pure computation: the caller stores the tickets in the
 /// same transaction that records the payment.
 pub(crate) fn issue_tickets(
@@ -142,23 +185,11 @@ pub(crate) fn issue_tickets(
             .iter()
             .find(|ticket_type| ticket_type.id == item.ticket_type_id)
             .ok_or_else(|| ApiError::internal("reserved ticket type no longer exists"))?;
-        let extensions: BTreeMap<u8, Vec<u8>> = ticket_type
-            .ticket_extensions
-            .iter()
-            .map(|(&tag, value)| (tag, value.as_bytes().to_vec()))
-            .collect();
+        // Tickets of one type differ only in their id.
+        let mut claims = claims(state, reservation.event_id, ticket_type, now);
         for _ in 0..item.quantity {
             let id = TicketId::generate();
-            let claims = kaisatsu::Claims {
-                issuer: state.config().issuer.id.clone(),
-                event_id: kaisatsu::Uuid::from_bytes(reservation.event_id.as_uuid().into_bytes()),
-                ticket_id: kaisatsu::Uuid::from_bytes(id.as_uuid().into_bytes()),
-                ticket_type_id: kaisatsu::Uuid::from_bytes(ticket_type.id.as_uuid().into_bytes()),
-                valid_from: unix_seconds(ticket_type.valid_from),
-                valid_until: unix_seconds(ticket_type.valid_until),
-                issued_at: unix_seconds(now),
-                extensions: extensions.clone(),
-            };
+            claims.ticket_id = kaisatsu::Uuid::from_bytes(id.as_uuid().into_bytes());
             let encoded = issuer.issue(&claims).map_err(ApiError::internal)?;
             tickets.push(Ticket {
                 id,

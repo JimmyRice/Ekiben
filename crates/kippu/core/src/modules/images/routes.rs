@@ -13,7 +13,7 @@ use super::dto::{EventImageView, ImageOrder};
 use super::service::{self, IMMUTABLE, ImageContent, PublishedImage};
 use crate::app::AppState;
 use crate::auth::Principal;
-use crate::error::{ApiError, ApiResult, Problem};
+use crate::error::{ApiError, ApiResult, Problem, ProblemKind};
 use crate::http::{Json, Listing};
 
 const TAG: &str = "images";
@@ -40,7 +40,7 @@ async fn read_body(body: Body) -> ApiResult<axum::body::Bytes> {
             } else {
                 ApiError::new(
                     StatusCode::BAD_REQUEST,
-                    "invalid-body",
+                    ProblemKind::INVALID_BODY,
                     "the body could not be read",
                 )
             }

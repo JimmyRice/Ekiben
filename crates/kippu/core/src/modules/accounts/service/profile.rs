@@ -8,7 +8,7 @@ use kippu_store::Unlink;
 use crate::app::AppState;
 use crate::auth::password::{hash_password, validate_password, verify_password};
 use crate::auth::{Principal, Scope};
-use crate::error::{ApiError, ApiResult, StatusCode};
+use crate::error::{ApiError, ApiResult, ProblemKind, StatusCode};
 use crate::modules::accounts::permissions::PROFILE_MANAGE;
 
 /// Who a caller is.
@@ -95,7 +95,7 @@ pub async fn set_password(
         if !matches {
             return Err(ApiError::new(
                 StatusCode::FORBIDDEN,
-                "wrong-password",
+                ProblemKind::WRONG_PASSWORD,
                 "the current password is missing or wrong",
             ));
         }
@@ -160,7 +160,7 @@ pub async fn unlink_identity(
         Unlink::NotLinked => Err(not_found()),
         Unlink::LastSignInMethod => Err(ApiError::new(
             StatusCode::CONFLICT,
-            "last-sign-in-method",
+            ProblemKind::LAST_SIGN_IN_METHOD,
             "this is the account's only way to sign in; set a password first",
         )),
     }

@@ -23,7 +23,7 @@ use kippu_store::Insertion;
 
 use crate::app::AppState;
 use crate::auth::Principal;
-use crate::error::{ApiError, ApiResult};
+use crate::error::{ApiError, ApiResult, ProblemKind};
 
 /// Display name for accounts whose provider shared none. The person can change it later.
 const DEFAULT_DISPLAY_NAME: &str = "User";
@@ -178,7 +178,7 @@ pub async fn link_or_create(state: &AppState, identity: ExternalIdentity) -> Api
         Ok(Insertion::Existing(winner)) => existing(state, winner).await,
         Err(kippu_store::StoreError::Conflict("email")) => Err(ApiError::new(
             axum::http::StatusCode::CONFLICT,
-            "email-already-registered",
+            ProblemKind::EMAIL_ALREADY_REGISTERED,
             "an account with this email exists; sign in to it and link this provider there",
         )),
         Err(error) => Err(error.into()),
@@ -205,7 +205,7 @@ pub async fn link(
         Insertion::Existing(owner) if owner == account.id => Ok(()),
         Insertion::Existing(_) => Err(ApiError::new(
             axum::http::StatusCode::CONFLICT,
-            "identity-linked-elsewhere",
+            ProblemKind::IDENTITY_LINKED_ELSEWHERE,
             "this sign-in already belongs to another account",
         )),
     }

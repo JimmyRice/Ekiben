@@ -7,7 +7,7 @@ use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use crate::error::ApiError;
+use crate::error::{ApiError, ProblemKind};
 
 /// A JSON request or response body.
 ///
@@ -40,9 +40,9 @@ where
 fn problem(rejection: &JsonRejection) -> ApiError {
     let status = rejection.status();
     let kind = match rejection {
-        JsonRejection::MissingJsonContentType(_) => "unsupported-media-type",
+        JsonRejection::MissingJsonContentType(_) => ProblemKind::UNSUPPORTED_MEDIA_TYPE,
         _ if status == StatusCode::PAYLOAD_TOO_LARGE => return ApiError::payload_too_large(),
-        _ => "invalid-json",
+        _ => ProblemKind::INVALID_JSON,
     };
     ApiError::new(status, kind, rejection.body_text())
 }
