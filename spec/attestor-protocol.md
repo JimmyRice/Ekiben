@@ -1,7 +1,7 @@
 # Kippu Attestor Protocol, version 1
 
 Status: draft. Kippu never talks to a payment provider. Instead, a deployment runs one or more
-**attestors** — small services that wrap Stripe, Alipay, PayPay, a cash desk, anything — and
+**attestors** — small services that wrap Apple Pay, Google Pay, Stripe, Alipay, PayPay, a cash desk, anything — and
 Kippu trusts what they sign. This document specifies how an attestor and Kippu talk.
 
 ## 1. Registering an attestor
