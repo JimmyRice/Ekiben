@@ -103,3 +103,51 @@ async fn tickets_carry_the_current_name_of_their_type() {
         "the signed ticket does not change"
     );
 }
+
+#[tokio::test]
+async fn organizers_see_their_events_tickets_without_the_signed_bytes() {
+    let app = TestApp::start().await;
+    let (buyer, ticket, shop) = ticket_holder(&app).await;
+    let other_shop = app.shop(10, 0, json!({})).await;
+    let ticket_id = ticket["id"].as_str().unwrap();
+    let reservation_id = ticket["reservation_id"].as_str().unwrap();
+    let path = format!("/v1/tickets/{ticket_id}");
+    let of_reservation = format!("/v1/reservations/{reservation_id}/tickets");
+
+    let held = app.call(Method::GET, &path, Some(&buyer), None).await;
+    assert!(held.body["ticket"].is_string(), "{:?}", held.body);
+    let listed = app
+        .call(Method::GET, &of_reservation, Some(&buyer), None)
+        .await;
+    assert_eq!(listed.status, StatusCode::OK, "{:?}", listed.body);
+    assert_eq!(listed.body["items"], json!([held.body]));
+
+    // The organizer sees everything but the bytes, which would let them in.
+    let seen = app
+        .call(Method::GET, &path, Some(&shop.organizer), None)
+        .await;
+    assert_eq!(seen.status, StatusCode::OK, "{:?}", seen.body);
+    let mut without_bytes = held.body.clone();
+    without_bytes["ticket"] = Value::Null;
+    assert_eq!(seen.body, without_bytes);
+    let listed = app
+        .call(Method::GET, &of_reservation, Some(&shop.organizer), None)
+        .await;
+    assert_eq!(listed.body["items"], json!([without_bytes]));
+    let raw = app
+        .call(
+            Method::GET,
+            &format!("{path}/raw"),
+            Some(&shop.organizer),
+            None,
+        )
+        .await;
+    assert_eq!(raw.status, StatusCode::NOT_FOUND);
+
+    for path in [&path, &of_reservation] {
+        let stranger = app
+            .call(Method::GET, path, Some(&other_shop.organizer), None)
+            .await;
+        assert_eq!(stranger.status, StatusCode::NOT_FOUND, "{path}");
+    }
+}

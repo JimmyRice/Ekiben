@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use kippu_domain::purchase::{LineItem, PurchaseRequest, PurchaseStatus};
-use kippu_domain::reservation::Reservation;
-use kippu_domain::{AccountId, PurchaseRequestId, ReservationId, SaleId, Timestamp};
+use kippu_domain::reservation::{Reservation, ReservationStatus};
+use kippu_domain::{AccountId, EventId, PurchaseRequestId, ReservationId, SaleId, Timestamp};
 use kippu_store::{
     Hold, Holds, Insertion, InventoryTx, Keyset, Lease, LineItems, PageRequest, PurchaseStore,
     PurchasesTx, ReservationsTx, StoreError, StoreResult,
@@ -135,6 +135,28 @@ impl PurchaseStore for PostgresStore {
              ORDER BY created_at DESC, id LIMIT $4"
         )))
         .bind(account.as_uuid())
+        .bind(page.after.map(|after| at(after.at)))
+        .bind(page.after.map(|after| after.id))
+        .bind(i64::from(page.limit))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(error)?;
+        all(rows)
+    }
+
+    async fn reservations_for_event(
+        &self,
+        event: EventId,
+        status: Option<ReservationStatus>,
+        page: PageRequest<Keyset>,
+    ) -> StoreResult<Vec<Reservation>> {
+        let rows = sqlx::query_as::<_, ReservationRow>(sqlx::AssertSqlSafe(format!(
+            "{RESERVATION_COLUMNS} WHERE event_id = $1 AND ($2 IS NULL OR status = $2)
+               AND ($3 IS NULL OR created_at < $3 OR (created_at = $3 AND id > $4))
+             ORDER BY created_at DESC, id LIMIT $5"
+        )))
+        .bind(event.as_uuid())
+        .bind(status.map(ReservationStatus::as_str))
         .bind(page.after.map(|after| at(after.at)))
         .bind(page.after.map(|after| after.id))
         .bind(i64::from(page.limit))

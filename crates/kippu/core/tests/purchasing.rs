@@ -772,3 +772,129 @@ async fn the_attestor_feed_reads_past_other_attestors_events() {
     let (events, last) = poll(&theirs, position).await;
     assert!(events.is_empty() && last == our_sequence);
 }
+
+#[tokio::test]
+async fn organizers_read_the_reservations_of_their_events() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let other_shop = app.shop(10, 1_000, json!({})).await;
+    let buyer = app.buyer().await;
+    let reservation = app.reserve(&buyer, &shop, 1).await;
+    let id = reservation["id"].as_str().unwrap();
+    let path = format!("/v1/reservations/{id}");
+
+    let read = app
+        .call(Method::GET, &path, Some(&shop.organizer), None)
+        .await;
+    assert_eq!(read.status, StatusCode::OK);
+    assert_eq!(read.body, reservation);
+    let stranger = app
+        .call(Method::GET, &path, Some(&other_shop.organizer), None)
+        .await;
+    assert_eq!(stranger.status, StatusCode::NOT_FOUND);
+    // Reading is all: the buyer's actions stay the buyer's.
+    for action in ["cancel", "checkout"] {
+        let refused = app
+            .call(
+                Method::POST,
+                &format!("{path}/{action}"),
+                Some(&shop.organizer),
+                Some(json!({})),
+            )
+            .await;
+        assert_eq!(refused.status, StatusCode::NOT_FOUND, "{action}");
+    }
+
+    let listing = format!("/v1/events/{}/reservations", shop.event_id);
+    for (query, expected) in [
+        ("", json!([id])),
+        ("?status=reserved", json!([id])),
+        ("?status=issued", json!([])),
+    ] {
+        let listed = app
+            .call(
+                Method::GET,
+                &format!("{listing}{query}"),
+                Some(&shop.organizer),
+                None,
+            )
+            .await;
+        assert_eq!(listed.status, StatusCode::OK, "{:?}", listed.body);
+        let ids: Vec<Value> = listed.body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|reservation| reservation["id"].clone())
+            .collect();
+        assert_eq!(json!(ids), expected, "{query}");
+    }
+    for (token, status) in [
+        (Some(other_shop.organizer.as_str()), StatusCode::FORBIDDEN),
+        (Some(buyer.as_str()), StatusCode::FORBIDDEN),
+        (None, StatusCode::UNAUTHORIZED),
+    ] {
+        let refused = app.call(Method::GET, &listing, token, None).await;
+        assert_eq!(refused.status, status);
+    }
+    let invalid = app
+        .call(
+            Method::GET,
+            &format!("{listing}?status=sold"),
+            Some(&shop.organizer),
+            None,
+        )
+        .await;
+    assert_eq!(invalid.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn buyers_see_the_payment_methods_a_sale_accepts() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let live = app.attestor("live").await;
+    let sandbox = app.attestor("sandbox").await;
+    let free = "00000000-0000-0000-0000-000000000001";
+    let manual = "00000000-0000-0000-0000-000000000002";
+    let sale_path = format!("/v1/sales/{}", shop.sale_id);
+    let mut sale = app.call(Method::GET, &sale_path, None, None).await.body;
+    sale["accepted_attestors"] = json!([sandbox.id, manual, live.id, free]);
+    let updated = app
+        .call(Method::PUT, &sale_path, Some(&shop.organizer), Some(sale))
+        .await;
+    assert_eq!(updated.status, StatusCode::OK, "{:?}", updated.body);
+
+    // A live sale cannot be settled by a sandbox attestor; free reservations need no choice.
+    let methods = format!("{sale_path}/payment-methods");
+    let listed = app.call(Method::GET, &methods, None, None).await;
+    assert_eq!(listed.status, StatusCode::OK, "{:?}", listed.body);
+    assert_eq!(
+        listed.body["items"],
+        json!([
+            { "id": manual, "name": listed.body["items"][0]["name"] },
+            { "id": live.id, "name": "gateway-live" },
+        ])
+    );
+
+    let revoked = app
+        .call(
+            Method::PUT,
+            &format!("/v1/admin/attestors/{}/revoked", live.id),
+            Some(&app.root_token()),
+            Some(json!({ "revoked": true })),
+        )
+        .await;
+    assert_eq!(revoked.status, StatusCode::NO_CONTENT);
+    let listed = app.call(Method::GET, &methods, None, None).await;
+    assert_eq!(listed.body["items"].as_array().unwrap().len(), 1);
+    assert_eq!(listed.body["items"][0]["id"], manual);
+
+    let unknown = app
+        .call(
+            Method::GET,
+            "/v1/sales/0190a7c4-0000-7000-8000-000000000000/payment-methods",
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+}

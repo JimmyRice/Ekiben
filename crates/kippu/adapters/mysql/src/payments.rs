@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use kippu_domain::payment::{Attestor, AttestorKey, PaymentAttestation, PaymentDisposition};
-use kippu_domain::refund::Refund;
-use kippu_domain::{AttestorId, RefundId, ReservationId, Timestamp};
-use kippu_store::{Insertion, PaymentStore, PaymentsTx, StoreResult};
+use kippu_domain::refund::{Refund, RefundStatus};
+use kippu_domain::{AttestorId, EventId, RefundId, ReservationId, Timestamp};
+use kippu_store::{Insertion, Keyset, PageRequest, PaymentStore, PaymentsTx, StoreResult};
 
 use crate::convert::{
     AttestationRow, AttestorKeyRow, AttestorRow, RefundRow, all, json, micros, optional,
@@ -178,6 +178,33 @@ impl PaymentStore for MySqlStore {
             "{REFUND_COLUMNS} WHERE reservation_id = ? ORDER BY created_at, id"
         )))
         .bind(reservation.as_uuid())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(error)?;
+        all(rows)
+    }
+
+    async fn refunds_for_event(
+        &self,
+        event: EventId,
+        status: Option<RefundStatus>,
+        page: PageRequest<Keyset>,
+    ) -> StoreResult<Vec<Refund>> {
+        let status = status.map(RefundStatus::as_str);
+        let after_at = page.after.map(|after| micros(after.at));
+        let rows = sqlx::query_as::<_, RefundRow>(sqlx::AssertSqlSafe(format!(
+            "{REFUND_COLUMNS} WHERE event_id = ? AND (? IS NULL OR status = ?)
+               AND (? IS NULL OR created_at > ? OR (created_at = ? AND id > ?))
+             ORDER BY created_at, id LIMIT ?"
+        )))
+        .bind(event.as_uuid())
+        .bind(status)
+        .bind(status)
+        .bind(after_at)
+        .bind(after_at)
+        .bind(after_at)
+        .bind(page.after.map(|after| after.id))
+        .bind(page.limit)
         .fetch_all(&self.pool)
         .await
         .map_err(error)?;

@@ -6,19 +6,20 @@ use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use kippu_domain::refund::Refund;
 use kippu_domain::reservation::Reservation;
-use kippu_domain::{AttestorId, RefundId, ReservationId};
+use kippu_domain::{AttestorId, EventId, RefundId, ReservationId, SaleId};
 use kippu_store::OutboxRecord;
 
 use super::dto::{
-    AttestationRequest, AttestorKeyRequest, AttestorView, CreateAttestorRequest, FeedEvent,
-    FeedQuery, ManualPaymentRequest, RefundTicketsRequest, RevokedRequest, SettlementView,
+    AttestationRequest, AttestorKeyRequest, AttestorView, CreateAttestorRequest, EventRefundsQuery,
+    FeedEvent, FeedQuery, ManualPaymentRequest, PaymentMethod, RefundTicketsRequest,
+    RevokedRequest, SettlementView,
 };
 use super::service::{self, AttestorReport, PaymentResult};
 use super::signature::Attested;
 use crate::app::AppState;
 use crate::auth::Principal;
 use crate::error::{ApiResult, Problem};
-use crate::http::{Json, Listing};
+use crate::http::{Json, Listing, ListingTag};
 
 const TAG: &str = "payments";
 
@@ -260,6 +261,52 @@ pub(crate) async fn refund_tickets(
     let refund =
         service::request_refund(&state, &principal, reservation_id, request.into()).await?;
     Ok((StatusCode::CREATED, Json(refund)))
+}
+
+/// How a buyer may pay for this sale's reservations: the payment methods it accepts that can
+/// settle it, in the sale's order. Free reservations need none.
+#[utoipa::path(
+    get, path = "/v1/sales/{sale_id}/payment-methods", tag = TAG,
+    params(("sale_id" = SaleId, Path)),
+    responses((status = 200, body = Listing<PaymentMethod>), (status = 404, body = Problem))
+)]
+pub(crate) async fn list_payment_methods(
+    State(state): State<AppState>,
+    principal: Option<Principal>,
+    Path(sale_id): Path<SaleId>,
+) -> ApiResult<Json<Listing<PaymentMethod>>> {
+    let methods = service::payment_methods(&state, principal.as_ref(), sale_id).await?;
+    Ok(Json(Listing::all(
+        methods.into_iter().map(PaymentMethod::from).collect(),
+    )))
+}
+
+/// An event's refunds, oldest first, for its organizers: e.g. `status=pending` for cash to
+/// hand back.
+#[utoipa::path(
+    get, path = "/v1/events/{event_id}/refunds", tag = TAG,
+    security(("bearer" = [])),
+    params(("event_id" = EventId, Path), EventRefundsQuery),
+    responses(
+        (status = 200, body = Listing<Refund>),
+        (status = 400, body = Problem),
+        (status = 403, body = Problem),
+        (status = 404, body = Problem)
+    )
+)]
+pub(crate) async fn list_event_refunds(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(event_id): Path<EventId>,
+    Query(query): Query<EventRefundsQuery>,
+) -> ApiResult<Json<Listing<Refund>>> {
+    let (status, page) = query.into_parts()?;
+    let refunds = service::event_refunds(&state, &principal, event_id, status, page).await?;
+    Ok(Json(Listing::page(
+        refunds,
+        ListingTag::EVENT_REFUNDS,
+        |refund| refund,
+    )))
 }
 
 /// A reservation's refunds, oldest first.

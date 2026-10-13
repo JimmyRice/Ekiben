@@ -40,6 +40,8 @@ impl ListingTag {
     pub(crate) const DENIED_TICKETS: Self = Self(9);
     pub(crate) const PUBLIC_ORGANIZATIONS: Self = Self(10);
     pub(crate) const MEMBERS: Self = Self(11);
+    pub(crate) const EVENT_RESERVATIONS: Self = Self(12);
+    pub(crate) const EVENT_REFUNDS: Self = Self(13);
     pub(crate) const EVENTS_BY_START: Self = Self(16);
     pub(crate) const EVENTS_BY_START_DESC: Self = Self(17);
     pub(crate) const EVENTS_BY_CREATION: Self = Self(18);

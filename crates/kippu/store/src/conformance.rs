@@ -124,6 +124,8 @@ macro_rules! conformance_tests {
             organizations_are_versioned,
             public_organizations_have_a_public_event,
             account_listings_filter_and_members_resume_exactly,
+            event_reservations_resume_exactly,
+            event_refunds_resume_exactly,
         );
     };
     (@cases $mode:tt; $($case:ident),* $(,)?) => {
@@ -2605,4 +2607,172 @@ pub async fn account_listings_filter_and_members_resume_exactly(store: Arc<dyn S
         store.members(nobody, PageRequest::first(10)).await.unwrap(),
         Vec::new()
     );
+}
+
+pub async fn event_reservations_resume_exactly(store: Arc<dyn Store>) {
+    use ReservationStatus::{Cancelled, Issued, Reserved};
+    let catalog = catalog(store.as_ref(), &[100]).await;
+    let elsewhere = catalog_in(store.as_ref(), organization(store.as_ref()).await, &[100]).await;
+    reservation(store.as_ref(), &elsewhere, Issued, now()).await;
+
+    let mut reservations = Vec::new();
+    // Creation times repeat, so ties need the id.
+    for (offset, status) in [
+        (0, Issued),
+        (0, Reserved),
+        (5, Issued),
+        (9, Cancelled),
+        (9, Issued),
+    ] {
+        let at = now() + Duration::seconds(offset);
+        let buyer = account(store.as_ref()).await;
+        let request = purchase_request(buyer, &catalog, &unique_suffix());
+        store.insert_purchase_request(&request).await.unwrap();
+        let price = Money::new(1_000, Currency::JPY).unwrap();
+        let reservation = Reservation {
+            id: ReservationId::generate(),
+            purchase_request_id: request.id,
+            account_id: buyer,
+            sale_id: catalog.sale,
+            event_id: catalog.event,
+            items: vec![ReservedItem {
+                ticket_type_id: catalog.ticket_types[0],
+                quantity: 1,
+                unit_price: price,
+            }],
+            total: price,
+            environment: Environment::Live,
+            status,
+            attestor_id: None,
+            expires_at: at + Duration::minutes(10),
+            created_at: at,
+            updated_at: at,
+        };
+        let mut tx = store.begin().await.unwrap();
+        tx.reservations()
+            .insert_reservation(&reservation)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        reservations.push(reservation);
+    }
+    // Newest first; equal times in id order.
+    reservations.sort_by_key(|reservation| {
+        (
+            std::cmp::Reverse(reservation.created_at),
+            reservation.id.as_uuid(),
+        )
+    });
+    let issued: Vec<Reservation> = reservations
+        .iter()
+        .filter(|reservation| reservation.status == Issued)
+        .cloned()
+        .collect();
+
+    let position = |reservation: &Reservation| Keyset {
+        at: reservation.created_at,
+        id: reservation.id.as_uuid(),
+    };
+    for size in [1, 2, 10] {
+        for (status, expected) in [(None, &reservations), (Some(Issued), &issued)] {
+            let listed = walk(size, position, async |page| {
+                store
+                    .reservations_for_event(catalog.event, status, page)
+                    .await
+                    .unwrap()
+            })
+            .await;
+            assert_eq!(&listed, expected, "{status:?} in pages of {size}");
+        }
+    }
+    let none = store
+        .reservations_for_event(
+            catalog.event,
+            Some(ReservationStatus::Expired),
+            PageRequest::first(10),
+        )
+        .await
+        .unwrap();
+    assert_eq!(none, Vec::new());
+}
+
+pub async fn event_refunds_resume_exactly(store: Arc<dyn Store>) {
+    let elsewhere = catalog(store.as_ref(), &[100]).await;
+    let catalog = catalog(store.as_ref(), &[100]).await;
+    let mut refunds = Vec::new();
+    let mut foreign = Vec::new();
+    for (catalog, times) in [(&catalog, &[0, 0, 4, 7, 7][..]), (&elsewhere, &[0])] {
+        let (reservation, tickets) = issued(store.as_ref(), catalog, 1).await;
+        let payment = PaymentAttestation {
+            attestor_id: AttestorId::MANUAL,
+            attestation_id: format!("pay-{}", unique_suffix()),
+            reservation_id: reservation.id,
+            amount: Money::new(1_000, Currency::JPY).unwrap(),
+            occurred_at: now(),
+            received_at: now(),
+            disposition: PaymentDisposition::Applied,
+        };
+        let mut tx = store.begin().await.unwrap();
+        tx.payments().insert_attestation(&payment).await.unwrap();
+        tx.commit().await.unwrap();
+        for (i, &offset) in times.iter().enumerate() {
+            let at = now() + Duration::seconds(offset);
+            let completed = i % 2 == 1;
+            let refund = Refund {
+                id: RefundId::generate(),
+                reservation_id: reservation.id,
+                account_id: reservation.account_id,
+                event_id: catalog.event,
+                attestor_id: payment.attestor_id,
+                attestation_id: payment.attestation_id.clone(),
+                ticket_ids: vec![tickets[0].id],
+                amount: Money::new(1_000, Currency::JPY).unwrap(),
+                reason: RefundReason::Requested,
+                status: if completed {
+                    RefundStatus::Completed
+                } else {
+                    RefundStatus::Pending
+                },
+                created_at: at,
+                completed_at: completed.then_some(at),
+            };
+            let mut tx = store.begin().await.unwrap();
+            tx.payments().insert_refund(&refund).await.unwrap();
+            tx.commit().await.unwrap();
+            if catalog.event == elsewhere.event {
+                foreign.push(refund);
+            } else {
+                refunds.push(refund);
+            }
+        }
+    }
+    // Oldest first; equal times in id order.
+    refunds.sort_by_key(|refund| (refund.created_at, refund.id.as_uuid()));
+    let pending: Vec<Refund> = refunds
+        .iter()
+        .filter(|refund| refund.status == RefundStatus::Pending)
+        .cloned()
+        .collect();
+
+    let position = |refund: &Refund| Keyset {
+        at: refund.created_at,
+        id: refund.id.as_uuid(),
+    };
+    for size in [1, 2, 10] {
+        for (status, expected) in [(None, &refunds), (Some(RefundStatus::Pending), &pending)] {
+            let listed = walk(size, position, async |page| {
+                store
+                    .refunds_for_event(catalog.event, status, page)
+                    .await
+                    .unwrap()
+            })
+            .await;
+            assert_eq!(&listed, expected, "{status:?} in pages of {size}");
+        }
+    }
+    let listed = store
+        .refunds_for_event(elsewhere.event, None, PageRequest::first(10))
+        .await
+        .unwrap();
+    assert_eq!(listed, foreign);
 }

@@ -1,13 +1,14 @@
-//! Registering, revoking and re-keying attestors.
+//! Registering, revoking and re-keying attestors, and which of them buyers may pay with.
 
 use kippu_domain::payment::{Attestor, AttestorKey, Environment};
 use kippu_domain::validation::non_empty;
-use kippu_domain::{AttestorId, ValidationError};
+use kippu_domain::{AttestorId, SaleId, ValidationError};
 
 use crate::app::AppState;
 use crate::auth::{Principal, Scope};
 use crate::error::{ApiError, ApiResult};
 use crate::keys::parse_verifying_key;
+use crate::modules::catalog::service::visible_sale;
 use crate::modules::payments::permissions::ATTESTORS_MANAGE;
 
 /// A new attestor and its first keys.
@@ -103,6 +104,33 @@ pub async fn attestors(
     for attestor in state.store().list_attestors().await? {
         attestors.push(with_keys(state, attestor).await?);
     }
+    Ok(attestors)
+}
+
+/// How a buyer may pay for a reservation of a sale they may see: the attestors it accepts
+/// that are not revoked and can settle it (a sandbox attestor cannot settle a live sale), in
+/// the order the sale names them. The built-in `free` attestor is left out: free reservations
+/// are settled without a choice.
+#[tracing::instrument(skip_all)]
+pub async fn payment_methods(
+    state: &AppState,
+    principal: Option<&Principal>,
+    sale_id: SaleId,
+) -> ApiResult<Vec<Attestor>> {
+    let (sale, _) = visible_sale(state, principal, sale_id).await?;
+    let mut attestors = state.store().list_attestors().await?;
+    attestors.retain(|attestor| {
+        attestor.id != AttestorId::FREE
+            && !attestor.revoked
+            && sale.accepts(attestor.id)
+            && !(attestor.environment == Environment::Sandbox
+                && sale.environment == Environment::Live)
+    });
+    attestors.sort_by_key(|attestor| {
+        sale.accepted_attestors
+            .iter()
+            .position(|&id| id == attestor.id)
+    });
     Ok(attestors)
 }
 

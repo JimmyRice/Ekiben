@@ -26,6 +26,9 @@ pub mod permissions {
     pub const PURCHASES_CREATE: Permission = Permission::new("purchases.create");
     /// Read purchase requests and reservations (account-scoped: your own).
     pub const RESERVATIONS_READ: Permission = Permission::new("reservations.read");
+    /// Read the reservations and tickets of the organization's events, whoever bought them
+    /// (organization-scoped).
+    pub const ORDERS_READ: Permission = Permission::new("orders.read");
 }
 
 /// The purchasing module.
@@ -41,6 +44,7 @@ impl Module for Purchasing {
         vec![
             (Role::User, permissions::PURCHASES_CREATE),
             (Role::User, permissions::RESERVATIONS_READ),
+            (Role::Organizer, permissions::ORDERS_READ),
         ]
     }
 
@@ -49,6 +53,7 @@ impl Module for Purchasing {
             .routes(routes!(routes::create_purchase_request))
             .routes(routes!(routes::get_purchase_request))
             .routes(routes!(routes::my_reservations))
+            .routes(routes!(routes::list_event_reservations))
             .routes(routes!(routes::get_reservation))
             .routes(routes!(routes::checkout_reservation))
             .routes(routes!(routes::cancel_reservation))

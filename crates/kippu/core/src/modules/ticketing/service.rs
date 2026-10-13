@@ -1,12 +1,13 @@
-//! Ticket use cases, independent of HTTP: signing tickets for a paid reservation, and
-//! handing them to their holders.
+//! Ticket use cases, independent of HTTP: signing tickets for a paid reservation, handing
+//! them to their holders, and showing them to the event's organizers (without the signed
+//! bytes, which only the holder gets).
 
 use std::collections::BTreeMap;
 
 use kippu_domain::catalog::TicketType;
 use kippu_domain::reservation::Reservation;
 use kippu_domain::ticket::{Ticket, TicketStatus};
-use kippu_domain::{EventId, TicketId, TicketTypeId, Timestamp, ValidationError};
+use kippu_domain::{EventId, ReservationId, TicketId, TicketTypeId, Timestamp, ValidationError};
 use kippu_store::{Keyset, Page, PageRequest};
 
 use super::permissions::TICKETS_READ;
@@ -14,6 +15,7 @@ use crate::app::AppState;
 use crate::auth::{Principal, Scope};
 use crate::error::{ApiError, ApiResult};
 use crate::keys::PublishedKey;
+use crate::modules::purchasing::service::{reads_orders_of, reservation};
 
 /// What a gate needs to verify this deployment's tickets.
 #[derive(Debug, Clone)]
@@ -24,13 +26,16 @@ pub struct GateKeys {
     pub keys: Vec<PublishedKey>,
 }
 
-/// A ticket as its holder sees it: the ticket, and the name of its type.
+/// A ticket as the caller sees it: the ticket, and the name of its type.
 #[derive(Debug, Clone)]
 pub struct TicketDetails {
     /// The ticket.
     pub ticket: Ticket,
     /// The ticket type's current name, e.g. "Day 1".
     pub ticket_type_name: String,
+    /// Whether the caller holds the ticket (or is an admin): only then may they have its
+    /// signed bytes. An organizer of the event sees everything else.
+    pub holder: bool,
 }
 
 /// The keys tickets are signed with.
@@ -58,10 +63,43 @@ pub async fn tickets(
         at: ticket.issued_at,
         id: ticket.id.as_uuid(),
     });
-    // A page holds few ticket types: look each up once.
+    Ok(Page {
+        items: with_type_names(state, page.items, true).await?,
+        next: page.next,
+    })
+}
+
+/// The tickets issued for a reservation the caller may see: their own, or one for an event
+/// they organize.
+#[tracing::instrument(skip_all)]
+pub async fn reservation_tickets(
+    state: &AppState,
+    principal: &Principal,
+    id: ReservationId,
+) -> ApiResult<Vec<TicketDetails>> {
+    let reservation = reservation(state, principal, id).await?;
+    let holder = state.policy().permits(
+        principal,
+        TICKETS_READ,
+        Scope::Account(reservation.account_id),
+    );
+    let tickets = state
+        .store()
+        .tickets_for_reservation(reservation.id)
+        .await?;
+    with_type_names(state, tickets, holder).await
+}
+
+/// Adds the names of their types to tickets. A page holds few ticket types: each is looked up
+/// once.
+async fn with_type_names(
+    state: &AppState,
+    tickets: Vec<Ticket>,
+    holder: bool,
+) -> ApiResult<Vec<TicketDetails>> {
     let mut names: BTreeMap<TicketTypeId, String> = BTreeMap::new();
-    let mut items = Vec::with_capacity(page.items.len());
-    for ticket in page.items {
+    let mut items = Vec::with_capacity(tickets.len());
+    for ticket in tickets {
         let name = if let Some(name) = names.get(&ticket.ticket_type_id) {
             name.clone()
         } else {
@@ -72,15 +110,14 @@ pub async fn tickets(
         items.push(TicketDetails {
             ticket,
             ticket_type_name: name,
+            holder,
         });
     }
-    Ok(Page {
-        items,
-        next: page.next,
-    })
+    Ok(items)
 }
 
-/// A ticket of the caller's. Other people's tickets are reported as missing.
+/// A ticket of the caller's, with its signed bytes. Other people's tickets are reported as
+/// missing, also to the event's organizers.
 #[tracing::instrument(skip_all)]
 pub async fn ticket(state: &AppState, principal: &Principal, id: TicketId) -> ApiResult<Ticket> {
     let ticket = state
@@ -97,18 +134,30 @@ pub async fn ticket(state: &AppState, principal: &Principal, id: TicketId) -> Ap
     Ok(ticket)
 }
 
-/// A ticket of the caller's, with the name of its type.
+/// A ticket the caller may see, with the name of its type: their own, or one for an event
+/// they organize. Others are reported as missing.
 #[tracing::instrument(skip_all)]
 pub async fn ticket_details(
     state: &AppState,
     principal: &Principal,
     id: TicketId,
 ) -> ApiResult<TicketDetails> {
-    let ticket = ticket(state, principal, id).await?;
+    let ticket = state
+        .store()
+        .ticket(id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("ticket"))?;
+    let holder = state
+        .policy()
+        .permits(principal, TICKETS_READ, Scope::Account(ticket.account_id));
+    if !holder && !reads_orders_of(state, principal, ticket.event_id).await? {
+        return Err(ApiError::not_found("ticket"));
+    }
     let ticket_type_name = ticket_type_name(state, ticket.ticket_type_id).await?;
     Ok(TicketDetails {
         ticket,
         ticket_type_name,
+        holder,
     })
 }
 

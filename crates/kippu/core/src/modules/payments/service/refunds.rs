@@ -19,12 +19,13 @@ use kippu_domain::payment::{PaymentAttestation, PaymentDisposition};
 use kippu_domain::refund::{Refund, RefundReason, RefundStatus};
 use kippu_domain::reservation::{Reservation, ReservationStatus};
 use kippu_domain::ticket::{Ticket, TicketStatus};
-use kippu_domain::{AttestorId, Money, RefundId, ReservationId, TicketId, Timestamp};
-use kippu_store::{Insertion, LineItems, StoreTx};
+use kippu_domain::{AttestorId, EventId, Money, RefundId, ReservationId, TicketId, Timestamp};
+use kippu_store::{Insertion, Keyset, LineItems, Page, PageRequest, StoreTx};
 
 use crate::app::AppState;
 use crate::auth::{Principal, Scope};
 use crate::error::{ApiError, ApiResult, ProblemKind, StatusCode};
+use crate::modules::catalog::service::visible_event;
 use crate::modules::payments::permissions::{PAYMENTS_MANUAL, REFUNDS_MANAGE, REFUNDS_REQUEST};
 
 /// What to refund.
@@ -357,6 +358,32 @@ pub async fn reservation_refunds(
         .store()
         .refunds_for_reservation(reservation.id)
         .await?)
+}
+
+/// An event's refunds, all of them or those in `status`, oldest first, for its organizers —
+/// e.g. the pending refunds of cash taken in person, to hand back and confirm.
+#[tracing::instrument(skip_all)]
+pub async fn event_refunds(
+    state: &AppState,
+    principal: &Principal,
+    event_id: EventId,
+    status: Option<RefundStatus>,
+    page: PageRequest<Keyset>,
+) -> ApiResult<Page<Refund, Keyset>> {
+    let event = visible_event(state, Some(principal), event_id).await?;
+    state.authorize(
+        principal,
+        REFUNDS_MANAGE,
+        Scope::Organization(event.organization_id),
+    )?;
+    let refunds = state
+        .store()
+        .refunds_for_event(event.id, status, page.plus_one())
+        .await?;
+    Ok(Page::from_lookahead(refunds, page.limit, |refund| Keyset {
+        at: refund.created_at,
+        id: refund.id.as_uuid(),
+    }))
 }
 
 /// A refund, for its buyer and the event's organizers. Others' refunds look missing.

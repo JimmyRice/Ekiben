@@ -9,6 +9,7 @@ use kippu_domain::validation::IdempotencyKey;
 use kippu_domain::{AttestorId, PurchaseRequestId, ReservationId, SaleId, ValidationError};
 use kippu_store::{Keyset, Page, PageRequest};
 
+use super::orders::reads_orders_of;
 use super::pipeline::{release, submit};
 use crate::app::AppState;
 use crate::auth::{Principal, Scope};
@@ -141,7 +142,8 @@ pub async fn reservations(
     ))
 }
 
-/// A reservation the caller may see: their own (admins see all). Others look missing.
+/// A reservation the caller may see: their own, or one for an event they organize (admins
+/// see all). Others look missing.
 #[tracing::instrument(skip_all)]
 pub async fn reservation(
     state: &AppState,
@@ -153,15 +155,37 @@ pub async fn reservation(
         .reservation(id)
         .await?
         .ok_or_else(|| ApiError::not_found("reservation"))?;
-    if state.policy().permits(
+    let own = state.policy().permits(
         principal,
         RESERVATIONS_READ,
         Scope::Account(reservation.account_id),
-    ) {
+    );
+    if own || reads_orders_of(state, principal, reservation.event_id).await? {
         Ok(reservation)
     } else {
         Err(ApiError::not_found("reservation"))
     }
+}
+
+/// A reservation the caller acts on as its buyer: their own (admins act on all). Others look
+/// missing, even to the event's organizers.
+async fn own_reservation(
+    state: &AppState,
+    principal: &Principal,
+    id: ReservationId,
+) -> ApiResult<Reservation> {
+    state
+        .store()
+        .reservation(id)
+        .await?
+        .filter(|reservation| {
+            state.policy().permits(
+                principal,
+                RESERVATIONS_READ,
+                Scope::Account(reservation.account_id),
+            )
+        })
+        .ok_or_else(|| ApiError::not_found("reservation"))
 }
 
 /// The buyer gives a reservation up, releasing its tickets. Idempotent.
@@ -171,7 +195,7 @@ pub async fn cancel(
     principal: &Principal,
     id: ReservationId,
 ) -> ApiResult<Reservation> {
-    let reservation = reservation(state, principal, id).await?;
+    let reservation = own_reservation(state, principal, id).await?;
     let now = state.now();
     let mut tx = state.store().begin().await?;
     let mut current = tx
@@ -199,7 +223,7 @@ pub async fn checkout(
     id: ReservationId,
     attestor_id: Option<AttestorId>,
 ) -> ApiResult<Reservation> {
-    let reservation = reservation(state, principal, id).await?;
+    let reservation = own_reservation(state, principal, id).await?;
     let store = state.store();
     if reservation.total.is_zero() {
         let free = store

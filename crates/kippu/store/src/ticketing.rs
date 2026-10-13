@@ -16,7 +16,7 @@ pub trait TicketStore {
         account: AccountId,
         page: PageRequest<Keyset>,
     ) -> StoreResult<Vec<Ticket>>;
-    /// The tickets issued for a reservation.
+    /// The tickets issued for a reservation, in id order.
     async fn tickets_for_reservation(&self, reservation: ReservationId)
     -> StoreResult<Vec<Ticket>>;
 }

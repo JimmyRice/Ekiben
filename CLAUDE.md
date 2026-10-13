@@ -38,7 +38,7 @@ Keep the repository root uncluttered and do not add speculative `.gitignore` ent
 ## Commands
 
 ```bash
-cargo test --workspace --all-features                                   # 329 tests incl. e2e over TCP
+cargo test --workspace --all-features                                   # 339 tests incl. e2e over TCP
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets           # default features too
 cargo fmt --all
@@ -228,6 +228,10 @@ Do not change these unless the user explicitly asks.
   `GET /v1/organizations[/{id}]` shows `{id, slug, name}` only and `/{id}/events` the public
   events; its organizers and admins see it, and its drafts, from the start. Members are listed
   to admins only; organizations do not manage themselves (no owner role).
+- **Organizers read their events' orders** (`orders.read`): reservations
+  (`/v1/events/{id}/reservations`), tickets without the signed bytes (only the holder gets
+  those) and refunds (`/v1/events/{id}/refunds`). Cancelling and checking out stay the buyer's.
+  Buyers see a sale's `payment-methods` (accepted, unrevoked, environment-compatible attestors).
 - **Root login:** no separate CLI. Only the root public key is in the config; the private key
   signs an EdDSA JWT of at most 10 minutes locally (`kippu root-token` or any JWT library).
 - **Payments:** the backend integrates no payment provider. Attestors with registered Ed25519

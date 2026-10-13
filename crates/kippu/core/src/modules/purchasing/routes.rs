@@ -7,9 +7,9 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use kippu_domain::purchase::PurchaseRequest;
 use kippu_domain::reservation::Reservation;
-use kippu_domain::{PurchaseRequestId, ReservationId, SaleId};
+use kippu_domain::{EventId, PurchaseRequestId, ReservationId, SaleId};
 
-use super::dto::{CheckoutRequest, PollQuery, PurchaseRequestBody};
+use super::dto::{CheckoutRequest, EventReservationsQuery, PollQuery, PurchaseRequestBody};
 use super::service::{self, PurchaseSubmission};
 use crate::app::AppState;
 use crate::auth::Principal;
@@ -113,7 +113,36 @@ pub(crate) async fn my_reservations(
     )))
 }
 
-/// A reservation.
+/// An event's reservations, newest first, for its organizers: who bought what, in every
+/// status or in one.
+#[utoipa::path(
+    get, path = "/v1/events/{event_id}/reservations", tag = TAG,
+    security(("bearer" = [])),
+    params(("event_id" = EventId, Path), EventReservationsQuery),
+    responses(
+        (status = 200, body = Listing<Reservation>),
+        (status = 400, body = Problem),
+        (status = 403, body = Problem),
+        (status = 404, body = Problem)
+    )
+)]
+pub(crate) async fn list_event_reservations(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(event_id): Path<EventId>,
+    Query(query): Query<EventReservationsQuery>,
+) -> ApiResult<Json<Listing<Reservation>>> {
+    let (status, page) = query.into_parts()?;
+    let reservations =
+        service::event_reservations(&state, &principal, event_id, status, page).await?;
+    Ok(Json(Listing::page(
+        reservations,
+        ListingTag::EVENT_RESERVATIONS,
+        |reservation| reservation,
+    )))
+}
+
+/// A reservation: your own, or, for organizers, one for their event.
 #[utoipa::path(
     get, path = "/v1/reservations/{reservation_id}", tag = TAG,
     security(("bearer" = [])),

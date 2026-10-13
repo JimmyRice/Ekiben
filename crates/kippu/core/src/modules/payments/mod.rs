@@ -78,6 +78,8 @@ impl Module for Payments {
             .routes(routes!(routes::attestor_feed))
             .routes(routes!(routes::admin_feed))
             .routes(routes!(routes::refund_tickets, routes::reservation_refunds))
+            .routes(routes!(routes::list_event_refunds))
+            .routes(routes!(routes::list_payment_methods))
             .routes(routes!(routes::get_refund))
             .routes(routes!(routes::confirm_manual_refund))
     }

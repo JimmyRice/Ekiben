@@ -161,12 +161,18 @@ Authorization: Bearer {{buyer_token}}
 
 > {% client.global.set("reservation_id", response.body.reservation_id); %}
 
-### 16. The buyer chooses to pay through the attestor (`payment_pending`)
+### 16. The buyer looks up how the sale may be paid
+GET {{base}}/v1/sales/{{sale_id}}/payment-methods
+
+### … and pays through the attestor (`payment_pending`)
 POST {{base}}/v1/reservations/{{reservation_id}}/checkout
 Authorization: Bearer {{buyer_token}}
 Content-Type: application/json
 
 { "attestor_id": "{{attestor_id}}" }
+
+# The organizer sees the order among the event's reservations:
+#   GET {{base}}/v1/events/{{event_id}}/reservations (Authorization: Bearer {{organizer_token}})
 
 # Now report the payment as the attestor would; see step 17 in docs/walkthrough.md.
 

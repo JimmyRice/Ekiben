@@ -531,3 +531,78 @@ async fn only_manual_refunds_are_confirmed_by_organizers() {
         "urn:kippu:problem:refund-not-manual"
     );
 }
+
+#[tokio::test]
+async fn organizers_list_an_events_refunds_to_hand_cash_back() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let other_shop = app.shop(10, 1_000, json!({})).await;
+    let buyer = app.buyer().await;
+    let reservation = app.reserve(&buyer, &shop, 2).await;
+    let paid = app
+        .call(
+            Method::POST,
+            &format!(
+                "/v1/reservations/{}/manual-payment",
+                reservation["id"].as_str().unwrap()
+            ),
+            Some(&shop.organizer),
+            Some(json!({ "attestation_id": "receipt-9", "amount": reservation["total"] })),
+        )
+        .await;
+    assert_eq!(paid.body["disposition"], "applied", "{:?}", paid.body);
+    let tickets = paid.body["ticket_ids"].as_array().unwrap();
+    let mut refunds = Vec::new();
+    for ticket in tickets {
+        let refunded = refund(
+            &app,
+            &shop.organizer,
+            &reservation,
+            json!({ "ticket_ids": [ticket] }),
+        )
+        .await;
+        assert_eq!(refunded.body["status"], "pending", "{:?}", refunded.body);
+        refunds.push(refunded.body["id"].clone());
+    }
+    let confirmed = app
+        .call(
+            Method::POST,
+            &format!(
+                "/v1/refunds/{}/manual-confirmation",
+                refunds[0].as_str().unwrap()
+            ),
+            Some(&shop.organizer),
+            None,
+        )
+        .await;
+    assert_eq!(confirmed.status, StatusCode::OK, "{:?}", confirmed.body);
+
+    let listing = format!("/v1/events/{}/refunds", shop.event_id);
+    for (query, expected) in [
+        ("", json!(refunds)),
+        ("?status=pending", json!([refunds[1]])),
+        ("?status=completed", json!([refunds[0]])),
+        ("?limit=1", json!([refunds[0]])),
+    ] {
+        let listed = app
+            .call(
+                Method::GET,
+                &format!("{listing}{query}"),
+                Some(&shop.organizer),
+                None,
+            )
+            .await;
+        assert_eq!(listed.status, StatusCode::OK, "{:?}", listed.body);
+        let ids: Vec<Value> = listed.body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|refund| refund["id"].clone())
+            .collect();
+        assert_eq!(json!(ids), expected, "{query}");
+    }
+    for token in [&other_shop.organizer, &buyer] {
+        let refused = app.call(Method::GET, &listing, Some(token), None).await;
+        assert_eq!(refused.status, StatusCode::FORBIDDEN);
+    }
+}

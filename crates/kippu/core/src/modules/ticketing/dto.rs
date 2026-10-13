@@ -8,7 +8,7 @@ use utoipa::ToSchema;
 use super::service::{GateKeys, TicketDetails};
 use crate::keys::PublishedKey;
 
-/// A ticket and its signed bytes.
+/// A ticket, and its signed bytes for its holder.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct TicketView {
     /// Identity of the ticket.
@@ -32,8 +32,10 @@ pub struct TicketView {
     /// The signed KP1 ticket, standard Base64 (RFC 4648, padded). Decode it and carry the
     /// bytes to the gate however suits you — a binary QR code, Base45, or this text as is; see
     /// `spec/ticket-protocol.md`. `GET /v1/tickets/{ticket_id}/raw` returns the bytes directly.
+    /// `null` unless you hold the ticket: an organizer of the event sees the rest, but could
+    /// otherwise enter with it.
     #[schema(format = Byte, example = "S1ABAQ…")]
-    pub ticket: String,
+    pub ticket: Option<String>,
 }
 
 impl From<TicketDetails> for TicketView {
@@ -41,9 +43,10 @@ impl From<TicketDetails> for TicketView {
         let TicketDetails {
             ticket,
             ticket_type_name,
+            holder,
         } = details;
         Self {
-            ticket: STANDARD.encode(&ticket.encoded),
+            ticket: holder.then(|| STANDARD.encode(&ticket.encoded)),
             id: ticket.id,
             reservation_id: ticket.reservation_id,
             event_id: ticket.event_id,

@@ -272,6 +272,14 @@ Host: localhost:8080
 Authorization: Bearer {{buyer_token}}
 ```
 
+The sale names the payment methods a buyer may choose — the attestors it accepts that can
+settle it, `{"id", "name"}` each:
+
+```http
+GET /v1/sales/{{sale_id}}/payment-methods HTTP/1.1
+Host: localhost:8080
+```
+
 Choose how to pay. The reservation becomes `payment_pending` and holds the tickets until it
 expires:
 
@@ -283,6 +291,12 @@ Content-Type: application/json
 
 { "attestor_id": "{{attestor_id}}" }
 ```
+
+The organizer follows orders as they come in: `GET /v1/events/{{event_id}}/reservations`
+(optionally `?status=issued`), each reservation and its tickets
+(`GET /v1/reservations/{{reservation_id}}/tickets`, without the signed bytes, which only the
+holder gets), and the refunds still to hand back in cash
+(`GET /v1/events/{{event_id}}/refunds?status=pending`).
 
 ## 17. The attestor reports the payment
 
