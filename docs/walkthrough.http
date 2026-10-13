@@ -142,6 +142,9 @@ Content-Type: application/json
 ### 13. Anyone can browse published events: `{items, next_cursor}`, filtered and sorted
 GET {{base}}/v1/events?country=JP&ends_from=2026-10-01T00:00:00Z&sort=starts_at&limit=20
 
+### … and the organizations running them, with each one's events at /v1/organizations/{id}/events
+GET {{base}}/v1/organizations
+
 ### 14. The buyer asks for two tickets (202; send it again and nothing changes)
 POST {{base}}/v1/sales/{{sale_id}}/purchase-requests
 Authorization: Bearer {{buyer_token}}

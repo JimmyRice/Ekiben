@@ -144,6 +144,7 @@ pub(crate) struct OrganizationRow {
     slug: String,
     name: String,
     created_at: OffsetDateTime,
+    version: i64,
 }
 
 impl TryFrom<OrganizationRow> for Organization {
@@ -155,6 +156,7 @@ impl TryFrom<OrganizationRow> for Organization {
             slug: Slug::new(row.slug).map_err(StoreError::backend)?,
             name: row.name,
             created_at: instant(row.created_at),
+            version: row.version,
         })
     }
 }

@@ -1,17 +1,26 @@
 use async_trait::async_trait;
-use kippu_domain::account::{Account, Identity, Organization};
+use kippu_domain::account::{Account, Identity, Organization, Role};
 use kippu_domain::validation::{Email, ProviderName, Subject};
 use kippu_domain::{AccountId, OrganizationId};
 use kippu_store::{
-    AccountStore, Insertion, PageRequest, Session, SessionRenewal, StoreResult, Unlink,
+    AccountFilter, AccountStore, Insertion, PageRequest, Session, SessionRenewal, StoreResult,
+    Unlink,
 };
 use sqlx::SqliteConnection;
 use uuid::Uuid;
 
+use crate::catalog::expect_one_updated;
 use crate::convert::{
     AccountRow, CredentialsRow, IdentityRow, OrganizationRow, all, micros, optional,
 };
 use crate::{SqliteStore, error, unique};
+
+const ORGANIZATION_COLUMNS: &str = "SELECT id, slug, name, created_at, version FROM organizations";
+
+/// Whether the organization of the row has an event the public may see.
+const HAS_PUBLIC_EVENT: &str =
+    "EXISTS (SELECT 1 FROM events WHERE events.organization_id = organizations.id
+                                  AND events.status IN ('published', 'cancelled'))";
 
 const INSERT_ACCOUNT: &str =
     "INSERT INTO accounts (id, email, display_name, role, password_hash, created_at)
@@ -243,11 +252,19 @@ impl AccountStore for SqliteStore {
         Ok(Unlink::Unlinked)
     }
 
-    async fn list_accounts(&self, page: PageRequest) -> StoreResult<Vec<Account>> {
+    async fn list_accounts(
+        &self,
+        filter: &AccountFilter,
+        page: PageRequest,
+    ) -> StoreResult<Vec<Account>> {
         let rows = sqlx::query_as::<_, AccountRow>(
             "SELECT id, email, display_name, role, created_at FROM accounts
-             WHERE ?1 IS NULL OR id > ?1 ORDER BY id LIMIT ?2",
+             WHERE (?1 IS NULL OR role = ?1) AND (?2 IS NULL OR email = ?2)
+               AND (?3 IS NULL OR id > ?3)
+             ORDER BY id LIMIT ?4",
         )
+        .bind(filter.role.map(Role::as_str))
+        .bind(filter.email.as_ref().map(Email::as_str))
         .bind(page.after)
         .bind(page.limit)
         .fetch_all(&self.reader)
@@ -330,22 +347,44 @@ impl AccountStore for SqliteStore {
 
     async fn insert_organization(&self, organization: &Organization) -> StoreResult<()> {
         sqlx::query(
-            "INSERT INTO organizations (id, slug, name, created_at) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO organizations (id, slug, name, created_at, version)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
         )
         .bind(organization.id.as_uuid())
         .bind(organization.slug.as_str())
         .bind(&organization.name)
         .bind(micros(organization.created_at))
+        .bind(organization.version)
         .execute(&self.writer)
         .await
         .map_err(unique("slug"))?;
         Ok(())
     }
 
-    async fn organization(&self, id: OrganizationId) -> StoreResult<Option<Organization>> {
-        let row = sqlx::query_as::<_, OrganizationRow>(
-            "SELECT id, slug, name, created_at FROM organizations WHERE id = ?1",
+    async fn update_organization(
+        &self,
+        organization: &Organization,
+        expected_version: i64,
+    ) -> StoreResult<()> {
+        let result = sqlx::query(
+            "UPDATE organizations SET slug = ?2, name = ?3, version = ?4
+             WHERE id = ?1 AND version = ?5",
         )
+        .bind(organization.id.as_uuid())
+        .bind(organization.slug.as_str())
+        .bind(&organization.name)
+        .bind(organization.version)
+        .bind(expected_version)
+        .execute(&self.writer)
+        .await
+        .map_err(unique("slug"))?;
+        expect_one_updated(&result)
+    }
+
+    async fn organization(&self, id: OrganizationId) -> StoreResult<Option<Organization>> {
+        let row = sqlx::query_as::<_, OrganizationRow>(sqlx::AssertSqlSafe(format!(
+            "{ORGANIZATION_COLUMNS} WHERE id = ?1"
+        )))
         .bind(id.as_uuid())
         .fetch_optional(&self.reader)
         .await
@@ -354,10 +393,33 @@ impl AccountStore for SqliteStore {
     }
 
     async fn list_organizations(&self, page: PageRequest) -> StoreResult<Vec<Organization>> {
-        let rows = sqlx::query_as::<_, OrganizationRow>(
-            "SELECT id, slug, name, created_at FROM organizations
-             WHERE ?1 IS NULL OR id > ?1 ORDER BY id LIMIT ?2",
-        )
+        let rows = sqlx::query_as::<_, OrganizationRow>(sqlx::AssertSqlSafe(format!(
+            "{ORGANIZATION_COLUMNS} WHERE ?1 IS NULL OR id > ?1 ORDER BY id LIMIT ?2"
+        )))
+        .bind(page.after)
+        .bind(page.limit)
+        .fetch_all(&self.reader)
+        .await
+        .map_err(error)?;
+        all(rows)
+    }
+
+    async fn public_organization(&self, id: OrganizationId) -> StoreResult<Option<Organization>> {
+        let row = sqlx::query_as::<_, OrganizationRow>(sqlx::AssertSqlSafe(format!(
+            "{ORGANIZATION_COLUMNS} WHERE id = ?1 AND {HAS_PUBLIC_EVENT}"
+        )))
+        .bind(id.as_uuid())
+        .fetch_optional(&self.reader)
+        .await
+        .map_err(error)?;
+        optional(row)
+    }
+
+    async fn public_organizations(&self, page: PageRequest) -> StoreResult<Vec<Organization>> {
+        let rows = sqlx::query_as::<_, OrganizationRow>(sqlx::AssertSqlSafe(format!(
+            "{ORGANIZATION_COLUMNS} WHERE (?1 IS NULL OR id > ?1) AND {HAS_PUBLIC_EVENT}
+             ORDER BY id LIMIT ?2"
+        )))
         .bind(page.after)
         .bind(page.limit)
         .fetch_all(&self.reader)
@@ -407,5 +469,26 @@ impl AccountStore for SqliteStore {
         .await
         .map_err(error)?;
         Ok(ids.into_iter().map(Into::into).collect())
+    }
+
+    async fn members(
+        &self,
+        organization: OrganizationId,
+        page: PageRequest,
+    ) -> StoreResult<Vec<Account>> {
+        let rows = sqlx::query_as::<_, AccountRow>(
+            "SELECT accounts.id, email, display_name, role, created_at
+             FROM memberships JOIN accounts ON accounts.id = memberships.account_id
+             WHERE memberships.organization_id = ?1
+               AND (?2 IS NULL OR memberships.account_id > ?2)
+             ORDER BY memberships.account_id LIMIT ?3",
+        )
+        .bind(organization.as_uuid())
+        .bind(page.after)
+        .bind(page.limit)
+        .fetch_all(&self.reader)
+        .await
+        .map_err(error)?;
+        all(rows)
     }
 }

@@ -7,9 +7,9 @@ use kippu_domain::catalog::{Event, EventSummary, Sale, TicketType};
 use kippu_domain::{EventId, OrganizationId, SaleId, TicketTypeId};
 
 use super::dto::{
-    CreateEventRequest, EventPatch, EventsQuery, SaleDetail, SalePatch, SaleRequest,
-    TicketTypeOffer, TicketTypePatch, TicketTypeRequest, UpdateEventRequest, event_listing,
-    required_version,
+    CreateEventRequest, EventPatch, EventsQuery, OrganizationProfile, SaleDetail, SalePatch,
+    SaleRequest, TicketTypeOffer, TicketTypePatch, TicketTypeRequest, UpdateEventRequest,
+    event_listing, required_version,
 };
 use super::service;
 use crate::app::AppState;
@@ -37,27 +37,67 @@ pub(crate) async fn list_events(
     })))
 }
 
-/// All events of an organization, drafts included, one page at a time.
+/// Organizations with a published or cancelled event, for everyone, in id order.
+#[utoipa::path(
+    get, path = "/v1/organizations", tag = TAG,
+    params(PageQuery),
+    responses((status = 200, body = Listing<OrganizationProfile>), (status = 400, body = Problem))
+)]
+pub(crate) async fn list_organizations(
+    State(state): State<AppState>,
+    Query(query): Query<PageQuery>,
+) -> ApiResult<Json<Listing<OrganizationProfile>>> {
+    let page = query.page(ListingTag::PUBLIC_ORGANIZATIONS)?;
+    let organizations = service::public_organizations(&state, page).await?;
+    Ok(Json(Listing::page(
+        organizations,
+        ListingTag::PUBLIC_ORGANIZATIONS,
+        OrganizationProfile::from,
+    )))
+}
+
+/// An organization: one with a published or cancelled event, or, for its organizers, their
+/// own.
+#[utoipa::path(
+    get, path = "/v1/organizations/{organization_id}", tag = TAG,
+    params(("organization_id" = OrganizationId, Path)),
+    responses((status = 200, body = OrganizationProfile), (status = 404, body = Problem))
+)]
+pub(crate) async fn get_organization(
+    State(state): State<AppState>,
+    principal: Option<Principal>,
+    Path(organization_id): Path<OrganizationId>,
+) -> ApiResult<Json<OrganizationProfile>> {
+    Ok(Json(
+        service::visible_organization(&state, principal.as_ref(), organization_id)
+            .await?
+            .into(),
+    ))
+}
+
+/// An organization's events, one page at a time: published and cancelled ones for everyone,
+/// drafts too for its organizers. Listings leave out each event's `content`.
 #[utoipa::path(
     get, path = "/v1/organizations/{organization_id}/events", tag = TAG,
-    security(("bearer" = [])),
     params(("organization_id" = OrganizationId, Path), EventsQuery),
-    responses(
-        (status = 200, body = Listing<EventSummary>),
-        (status = 400, body = Problem),
-        (status = 403, body = Problem)
-    )
+    responses((status = 200, body = Listing<EventSummary>), (status = 400, body = Problem))
 )]
 pub(crate) async fn list_organization_events(
     State(state): State<AppState>,
-    principal: Principal,
+    principal: Option<Principal>,
     Path(organization_id): Path<OrganizationId>,
     Query(query): Query<EventsQuery>,
 ) -> ApiResult<Json<Listing<EventSummary>>> {
     let (filter, order, page) = query.into_parts()?;
-    let events =
-        service::organization_events(&state, &principal, organization_id, filter, order, page)
-            .await?;
+    let events = service::organization_events(
+        &state,
+        principal.as_ref(),
+        organization_id,
+        filter,
+        order,
+        page,
+    )
+    .await?;
     Ok(Json(Listing::page(events, event_listing(order), |event| {
         event
     })))

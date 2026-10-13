@@ -43,7 +43,7 @@ const TICKET_TYPE_COLUMNS: &str = "SELECT id, sale_id, event_id, name, price_min
      created_at, version FROM ticket_types";
 
 /// Fails with `Conflict("version")` unless exactly one row was updated.
-fn expect_one_updated(result: &sqlx::mysql::MySqlQueryResult) -> StoreResult<()> {
+pub(crate) fn expect_one_updated(result: &sqlx::mysql::MySqlQueryResult) -> StoreResult<()> {
     if result.rows_affected() == 1 {
         Ok(())
     } else {

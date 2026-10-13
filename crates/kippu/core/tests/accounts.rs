@@ -320,3 +320,242 @@ async fn health_and_openapi_are_served() {
         "{parameters}"
     );
 }
+
+#[tokio::test]
+async fn admins_read_and_rename_organizations() {
+    let app = TestApp::start().await;
+    let (admin, _) = app.account("admin", "admin@example.org").await;
+    let create = |slug: &'static str| {
+        app.call(
+            Method::POST,
+            "/v1/admin/organizations",
+            Some(&admin),
+            Some(json!({ "slug": slug, "name": "Circle" })),
+        )
+    };
+    let organization = create("circle").await.body;
+    create("taken").await;
+    let path = format!(
+        "/v1/admin/organizations/{}",
+        organization["id"].as_str().unwrap()
+    );
+
+    let read = app.call(Method::GET, &path, Some(&admin), None).await;
+    assert_eq!(read.status, StatusCode::OK);
+    assert_eq!(read.body["version"], 1);
+    let renamed = app
+        .call(
+            Method::PATCH,
+            &path,
+            Some(&admin),
+            Some(json!({ "version": 1, "name": "Circle Club" })),
+        )
+        .await;
+    assert_eq!(renamed.status, StatusCode::OK, "{:?}", renamed.body);
+    assert_eq!(
+        (
+            &renamed.body["name"],
+            &renamed.body["slug"],
+            &renamed.body["version"]
+        ),
+        (&json!("Circle Club"), &json!("circle"), &json!(2))
+    );
+    for (body, status) in [
+        (
+            json!({ "version": 1, "slug": "circle", "name": "Stale" }),
+            StatusCode::PRECONDITION_FAILED,
+        ),
+        (
+            json!({ "version": 2, "slug": "taken", "name": "Taken" }),
+            StatusCode::CONFLICT,
+        ),
+        (
+            json!({ "version": 2, "slug": "circle", "name": " " }),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            json!({ "version": 2, "slug": "Not A Slug", "name": "Circle" }),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+    ] {
+        let refused = app.call(Method::PUT, &path, Some(&admin), Some(body)).await;
+        assert_eq!(refused.status, status, "{:?}", refused.body);
+    }
+    let replaced = app
+        .call(
+            Method::PUT,
+            &path,
+            Some(&admin),
+            Some(json!({ "version": 2, "slug": "circle-club", "name": "Circle Club" })),
+        )
+        .await;
+    assert_eq!(replaced.body["slug"], "circle-club", "{:?}", replaced.body);
+    let audit = app
+        .call(
+            Method::GET,
+            "/v1/admin/audit-log?limit=1",
+            Some(&admin),
+            None,
+        )
+        .await;
+    assert_eq!(audit.body["items"][0]["action"], "organization.update");
+}
+
+#[tokio::test]
+async fn admins_list_members_and_the_organizations_of_an_account() {
+    let app = TestApp::start().await;
+    let (admin, _) = app.account("admin", "admin@example.org").await;
+    let organization = app
+        .call(
+            Method::POST,
+            "/v1/admin/organizations",
+            Some(&admin),
+            Some(json!({ "slug": "circle", "name": "Circle" })),
+        )
+        .await
+        .body;
+    let path = format!(
+        "/v1/admin/organizations/{}",
+        organization["id"].as_str().unwrap()
+    );
+
+    // Members, in account id order, a page at a time.
+    let mut members = Vec::new();
+    for i in 0..3 {
+        let (_, account) = app
+            .account("organizer", &format!("organizer{i}@example.org"))
+            .await;
+        let id = account["id"].as_str().unwrap().to_owned();
+        if i != 1 {
+            let added = app
+                .call(
+                    Method::PUT,
+                    &format!("{path}/members/{id}"),
+                    Some(&admin),
+                    None,
+                )
+                .await;
+            assert_eq!(added.status, StatusCode::NO_CONTENT);
+            members.push(id);
+        }
+    }
+    members.sort();
+    let first = app
+        .call(
+            Method::GET,
+            &format!("{path}/members?limit=1"),
+            Some(&admin),
+            None,
+        )
+        .await;
+    assert_eq!(first.status, StatusCode::OK, "{:?}", first.body);
+    assert_eq!(first.body["items"][0]["id"], json!(members[0]));
+    let cursor = first.body["next_cursor"].as_str().unwrap();
+    let second = app
+        .call(
+            Method::GET,
+            &format!("{path}/members?limit=1&cursor={cursor}"),
+            Some(&admin),
+            None,
+        )
+        .await;
+    assert_eq!(second.body["items"][0]["id"], json!(members[1]));
+
+    // An account shows the organizations it belongs to.
+    let account = app
+        .call(
+            Method::GET,
+            &format!("/v1/admin/accounts/{}", members[0]),
+            Some(&admin),
+            None,
+        )
+        .await;
+    assert_eq!(account.status, StatusCode::OK);
+    assert_eq!(account.body["account"]["id"], json!(members[0]));
+    assert_eq!(account.body["organizations"], json!([organization["id"]]));
+
+    // Organizers cannot use the administration, and unknown records are missing.
+    let (organizer, _) = app.login("organizer0@example.org").await;
+    for path in [
+        path.clone(),
+        format!("{path}/members"),
+        format!("/v1/admin/accounts/{}", members[0]),
+    ] {
+        let forbidden = app.call(Method::GET, &path, Some(&organizer), None).await;
+        assert_eq!(forbidden.status, StatusCode::FORBIDDEN, "{path}");
+    }
+    let unknown = "0190a7c4-0000-7000-8000-000000000000";
+    for path in [
+        format!("/v1/admin/organizations/{unknown}"),
+        format!("/v1/admin/organizations/{unknown}/members"),
+        format!("/v1/admin/accounts/{unknown}"),
+    ] {
+        let missing = app.call(Method::GET, &path, Some(&admin), None).await;
+        assert_eq!(missing.status, StatusCode::NOT_FOUND, "{path}");
+    }
+}
+
+#[tokio::test]
+async fn admins_find_accounts_by_role_and_email() {
+    let app = TestApp::start().await;
+    let (admin, _) = app.account("admin", "admin@example.org").await;
+    for i in 0..3 {
+        app.account("organizer", &format!("organizer{i}@example.org"))
+            .await;
+    }
+    app.account("user", "user@example.org").await;
+
+    let organizers = app
+        .call(
+            Method::GET,
+            "/v1/admin/accounts?role=organizer&limit=2",
+            Some(&admin),
+            None,
+        )
+        .await;
+    assert_eq!(organizers.status, StatusCode::OK, "{:?}", organizers.body);
+    assert_eq!(organizers.body["items"].as_array().unwrap().len(), 2);
+    let cursor = organizers.body["next_cursor"].as_str().unwrap();
+    let rest = app
+        .call(
+            Method::GET,
+            &format!("/v1/admin/accounts?role=organizer&limit=2&cursor={cursor}"),
+            Some(&admin),
+            None,
+        )
+        .await;
+    assert_eq!(rest.body["items"].as_array().unwrap().len(), 1);
+    assert_eq!(rest.body["next_cursor"], json!(null));
+    for item in [&organizers.body["items"][0], &rest.body["items"][0]] {
+        assert_eq!(item["role"], "organizer");
+    }
+
+    let found = app
+        .call(
+            Method::GET,
+            "/v1/admin/accounts?email=organizer1@example.org",
+            Some(&admin),
+            None,
+        )
+        .await;
+    assert_eq!(found.body["items"][0]["email"], "organizer1@example.org");
+    assert_eq!(found.body["items"].as_array().unwrap().len(), 1);
+    let none = app
+        .call(
+            Method::GET,
+            "/v1/admin/accounts?email=organizer1@example.org&role=user",
+            Some(&admin),
+            None,
+        )
+        .await;
+    assert_eq!(none.body["items"], json!([]));
+
+    for path in [
+        "/v1/admin/accounts?email=not-an-email",
+        "/v1/admin/accounts?role=owner",
+        "/v1/admin/accounts?rol=user",
+    ] {
+        let refused = app.call(Method::GET, path, Some(&admin), None).await;
+        assert_eq!(refused.status, StatusCode::BAD_REQUEST, "{path}");
+    }
+}

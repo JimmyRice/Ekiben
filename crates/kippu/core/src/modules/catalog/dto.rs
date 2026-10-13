@@ -1,10 +1,12 @@
 use std::collections::BTreeMap;
 
+use kippu_domain::account::Organization;
 use kippu_domain::admission::AdmissionPolicy;
 use kippu_domain::catalog::{Address, EventStatus, Sale, TicketType};
 use kippu_domain::payment::Environment;
 use kippu_domain::validation::CountryCode;
-use kippu_domain::{AttestorId, Money, Timestamp, ValidationError};
+use kippu_domain::validation::Slug;
+use kippu_domain::{AttestorId, Money, OrganizationId, Timestamp, ValidationError};
 use kippu_store::{EventFilter, EventOrder, Keyset, PageRequest};
 use serde::{Deserialize, Deserializer, Serialize};
 use utoipa::{IntoParams, ToSchema};
@@ -22,6 +24,27 @@ fn present<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
     deserializer: D,
 ) -> Result<Option<T>, D::Error> {
     T::deserialize(deserializer).map(Some)
+}
+
+/// What anyone may know about an organization.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct OrganizationProfile {
+    /// Identity of the organization.
+    pub id: OrganizationId,
+    /// URL-friendly unique name.
+    pub slug: Slug,
+    /// Display name.
+    pub name: String,
+}
+
+impl From<Organization> for OrganizationProfile {
+    fn from(organization: Organization) -> Self {
+        Self {
+            id: organization.id,
+            slug: organization.slug,
+            name: organization.name,
+        }
+    }
 }
 
 /// How events are listed: `starts_at` (default), `-starts_at`, `created_at` or `-created_at`.

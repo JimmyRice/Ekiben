@@ -1,7 +1,8 @@
-//! What is on sale: events, their sales and ticket types, and buyers' favourites.
+//! What is on sale: the organizations running events, events, their sales and ticket types,
+//! and buyers' favourites.
 //!
-//! Anyone may browse published events. Organizers create and edit events of their own
-//! organizations; drafts are visible only to them.
+//! Anyone may browse published events, and the organizations that have one. Organizers create
+//! and edit events of their own organizations; drafts are visible only to them.
 
 mod dto;
 mod routes;
@@ -45,6 +46,8 @@ impl Module for Catalog {
 
     fn routes(&self) -> OpenApiRouter<AppState> {
         OpenApiRouter::new()
+            .routes(routes!(routes::list_organizations))
+            .routes(routes!(routes::get_organization))
             .routes(routes!(routes::list_events))
             .routes(routes!(
                 routes::create_event,

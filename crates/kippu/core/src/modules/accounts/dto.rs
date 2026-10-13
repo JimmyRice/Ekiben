@@ -1,11 +1,14 @@
 use kippu_domain::account::{Account, Role};
+use kippu_domain::validation::Email;
 use kippu_domain::{OrganizationId, Timestamp};
-use kippu_store::AuditRecord;
+use kippu_store::{AccountFilter, AuditRecord, PageRequest};
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
+use utoipa::{IntoParams, ToSchema};
 
-use super::service::{NewAccount, NewOrganization, Whoami};
+use super::service::{AccountDetails, NewAccount, NewOrganization, OrganizationChanges, Whoami};
 pub use crate::auth::sessions::SessionResponse;
+use crate::error::ApiError;
+use crate::http::{ListingTag, PageQuery};
 
 /// Sign up as a user.
 #[derive(Debug, Deserialize, ToSchema)]
@@ -82,6 +85,47 @@ pub struct CreateAccountRequest {
     pub role: Role,
 }
 
+/// Which accounts to list, and which page. Conditions combine.
+#[derive(Debug, Default, Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
+#[into_params(parameter_in = Query)]
+pub struct AccountsQuery {
+    /// Only accounts of this role: `user`, `organizer` or `admin`.
+    pub role: Option<Role>,
+    /// Only the account with this sign-in address.
+    #[param(value_type = Option<String>)]
+    pub email: Option<Email>,
+    /// At most this many accounts (default 50, at most 200).
+    pub limit: Option<u32>,
+    /// The `next_cursor` of the previous page. Keep the other parameters as they were.
+    pub cursor: Option<String>,
+}
+
+impl AccountsQuery {
+    /// The filter and the page to list.
+    pub(crate) fn into_parts(self) -> Result<(AccountFilter, PageRequest), ApiError> {
+        let page = PageQuery {
+            limit: self.limit,
+            cursor: self.cursor,
+        }
+        .page(ListingTag::ACCOUNTS)?;
+        let filter = AccountFilter {
+            role: self.role,
+            email: self.email,
+        };
+        Ok((filter, page))
+    }
+}
+
+/// An account and the organizations it belongs to.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AccountView {
+    /// The account.
+    pub account: Account,
+    /// Organizations it belongs to.
+    pub organizations: Vec<OrganizationId>,
+}
+
 /// Create an organization.
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateOrganizationRequest {
@@ -89,6 +133,28 @@ pub struct CreateOrganizationRequest {
     pub slug: String,
     /// Display name.
     pub name: String,
+}
+
+/// Replace an organization's slug and name.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateOrganizationRequest {
+    /// URL-friendly unique name.
+    pub slug: String,
+    /// Display name.
+    pub name: String,
+    /// The version you are editing; a mismatch fails with 412.
+    pub version: i64,
+}
+
+/// Change some of an organization's fields.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct OrganizationPatch {
+    /// The version you are editing; a mismatch fails with 412.
+    pub version: i64,
+    /// URL-friendly unique name.
+    pub slug: Option<String>,
+    /// Display name.
+    pub name: Option<String>,
 }
 
 /// One audit log entry.
@@ -131,6 +197,33 @@ impl From<CreateOrganizationRequest> for NewOrganization {
         Self {
             slug: request.slug,
             name: request.name,
+        }
+    }
+}
+
+impl From<UpdateOrganizationRequest> for OrganizationChanges {
+    fn from(request: UpdateOrganizationRequest) -> Self {
+        Self {
+            slug: Some(request.slug),
+            name: Some(request.name),
+        }
+    }
+}
+
+impl From<OrganizationPatch> for OrganizationChanges {
+    fn from(patch: OrganizationPatch) -> Self {
+        Self {
+            slug: patch.slug,
+            name: patch.name,
+        }
+    }
+}
+
+impl From<AccountDetails> for AccountView {
+    fn from(details: AccountDetails) -> Self {
+        Self {
+            account: details.account,
+            organizations: details.organizations,
         }
     }
 }

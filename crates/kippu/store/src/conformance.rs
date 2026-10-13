@@ -45,8 +45,8 @@ use kippu_domain::{
 };
 
 use crate::{
-    AuditEntry, EventFilter, EventOrder, Holds, Insertion, Keyset, Lease, LineItems, PageRequest,
-    Session, SessionRenewal, Store, StoreError, Unlink, WebhookRun,
+    AccountFilter, AuditEntry, EventFilter, EventOrder, Holds, Insertion, Keyset, Lease, LineItems,
+    PageRequest, Session, SessionRenewal, Store, StoreError, Unlink, WebhookRun,
 };
 
 /// A store under test, plus whatever must outlive it (e.g. a temporary directory).
@@ -121,6 +121,9 @@ macro_rules! conformance_tests {
             denials_are_idempotent_and_versioned,
             denial_listings_resume_exactly,
             denied_tickets_join_every_cause,
+            organizations_are_versioned,
+            public_organizations_have_a_public_event,
+            account_listings_filter_and_members_resume_exactly,
         );
     };
     (@cases $mode:tt; $($case:ident),* $(,)?) => {
@@ -171,6 +174,7 @@ async fn organization(store: &dyn Store) -> OrganizationId {
         slug: Slug::new(format!("org-{}", unique_suffix())).unwrap(),
         name: "Organizer".to_owned(),
         created_at: now(),
+        version: 1,
     };
     store.insert_organization(&organization).await.unwrap();
     organization.id
@@ -2410,4 +2414,195 @@ pub async fn denied_tickets_join_every_cause(store: Arc<dyn Store>) {
             .all(|denied| denied.ticket_id != banned_here[0].id)
     );
     assert_eq!(listed.len(), expected.len() - 2);
+}
+
+// ── Back-office reads ────────────────────────────────────────────────────────────────────
+
+pub async fn organizations_are_versioned(store: Arc<dyn Store>) {
+    let first = organization(store.as_ref()).await;
+    let second = organization(store.as_ref()).await;
+    let stored = store.organization(first).await.unwrap().unwrap();
+    assert_eq!(stored.version, 1);
+
+    let renamed = Organization {
+        slug: Slug::new(format!("renamed-{}", unique_suffix())).unwrap(),
+        name: "Renamed".to_owned(),
+        version: 2,
+        ..stored.clone()
+    };
+    store.update_organization(&renamed, 1).await.unwrap();
+    assert_eq!(
+        store.organization(first).await.unwrap(),
+        Some(renamed.clone())
+    );
+
+    let stale = Organization {
+        name: "Stale".to_owned(),
+        version: 2,
+        ..stored
+    };
+    assert!(matches!(
+        store.update_organization(&stale, 1).await,
+        Err(StoreError::Conflict("version"))
+    ));
+    let taken = Organization {
+        slug: renamed.slug.clone(),
+        version: 2,
+        ..store.organization(second).await.unwrap().unwrap()
+    };
+    assert!(matches!(
+        store.update_organization(&taken, 1).await,
+        Err(StoreError::Conflict("slug"))
+    ));
+    let missing = Organization {
+        id: OrganizationId::generate(),
+        ..renamed.clone()
+    };
+    assert!(matches!(
+        store.update_organization(&missing, 2).await,
+        Err(StoreError::Conflict("version"))
+    ));
+
+    // Saving the same values is still an update of the version it names.
+    let unchanged = Organization {
+        version: 3,
+        ..renamed.clone()
+    };
+    store.update_organization(&unchanged, 2).await.unwrap();
+    assert_eq!(store.organization(first).await.unwrap(), Some(unchanged));
+}
+
+pub async fn public_organizations_have_a_public_event(store: Arc<dyn Store>) {
+    use EventStatus::{Cancelled, Draft, Published};
+    let mut public = Vec::new();
+    let mut hidden = Vec::new();
+    for statuses in [
+        &[Published][..],
+        &[Draft],
+        &[Draft, Cancelled],
+        &[],
+        &[Published, Published, Draft],
+    ] {
+        let organization = organization(store.as_ref()).await;
+        for &status in statuses {
+            let event = Event {
+                status,
+                ..event_record(organization)
+            };
+            store.insert_event(&event).await.unwrap();
+        }
+        if statuses.iter().any(|&status| status != Draft) {
+            public.push(organization);
+        } else {
+            hidden.push(organization);
+        }
+    }
+    public.sort();
+
+    for size in [1, 2, 10] {
+        let listed = walk(
+            size,
+            |organization: &Organization| organization.id.as_uuid(),
+            async |page| store.public_organizations(page).await.unwrap(),
+        )
+        .await;
+        let ids: Vec<OrganizationId> = listed.iter().map(|organization| organization.id).collect();
+        assert_eq!(ids, public, "public organizations in pages of {size}");
+    }
+    for &id in &public {
+        let found = store.public_organization(id).await.unwrap();
+        assert_eq!(found, store.organization(id).await.unwrap());
+        assert!(found.is_some());
+    }
+    for &id in &hidden {
+        assert_eq!(store.public_organization(id).await.unwrap(), None);
+        assert!(store.organization(id).await.unwrap().is_some());
+    }
+    assert_eq!(
+        store
+            .public_organization(OrganizationId::generate())
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+pub async fn account_listings_filter_and_members_resume_exactly(store: Arc<dyn Store>) {
+    let mut accounts = Vec::new();
+    for role in [
+        Role::User,
+        Role::Organizer,
+        Role::Organizer,
+        Role::Admin,
+        Role::Organizer,
+    ] {
+        let account = Account {
+            id: AccountId::generate(),
+            email: Some(Email::new(format!("{}@example.org", unique_suffix())).unwrap()),
+            display_name: "Someone".to_owned(),
+            role,
+            created_at: now(),
+        };
+        store.insert_account(&account, Some("hash")).await.unwrap();
+        accounts.push(account);
+    }
+    let without_email = passwordless(None);
+    store
+        .create_account_with_identity(&without_email, &identity("apple", without_email.id))
+        .await
+        .unwrap();
+    accounts.push(without_email);
+    accounts.sort_by_key(|account| account.id);
+    let organizers: Vec<Account> = accounts
+        .iter()
+        .filter(|account| account.role == Role::Organizer)
+        .cloned()
+        .collect();
+
+    let list = |filter: AccountFilter| {
+        let store = store.clone();
+        async move |page| store.list_accounts(&filter, page).await.unwrap()
+    };
+    let by_id = |account: &Account| account.id.as_uuid();
+    for size in [1, 2, 10] {
+        let listed = walk(size, by_id, list(AccountFilter::default())).await;
+        assert_eq!(listed, accounts, "every account in pages of {size}");
+        let organizer_filter = AccountFilter {
+            role: Some(Role::Organizer),
+            email: None,
+        };
+        let listed = walk(size, by_id, list(organizer_filter)).await;
+        assert_eq!(listed, organizers, "organizers in pages of {size}");
+    }
+    let wanted = organizers[1].clone();
+    let by_email = AccountFilter {
+        role: None,
+        email: wanted.email.clone(),
+    };
+    assert_eq!(walk(10, by_id, list(by_email)).await, vec![wanted.clone()]);
+    let wrong_role = AccountFilter {
+        role: Some(Role::User),
+        email: wanted.email.clone(),
+    };
+    assert_eq!(walk(10, by_id, list(wrong_role)).await, Vec::new());
+
+    // Members in account id order; other organizations' members stay out.
+    let elsewhere = organization(store.as_ref()).await;
+    let organization = organization(store.as_ref()).await;
+    for member in &organizers {
+        store.add_member(organization, member.id).await.unwrap();
+    }
+    store.add_member(elsewhere, accounts[0].id).await.unwrap();
+    for size in [1, 2, 10] {
+        let listed = walk(size, by_id, async |page| {
+            store.members(organization, page).await.unwrap()
+        })
+        .await;
+        assert_eq!(listed, organizers, "members in pages of {size}");
+    }
+    let nobody = OrganizationId::generate();
+    assert_eq!(
+        store.members(nobody, PageRequest::first(10)).await.unwrap(),
+        Vec::new()
+    );
 }

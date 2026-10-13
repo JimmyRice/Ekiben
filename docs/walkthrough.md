@@ -239,6 +239,16 @@ While `next_cursor` is not `null`, more follow: send the same request with
 `&cursor=<next_cursor>` for the next page. Cursors are opaque and resume exactly where the
 page ended, however many events were added meanwhile.
 
+The organizations running them are listed too, once they have a published (or cancelled)
+event; each one's events take the same parameters at
+`GET /v1/organizations/{{organization_id}}/events`, which shows its own organizers the drafts as
+well:
+
+```http
+GET /v1/organizations HTTP/1.1
+Host: localhost:8080
+```
+
 Ask for two tickets. The request is queued durably and answered with `202 Accepted` and a
 `Location`; sending it again with the same `Idempotency-Key` returns the same request instead
 of buying twice:

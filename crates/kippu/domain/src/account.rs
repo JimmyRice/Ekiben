@@ -108,6 +108,8 @@ pub struct Organization {
     pub name: String,
     /// When the organization was created.
     pub created_at: Timestamp,
+    /// Incremented on every change, for optimistic concurrency.
+    pub version: i64,
 }
 
 #[cfg(test)]

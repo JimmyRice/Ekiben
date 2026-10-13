@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use kippu_domain::account::{Account, Identity, Organization};
+use kippu_domain::account::{Account, Identity, Organization, Role};
 use kippu_domain::validation::{Email, ProviderName, Subject};
 use kippu_domain::{AccountId, OrganizationId, SessionId, Timestamp};
 
@@ -14,6 +14,15 @@ pub enum Unlink {
     NotLinked,
     /// The identity is the account's only way to sign in, so it was kept.
     LastSignInMethod,
+}
+
+/// Which accounts to list. Every condition that is set must hold.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AccountFilter {
+    /// Only accounts of this role.
+    pub role: Option<Role>,
+    /// Only the account with this email.
+    pub email: Option<Email>,
 }
 
 /// A signed-in device: the hash of its refresh token and when it lapses.
@@ -114,8 +123,12 @@ pub trait AccountStore {
         subject: &Subject,
     ) -> StoreResult<Unlink>;
 
-    /// Lists accounts in id order.
-    async fn list_accounts(&self, page: PageRequest) -> StoreResult<Vec<Account>>;
+    /// Lists the accounts matching `filter` in id order.
+    async fn list_accounts(
+        &self,
+        filter: &AccountFilter,
+        page: PageRequest,
+    ) -> StoreResult<Vec<Account>>;
 
     /// Deletes an account and its sessions. Returns whether it existed.
     async fn delete_account(&self, id: AccountId) -> StoreResult<bool>;
@@ -143,8 +156,25 @@ pub trait AccountStore {
     /// Looks an organization up by id.
     async fn organization(&self, id: OrganizationId) -> StoreResult<Option<Organization>>;
 
+    /// Replaces an organization's slug and name if its stored version is still
+    /// `expected_version`; fails with `Conflict("version")` if not (or if it does not exist),
+    /// and with `Conflict("slug")` if another organization has the slug.
+    async fn update_organization(
+        &self,
+        organization: &Organization,
+        expected_version: i64,
+    ) -> StoreResult<()>;
+
     /// Lists organizations in id order.
     async fn list_organizations(&self, page: PageRequest) -> StoreResult<Vec<Organization>>;
+
+    /// Looks an organization up by id if the public may see it: it has an event that is
+    /// published or cancelled.
+    async fn public_organization(&self, id: OrganizationId) -> StoreResult<Option<Organization>>;
+
+    /// Lists the organizations the public may see (see
+    /// [`public_organization`](Self::public_organization)) in id order.
+    async fn public_organizations(&self, page: PageRequest) -> StoreResult<Vec<Organization>>;
 
     /// Makes an account a member of an organization. Idempotent.
     async fn add_member(&self, organization: OrganizationId, account: AccountId)
@@ -159,4 +189,11 @@ pub trait AccountStore {
 
     /// The organizations an account belongs to.
     async fn memberships(&self, account: AccountId) -> StoreResult<Vec<OrganizationId>>;
+
+    /// The members of an organization, in account id order.
+    async fn members(
+        &self,
+        organization: OrganizationId,
+        page: PageRequest,
+    ) -> StoreResult<Vec<Account>>;
 }

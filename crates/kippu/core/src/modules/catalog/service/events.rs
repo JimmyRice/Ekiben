@@ -142,21 +142,20 @@ pub async fn public_events(
     list_events(state, &filter, order, page).await
 }
 
-/// All events of an organization, drafts included, for its organizers. `filter`'s
-/// organization and visibility are set here.
+/// The events of an organization: published and cancelled ones for everyone, drafts too for
+/// its organizers. `filter`'s organization and visibility are set here.
 #[tracing::instrument(skip_all)]
 pub async fn organization_events(
     state: &AppState,
-    principal: &Principal,
+    principal: Option<&Principal>,
     organization: OrganizationId,
     filter: EventFilter,
     order: EventOrder,
     page: PageRequest<Keyset>,
 ) -> ApiResult<Page<EventSummary, Keyset>> {
-    state.authorize(principal, EVENTS_WRITE, Scope::Organization(organization))?;
     let filter = EventFilter {
         organization: Some(organization),
-        public_only: false,
+        public_only: !can_write(state, principal, organization),
         ..filter
     };
     list_events(state, &filter, order, page).await

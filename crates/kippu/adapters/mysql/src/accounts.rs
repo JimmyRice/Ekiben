@@ -1,17 +1,26 @@
 use async_trait::async_trait;
-use kippu_domain::account::{Account, Identity, Organization};
+use kippu_domain::account::{Account, Identity, Organization, Role};
 use kippu_domain::validation::{Email, ProviderName, Subject};
 use kippu_domain::{AccountId, OrganizationId};
 use kippu_store::{
-    AccountStore, Insertion, PageRequest, Session, SessionRenewal, StoreResult, Unlink,
+    AccountFilter, AccountStore, Insertion, PageRequest, Session, SessionRenewal, StoreResult,
+    Unlink,
 };
 use sqlx::MySqlConnection;
 use uuid::Uuid;
 
+use crate::catalog::expect_one_updated;
 use crate::convert::{
     AccountRow, CredentialsRow, IdentityRow, OrganizationRow, all, micros, optional,
 };
 use crate::{MySqlStore, error, is_duplicate, unique};
+
+const ORGANIZATION_COLUMNS: &str = "SELECT id, slug, name, created_at, version FROM organizations";
+
+/// Whether the organization of the row has an event the public may see.
+const HAS_PUBLIC_EVENT: &str =
+    "EXISTS (SELECT 1 FROM events WHERE events.organization_id = organizations.id
+                                  AND events.status IN ('published', 'cancelled'))";
 
 const INSERT_ACCOUNT: &str =
     "INSERT INTO accounts (id, email, display_name, role, password_hash, created_at)
@@ -242,11 +251,23 @@ impl AccountStore for MySqlStore {
         Ok(Unlink::Unlinked)
     }
 
-    async fn list_accounts(&self, page: PageRequest) -> StoreResult<Vec<Account>> {
+    async fn list_accounts(
+        &self,
+        filter: &AccountFilter,
+        page: PageRequest,
+    ) -> StoreResult<Vec<Account>> {
+        let role = filter.role.map(Role::as_str);
+        let email = filter.email.as_ref().map(Email::as_str);
         let rows = sqlx::query_as::<_, AccountRow>(
             "SELECT id, email, display_name, role, created_at FROM accounts
-             WHERE ? IS NULL OR id > ? ORDER BY id LIMIT ?",
+             WHERE (? IS NULL OR role = ?) AND (? IS NULL OR email = ?)
+               AND (? IS NULL OR id > ?)
+             ORDER BY id LIMIT ?",
         )
+        .bind(role)
+        .bind(role)
+        .bind(email)
+        .bind(email)
         .bind(page.after)
         .bind(page.after)
         .bind(page.limit)
@@ -330,21 +351,45 @@ impl AccountStore for MySqlStore {
     }
 
     async fn insert_organization(&self, organization: &Organization) -> StoreResult<()> {
-        sqlx::query("INSERT INTO organizations (id, slug, name, created_at) VALUES (?, ?, ?, ?)")
-            .bind(organization.id.as_uuid())
-            .bind(organization.slug.as_str())
-            .bind(&organization.name)
-            .bind(micros(organization.created_at))
-            .execute(&self.pool)
-            .await
-            .map_err(unique("slug"))?;
+        sqlx::query(
+            "INSERT INTO organizations (id, slug, name, created_at, version)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(organization.id.as_uuid())
+        .bind(organization.slug.as_str())
+        .bind(&organization.name)
+        .bind(micros(organization.created_at))
+        .bind(organization.version)
+        .execute(&self.pool)
+        .await
+        .map_err(unique("slug"))?;
         Ok(())
     }
 
-    async fn organization(&self, id: OrganizationId) -> StoreResult<Option<Organization>> {
-        let row = sqlx::query_as::<_, OrganizationRow>(
-            "SELECT id, slug, name, created_at FROM organizations WHERE id = ?",
+    async fn update_organization(
+        &self,
+        organization: &Organization,
+        expected_version: i64,
+    ) -> StoreResult<()> {
+        let result = sqlx::query(
+            "UPDATE organizations SET slug = ?, name = ?, version = ?
+             WHERE id = ? AND version = ?",
         )
+        .bind(organization.slug.as_str())
+        .bind(&organization.name)
+        .bind(organization.version)
+        .bind(organization.id.as_uuid())
+        .bind(expected_version)
+        .execute(&self.pool)
+        .await
+        .map_err(unique("slug"))?;
+        expect_one_updated(&result)
+    }
+
+    async fn organization(&self, id: OrganizationId) -> StoreResult<Option<Organization>> {
+        let row = sqlx::query_as::<_, OrganizationRow>(sqlx::AssertSqlSafe(format!(
+            "{ORGANIZATION_COLUMNS} WHERE id = ?"
+        )))
         .bind(id.as_uuid())
         .fetch_optional(&self.pool)
         .await
@@ -353,10 +398,34 @@ impl AccountStore for MySqlStore {
     }
 
     async fn list_organizations(&self, page: PageRequest) -> StoreResult<Vec<Organization>> {
-        let rows = sqlx::query_as::<_, OrganizationRow>(
-            "SELECT id, slug, name, created_at FROM organizations
-             WHERE ? IS NULL OR id > ? ORDER BY id LIMIT ?",
-        )
+        let rows = sqlx::query_as::<_, OrganizationRow>(sqlx::AssertSqlSafe(format!(
+            "{ORGANIZATION_COLUMNS} WHERE ? IS NULL OR id > ? ORDER BY id LIMIT ?"
+        )))
+        .bind(page.after)
+        .bind(page.after)
+        .bind(page.limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(error)?;
+        all(rows)
+    }
+
+    async fn public_organization(&self, id: OrganizationId) -> StoreResult<Option<Organization>> {
+        let row = sqlx::query_as::<_, OrganizationRow>(sqlx::AssertSqlSafe(format!(
+            "{ORGANIZATION_COLUMNS} WHERE id = ? AND {HAS_PUBLIC_EVENT}"
+        )))
+        .bind(id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(error)?;
+        optional(row)
+    }
+
+    async fn public_organizations(&self, page: PageRequest) -> StoreResult<Vec<Organization>> {
+        let rows = sqlx::query_as::<_, OrganizationRow>(sqlx::AssertSqlSafe(format!(
+            "{ORGANIZATION_COLUMNS} WHERE (? IS NULL OR id > ?) AND {HAS_PUBLIC_EVENT}
+             ORDER BY id LIMIT ?"
+        )))
         .bind(page.after)
         .bind(page.after)
         .bind(page.limit)
@@ -407,5 +476,27 @@ impl AccountStore for MySqlStore {
         .await
         .map_err(error)?;
         Ok(ids.into_iter().map(Into::into).collect())
+    }
+
+    async fn members(
+        &self,
+        organization: OrganizationId,
+        page: PageRequest,
+    ) -> StoreResult<Vec<Account>> {
+        let rows = sqlx::query_as::<_, AccountRow>(
+            "SELECT accounts.id, email, display_name, role, created_at
+             FROM memberships JOIN accounts ON accounts.id = memberships.account_id
+             WHERE memberships.organization_id = ?
+               AND (? IS NULL OR memberships.account_id > ?)
+             ORDER BY memberships.account_id LIMIT ?",
+        )
+        .bind(organization.as_uuid())
+        .bind(page.after)
+        .bind(page.after)
+        .bind(page.limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(error)?;
+        all(rows)
     }
 }

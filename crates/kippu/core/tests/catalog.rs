@@ -3,7 +3,7 @@
 mod support;
 
 use axum::http::{Method, StatusCode};
-use serde_json::json;
+use serde_json::{Value, json};
 use support::TestApp;
 
 #[tokio::test]
@@ -201,7 +201,7 @@ async fn ticket_types_whose_tickets_cannot_be_issued_are_refused() {
     let shop = app.shop(10, 1_000, json!({})).await;
     let now = app.now();
     let long = "x".repeat(512);
-    let extensions: serde_json::Map<String, serde_json::Value> = (128..133)
+    let extensions: serde_json::Map<String, Value> = (128..133)
         .map(|tag| (tag.to_string(), json!(long)))
         .collect();
     let refused = app
@@ -473,4 +473,153 @@ async fn events_carry_a_structured_address_besides_the_venue() {
     assert_eq!(moved.body["address"]["region"], json!(null));
     let listed = app.call(Method::GET, "/v1/events", None, None).await.body;
     assert_eq!(listed["items"][0]["address"], moved.body["address"]);
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one organization's way from hidden to public, told in order"
+)]
+async fn organizations_are_public_once_they_have_a_public_event() {
+    let app = TestApp::start().await;
+    let root = app.root_token();
+    let organization = app
+        .call(
+            Method::POST,
+            "/v1/admin/organizations",
+            Some(&root),
+            Some(json!({ "slug": "circle", "name": "Circle" })),
+        )
+        .await;
+    let organization_id = organization.body["id"].as_str().unwrap().to_owned();
+    let organizer = app.organizer(&organization_id).await;
+    let other = app.shop(10, 0, json!({})).await;
+    let profile = format!("/v1/organizations/{organization_id}");
+    let events = format!("{profile}/events");
+
+    // Without a public event, an organization is known only to its organizers and admins.
+    let listed = app.call(Method::GET, "/v1/organizations", None, None).await;
+    let ids: Vec<&Value> = listed.body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| &item["id"])
+        .collect();
+    assert_eq!(ids, [&json!(other.organization_id)]);
+    for token in [None, Some(other.organizer.as_str())] {
+        let hidden = app.call(Method::GET, &profile, token, None).await;
+        assert_eq!(hidden.status, StatusCode::NOT_FOUND);
+    }
+    for token in [&organizer, &root] {
+        let own = app.call(Method::GET, &profile, Some(token), None).await;
+        assert_eq!(own.status, StatusCode::OK);
+        assert_eq!(
+            own.body,
+            json!({ "id": organization_id, "slug": "circle", "name": "Circle" }),
+            "nothing beyond the public profile"
+        );
+    }
+
+    let draft = app
+        .call(
+            Method::POST,
+            &events,
+            Some(&organizer),
+            Some(json!({
+                "slug": "draft-event",
+                "title": "Draft",
+                "venue": "Hall",
+                "starts_at": "2031-05-01T10:00:00Z",
+                "ends_at": "2031-05-02T18:00:00Z",
+            })),
+        )
+        .await;
+    assert_eq!(draft.status, StatusCode::CREATED, "{:?}", draft.body);
+    let draft_id = draft.body["id"].clone();
+    let anonymous = app.call(Method::GET, &events, None, None).await;
+    assert_eq!(anonymous.status, StatusCode::OK);
+    assert_eq!(anonymous.body["items"], json!([]));
+    let hidden = app.call(Method::GET, &profile, None, None).await;
+    assert_eq!(
+        hidden.status,
+        StatusCode::NOT_FOUND,
+        "a draft is not public"
+    );
+
+    let published = app
+        .call(
+            Method::POST,
+            &events,
+            Some(&organizer),
+            Some(json!({
+                "slug": "public-event",
+                "title": "Public",
+                "venue": "Hall",
+                "starts_at": "2031-06-01T10:00:00Z",
+                "ends_at": "2031-06-02T18:00:00Z",
+            })),
+        )
+        .await;
+    let published_id = published.body["id"].clone();
+    app.call(
+        Method::PATCH,
+        &format!("/v1/events/{}", published_id.as_str().unwrap()),
+        Some(&organizer),
+        Some(json!({ "version": published.body["version"], "status": "published" })),
+    )
+    .await;
+
+    // Once it has one, everyone sees its profile and its public events; only its organizers
+    // see the drafts.
+    let listed = app.call(Method::GET, "/v1/organizations", None, None).await;
+    let ids: Vec<&str> = listed.body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["id"].as_str().unwrap())
+        .collect();
+    let mut expected = vec![organization_id.as_str(), other.organization_id.as_str()];
+    expected.sort_unstable();
+    assert_eq!(ids, expected, "in id order");
+    let first = app
+        .call(Method::GET, "/v1/organizations?limit=1", None, None)
+        .await;
+    let cursor = first.body["next_cursor"].as_str().unwrap();
+    let second = app
+        .call(
+            Method::GET,
+            &format!("/v1/organizations?limit=1&cursor={cursor}"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(second.body["items"][0]["id"], json!(expected[1]));
+    assert_eq!(second.body["next_cursor"], json!(null));
+
+    let public = app.call(Method::GET, &profile, None, None).await;
+    assert_eq!(public.status, StatusCode::OK);
+    assert_eq!(public.body["name"], "Circle");
+    for (token, expected) in [
+        (None, json!([published_id])),
+        (Some(other.organizer.as_str()), json!([published_id])),
+        (Some(organizer.as_str()), json!([draft_id, published_id])),
+    ] {
+        let listed = app.call(Method::GET, &events, token, None).await;
+        let ids: Vec<Value> = listed.body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|event| event["id"].clone())
+            .collect();
+        assert_eq!(json!(ids), expected, "{token:?}");
+    }
+    let unknown = app
+        .call(
+            Method::GET,
+            "/v1/organizations/0190a7c4-0000-7000-8000-000000000000",
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND);
 }

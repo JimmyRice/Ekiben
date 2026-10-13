@@ -38,7 +38,7 @@ Keep the repository root uncluttered and do not add speculative `.gitignore` ent
 ## Commands
 
 ```bash
-cargo test --workspace --all-features                                   # 316 tests incl. e2e over TCP
+cargo test --workspace --all-features                                   # 329 tests incl. e2e over TCP
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets           # default features too
 cargo fmt --all
@@ -224,6 +224,10 @@ Do not change these unless the user explicitly asks.
   signature over `header‖claims` (`spec/ticket-protocol.md`). One signing key for all events;
   KP1's `key_id` already supports a key ring if an organizer ever needs its own.
 - **Organizers** are isolated per Organization; Admin works across organizations.
+- **Organizations are public once they have a public event** (published or cancelled):
+  `GET /v1/organizations[/{id}]` shows `{id, slug, name}` only and `/{id}/events` the public
+  events; its organizers and admins see it, and its drafts, from the start. Members are listed
+  to admins only; organizations do not manage themselves (no owner role).
 - **Root login:** no separate CLI. Only the root public key is in the config; the private key
   signs an EdDSA JWT of at most 10 minutes locally (`kippu root-token` or any JWT library).
 - **Payments:** the backend integrates no payment provider. Attestors with registered Ed25519

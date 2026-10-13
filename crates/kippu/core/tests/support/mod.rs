@@ -333,8 +333,31 @@ impl TestApp {
 
 // ── Catalog, attestors and workers ───────────────────────────────────────────────────────
 
+impl TestApp {
+    /// Creates an organizer account in an organization and returns its access token, which
+    /// carries the membership.
+    pub async fn organizer(&self, organization_id: &str) -> String {
+        let email = format!("organizer-{}@example.org", uuid_suffix());
+        let (_, account) = self.account("organizer", &email).await;
+        let added = self
+            .call(
+                Method::PUT,
+                &format!(
+                    "/v1/admin/organizations/{organization_id}/members/{}",
+                    account["id"].as_str().unwrap()
+                ),
+                Some(&self.root_token()),
+                None,
+            )
+            .await;
+        assert_eq!(added.status, StatusCode::NO_CONTENT, "{:?}", added.body);
+        self.login(&email).await.0
+    }
+}
+
 /// Everything a purchase test needs: an organizer, a published event and an open sale.
 pub struct Shop {
+    pub organization_id: String,
     pub organizer: String,
     pub event_id: String,
     pub sale_id: String,
@@ -355,17 +378,7 @@ impl TestApp {
             )
             .await;
         let organization_id = organization.body["id"].as_str().unwrap().to_owned();
-        let email = format!("organizer-{}@example.org", uuid_suffix());
-        let (_, account) = self.account("organizer", &email).await;
-        let account_id = account["id"].as_str().unwrap();
-        self.call(
-            Method::PUT,
-            &format!("/v1/admin/organizations/{organization_id}/members/{account_id}"),
-            Some(&root),
-            None,
-        )
-        .await;
-        let (organizer, _) = self.login(&email).await;
+        let organizer = self.organizer(&organization_id).await;
 
         let now = self.now();
         let event = self
@@ -443,6 +456,7 @@ impl TestApp {
         assert_eq!(published.status, StatusCode::OK, "{:?}", published.body);
 
         Shop {
+            organization_id,
             organizer,
             event_id,
             sale_id,
