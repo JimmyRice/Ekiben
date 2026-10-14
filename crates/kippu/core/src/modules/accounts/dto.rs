@@ -58,6 +58,7 @@ pub struct SetPasswordRequest {
 
 /// Change your name or contact details; leave out what stays.
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ProfilePatch {
     /// Name shown to others, up to 100 characters.
     pub display_name: Option<String>,
@@ -70,8 +71,8 @@ pub struct ProfilePatch {
 /// Close your account.
 #[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct CloseAccountRequest {
-    /// Your password. Leave it out only if the account has none (it was created through an
-    /// external sign-in).
+    /// Your password. Leave it out (or send no body at all) only if the account has none (it
+    /// was created through an external sign-in).
     pub current_password: Option<String>,
 }
 
@@ -169,6 +170,7 @@ pub struct UpdateOrganizationRequest {
 
 /// Change some of an organization's fields.
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct OrganizationPatch {
     /// The version you are editing; a mismatch fails with 412.
     pub version: i64,

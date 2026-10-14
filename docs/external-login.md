@@ -44,6 +44,7 @@ People manage their sign-in methods themselves:
 | `DELETE /v1/me/identities/{provider}/{subject}` | Unlink one. The last way to sign in cannot be removed (`409 last-sign-in-method`) until a password is set. |
 | `PUT /v1/me/email` | Add or change the email, e.g. after signing up through WeChat. |
 | `PUT /v1/me/password` | Set a first password (no current one needed), or change it (`current_password` required). |
+| `DELETE /v1/me` | Close the account: `current_password` if it has one, otherwise no body at all. |
 
 ## Writing a provider module
 

@@ -112,11 +112,11 @@ pub(crate) async fn update_me(
 /// Close your account. Your orders, tickets and refunds stay on record under its id, but
 /// your email, password, name, contact details, sessions and memberships go; neither the
 /// email nor your external sign-ins can be used for an account again. Send your password if
-/// the account has one.
+/// the account has one; an account without one may send no body.
 #[utoipa::path(
     delete, path = "/v1/me", tag = TAG,
     security(("bearer" = [])),
-    request_body = CloseAccountRequest,
+    request_body = Option<CloseAccountRequest>,
     responses(
         (status = 204),
         (status = 403, description = "Password missing or wrong", body = Problem),
@@ -126,8 +126,9 @@ pub(crate) async fn update_me(
 pub(crate) async fn close_me(
     State(state): State<AppState>,
     principal: Principal,
-    Json(request): Json<CloseAccountRequest>,
+    request: Option<Json<CloseAccountRequest>>,
 ) -> ApiResult<StatusCode> {
+    let Json(request) = request.unwrap_or_default();
     service::close_own_account(&state, &principal, request.current_password).await?;
     Ok(StatusCode::NO_CONTENT)
 }

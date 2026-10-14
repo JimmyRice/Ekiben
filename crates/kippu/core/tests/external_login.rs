@@ -306,13 +306,9 @@ async fn a_closed_accounts_external_sign_in_never_makes_another_account() {
     let vouched = json!({ "subject": subject, "email": email, "email_verified": true });
     let first = sign_in(&app, vouched.clone()).await;
     assert_eq!(first.status, StatusCode::OK, "{:?}", first.body);
+    // Without a password, closing needs no body.
     let closed = app
-        .call(
-            Method::DELETE,
-            "/v1/me",
-            Some(&token(&first)),
-            Some(json!({})),
-        )
+        .call(Method::DELETE, "/v1/me", Some(&token(&first)), None)
         .await;
     assert_eq!(closed.status, StatusCode::NO_CONTENT, "{:?}", closed.body);
 

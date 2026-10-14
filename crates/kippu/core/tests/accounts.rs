@@ -381,6 +381,16 @@ async fn admins_read_and_rename_organizations() {
         let refused = app.call(Method::PUT, &path, Some(&admin), Some(body)).await;
         assert_eq!(refused.status, status, "{:?}", refused.body);
     }
+    let misspelt = app
+        .call(
+            Method::PATCH,
+            &path,
+            Some(&admin),
+            Some(json!({ "version": 2, "Name": "Circle Club" })),
+        )
+        .await;
+    assert_eq!(misspelt.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(misspelt.body["type"], "urn:kippu:problem:invalid-json");
     let replaced = app
         .call(
             Method::PUT,
@@ -603,6 +613,8 @@ async fn owners_change_their_name_and_contact_details() {
         json!({ "contacts": too_many }),
         json!({ "contacts": { "X": "" } }),
         json!({ "contacts": { "a very long name for a way to reach someone": "x" } }),
+        // A misspelt field is refused, not ignored.
+        json!({ "displayName": "Miku" }),
     ] {
         let refused = app
             .call(Method::PATCH, "/v1/me", Some(&token), Some(body))
@@ -649,10 +661,12 @@ async fn a_closed_account_keeps_its_records_but_nothing_about_the_person() {
         .await;
     assert_eq!(denial.status, StatusCode::CREATED, "{:?}", denial.body);
 
-    for body in [json!({}), json!({ "current_password": "not my password" })] {
-        let refused = app
-            .call(Method::DELETE, "/v1/me", Some(&buyer), Some(body))
-            .await;
+    for body in [
+        None,
+        Some(json!({})),
+        Some(json!({ "current_password": "not my password" })),
+    ] {
+        let refused = app.call(Method::DELETE, "/v1/me", Some(&buyer), body).await;
         assert_eq!(refused.status, StatusCode::FORBIDDEN);
         assert_eq!(refused.body["type"], "urn:kippu:problem:wrong-password");
     }
