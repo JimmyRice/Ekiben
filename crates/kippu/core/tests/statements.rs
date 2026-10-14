@@ -14,13 +14,35 @@ use tracing::Subscriber;
 use tracing_subscriber::Layer;
 use tracing_subscriber::layer::{Context, SubscriberExt as _};
 
-/// Counts the statements sqlx runs, on any thread.
+/// Counts the statements sqlx runs, on any thread, except those that set up a new pool
+/// connection (SQLite's `PRAGMA`s, MySQL's session `SET`s). Opening a connection is the
+/// pool's work, not the path's: a pool opens one whenever the connection a call just released
+/// is still on its way back, which a busy machine makes likely at any moment.
 #[derive(Clone, Default)]
 struct Statements(Arc<AtomicU32>);
 
+/// The first words of a statement, as sqlx's event summarizes it.
+#[derive(Default)]
+struct Summary(String);
+
+impl tracing::field::Visit for Summary {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "summary" {
+            value.clone_into(&mut self.0);
+        }
+    }
+
+    fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+}
+
 impl<S: Subscriber> Layer<S> for Statements {
     fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
-        if event.metadata().target() == "sqlx::query" {
+        if event.metadata().target() != "sqlx::query" {
+            return;
+        }
+        let mut summary = Summary::default();
+        event.record(&mut summary);
+        if !(summary.0.starts_with("PRAGMA ") || summary.0.starts_with("SET ")) {
             self.0.fetch_add(1, Ordering::Relaxed);
         }
     }

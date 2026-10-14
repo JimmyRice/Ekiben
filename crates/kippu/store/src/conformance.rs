@@ -975,13 +975,18 @@ pub async fn queued_requests_are_read_in_arrival_order_with_their_denials(store:
                 .await
                 .unwrap()
         );
-        tx.purchases()
+        let queued = tx
+            .purchases()
             .queued_requests(catalog.sale, catalog.event, organization, now, limit)
             .await
             .unwrap()
             .into_iter()
             .map(|queued| (queued.request.id, queued.account_denied))
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        // Committed, not dropped: a dropped transaction rolls back only as its connection goes
+        // back to the pool, so the next read could still find the queue held.
+        tx.commit().await.unwrap();
+        queued
     };
     assert_eq!(
         read(at(10), 10).await,
