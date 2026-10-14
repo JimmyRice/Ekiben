@@ -1,7 +1,9 @@
 use async_trait::async_trait;
 use kippu_domain::purchase::{Basket, LineItem, PurchaseRequest, PurchaseStatus};
-use kippu_domain::reservation::Reservation;
-use kippu_domain::{AccountId, PurchaseRequestId, ReservationId, SaleId, TicketTypeId, Timestamp};
+use kippu_domain::reservation::{Reservation, ReservationStatus};
+use kippu_domain::{
+    AccountId, EventId, PurchaseRequestId, ReservationId, SaleId, TicketTypeId, Timestamp,
+};
 
 use crate::{Insertion, Keyset, Lease, PageRequest, StoreResult};
 
@@ -48,6 +50,20 @@ pub trait PurchaseStore {
         account: AccountId,
         page: PageRequest<Keyset>,
     ) -> StoreResult<Vec<Reservation>>;
+
+    /// An event's reservations, all of them or those in `status`, newest first (ties in id
+    /// order), resuming after the position `page.after` (`created_at` and id of the last
+    /// reservation).
+    async fn reservations_for_event(
+        &self,
+        event: EventId,
+        status: Option<ReservationStatus>,
+        page: PageRequest<Keyset>,
+    ) -> StoreResult<Vec<Reservation>>;
+
+    /// Whether anyone (or `account`) ordered for an event: a reservation that has not expired
+    /// or been cancelled, so tickets are held, sold, or were paid for.
+    async fn has_orders(&self, event: EventId, account: Option<AccountId>) -> StoreResult<bool>;
 
     /// Reservations still holding inventory whose `expires_at` is at or before `now`.
     async fn overdue_reservations(

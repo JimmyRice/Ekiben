@@ -85,6 +85,8 @@ pub(crate) struct AccountRow {
     display_name: String,
     role: String,
     created_at: i64,
+    contacts: String,
+    deleted_at: Option<i64>,
 }
 
 impl TryFrom<AccountRow> for Account {
@@ -101,6 +103,8 @@ impl TryFrom<AccountRow> for Account {
             display_name: row.display_name,
             role: parse::<Role>(&row.role)?,
             created_at: instant(row.created_at),
+            contacts: from_json(&row.contacts)?,
+            deleted_at: row.deleted_at.map(instant),
         })
     }
 }
@@ -139,6 +143,7 @@ pub(crate) struct OrganizationRow {
     slug: String,
     name: String,
     created_at: i64,
+    version: i64,
 }
 
 impl TryFrom<OrganizationRow> for Organization {
@@ -150,6 +155,7 @@ impl TryFrom<OrganizationRow> for Organization {
             slug: Slug::new(row.slug).map_err(StoreError::backend)?,
             name: row.name,
             created_at: instant(row.created_at),
+            version: row.version,
         })
     }
 }

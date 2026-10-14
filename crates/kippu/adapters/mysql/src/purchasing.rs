@@ -1,7 +1,9 @@
 use async_trait::async_trait;
 use kippu_domain::purchase::{LineItem, PurchaseRequest, PurchaseStatus};
-use kippu_domain::reservation::Reservation;
-use kippu_domain::{AccountId, PurchaseRequestId, ReservationId, SaleId, TicketTypeId, Timestamp};
+use kippu_domain::reservation::{Reservation, ReservationStatus};
+use kippu_domain::{
+    AccountId, EventId, PurchaseRequestId, ReservationId, SaleId, TicketTypeId, Timestamp,
+};
 use kippu_store::{
     Holds, Insertion, InventoryTx, Keyset, Lease, LineItems, PageRequest, PurchaseStore,
     PurchasesTx, ReservationsTx, StoreError, StoreResult,
@@ -162,6 +164,49 @@ impl PurchaseStore for MySqlStore {
         .await
         .map_err(error)?;
         all(rows)
+    }
+
+    async fn reservations_for_event(
+        &self,
+        event: EventId,
+        status: Option<ReservationStatus>,
+        page: PageRequest<Keyset>,
+    ) -> StoreResult<Vec<Reservation>> {
+        let status = status.map(ReservationStatus::as_str);
+        let after_at = page.after.map(|after| micros(after.at));
+        let rows = sqlx::query_as::<_, ReservationRow>(sqlx::AssertSqlSafe(format!(
+            "{RESERVATION_COLUMNS} WHERE event_id = ? AND (? IS NULL OR status = ?)
+               AND (? IS NULL OR created_at < ? OR (created_at = ? AND id > ?))
+             ORDER BY created_at DESC, id LIMIT ?"
+        )))
+        .bind(event.as_uuid())
+        .bind(status)
+        .bind(status)
+        .bind(after_at)
+        .bind(after_at)
+        .bind(after_at)
+        .bind(page.after.map(|after| after.id))
+        .bind(page.limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(error)?;
+        all(rows)
+    }
+
+    async fn has_orders(&self, event: EventId, account: Option<AccountId>) -> StoreResult<bool> {
+        let account = account.map(|id| id.as_uuid());
+        let found = sqlx::query_scalar::<_, i64>(
+            "SELECT EXISTS (SELECT 1 FROM reservations
+                            WHERE event_id = ? AND (? IS NULL OR account_id = ?)
+                              AND status NOT IN ('expired', 'cancelled'))",
+        )
+        .bind(event.as_uuid())
+        .bind(account)
+        .bind(account)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(error)?;
+        Ok(found != 0)
     }
 
     async fn overdue_reservations(

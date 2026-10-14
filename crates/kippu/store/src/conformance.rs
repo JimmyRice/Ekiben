@@ -45,8 +45,8 @@ use kippu_domain::{
 };
 
 use crate::{
-    AuditEntry, EventFilter, EventOrder, Holds, Insertion, Keyset, Lease, LineItems, PageRequest,
-    Session, SessionRenewal, Store, StoreError, Unlink, WebhookRun,
+    AccountFilter, AuditEntry, EventFilter, EventOrder, Holds, Insertion, Keyset, Lease, LineItems,
+    PageRequest, Session, SessionRenewal, Store, StoreError, Unlink, WebhookRun,
 };
 
 /// A store under test, plus whatever must outlive it (e.g. a temporary directory).
@@ -121,6 +121,18 @@ macro_rules! conformance_tests {
             denials_are_idempotent_and_versioned,
             denial_listings_resume_exactly,
             denied_tickets_join_every_cause,
+            organizations_are_versioned,
+            public_organizations_have_a_public_event,
+            account_listings_filter_and_members_resume_exactly,
+            event_reservations_resume_exactly,
+            event_refunds_resume_exactly,
+            drafts_without_sales_are_deleted_with_what_hangs_on_them,
+            lookups_by_slug_and_favorite,
+            a_buyers_tickets_by_event_and_refunds_resume_exactly,
+            profiles_change_until_the_account_closes,
+            closed_accounts_keep_their_records,
+            closed_accounts_retire_their_email,
+            orders_count_while_someone_buys,
         );
     };
     (@cases $mode:tt; $($case:ident),* $(,)?) => {
@@ -160,6 +172,8 @@ async fn account(store: &dyn Store) -> AccountId {
         display_name: "Buyer".to_owned(),
         role: Role::User,
         created_at: now(),
+        contacts: BTreeMap::new(),
+        deleted_at: None,
     };
     store.insert_account(&account, Some("hash")).await.unwrap();
     account.id
@@ -171,6 +185,7 @@ async fn organization(store: &dyn Store) -> OrganizationId {
         slug: Slug::new(format!("org-{}", unique_suffix())).unwrap(),
         name: "Organizer".to_owned(),
         created_at: now(),
+        version: 1,
     };
     store.insert_organization(&organization).await.unwrap();
     organization.id
@@ -335,6 +350,8 @@ pub async fn unique_keys_report_conflicts(store: Arc<dyn Store>) {
         display_name: "Twin".to_owned(),
         role: Role::User,
         created_at: now(),
+        contacts: BTreeMap::new(),
+        deleted_at: None,
     };
     store.insert_account(&account, Some("hash")).await.unwrap();
     let twin = Account {
@@ -941,6 +958,8 @@ fn passwordless(email: Option<Email>) -> Account {
         display_name: "Social".to_owned(),
         role: Role::User,
         created_at: now(),
+        contacts: BTreeMap::new(),
+        deleted_at: None,
     }
 }
 
@@ -1107,14 +1126,14 @@ pub async fn identities_link_to_one_account(store: Arc<dyn Store>) {
 
     let listed = store.identities(owner).await.unwrap();
     assert_eq!(listed, vec![wechat.clone()]);
-    assert!(store.delete_account(owner).await.unwrap());
+    assert!(store.close_account(owner, None, now()).await.unwrap());
     assert_eq!(
         store
             .identity_account(&wechat.provider, &wechat.subject)
             .await
             .unwrap(),
-        None,
-        "identities go with their account"
+        Some(owner),
+        "identities stay with a closed account, so they never sign up anew"
     );
 }
 
@@ -1776,7 +1795,7 @@ pub async fn account_listings_resume_exactly(store: Arc<dyn Store>) {
                 at: ticket.issued_at,
                 id: ticket.id.as_uuid(),
             },
-            async |page| store.tickets_for_account(buyer, page).await.unwrap(),
+            async |page| store.tickets_for_account(buyer, None, page).await.unwrap(),
         )
         .await;
         assert_eq!(listed, tickets, "tickets in pages of {size}");
@@ -2410,4 +2429,817 @@ pub async fn denied_tickets_join_every_cause(store: Arc<dyn Store>) {
             .all(|denied| denied.ticket_id != banned_here[0].id)
     );
     assert_eq!(listed.len(), expected.len() - 2);
+}
+
+// ── Back-office reads ────────────────────────────────────────────────────────────────────
+
+pub async fn organizations_are_versioned(store: Arc<dyn Store>) {
+    let first = organization(store.as_ref()).await;
+    let second = organization(store.as_ref()).await;
+    let stored = store.organization(first).await.unwrap().unwrap();
+    assert_eq!(stored.version, 1);
+
+    let renamed = Organization {
+        slug: Slug::new(format!("renamed-{}", unique_suffix())).unwrap(),
+        name: "Renamed".to_owned(),
+        version: 2,
+        ..stored.clone()
+    };
+    store.update_organization(&renamed, 1).await.unwrap();
+    assert_eq!(
+        store.organization(first).await.unwrap(),
+        Some(renamed.clone())
+    );
+
+    let stale = Organization {
+        name: "Stale".to_owned(),
+        version: 2,
+        ..stored
+    };
+    assert!(matches!(
+        store.update_organization(&stale, 1).await,
+        Err(StoreError::Conflict("version"))
+    ));
+    let taken = Organization {
+        slug: renamed.slug.clone(),
+        version: 2,
+        ..store.organization(second).await.unwrap().unwrap()
+    };
+    assert!(matches!(
+        store.update_organization(&taken, 1).await,
+        Err(StoreError::Conflict("slug"))
+    ));
+    let missing = Organization {
+        id: OrganizationId::generate(),
+        ..renamed.clone()
+    };
+    assert!(matches!(
+        store.update_organization(&missing, 2).await,
+        Err(StoreError::Conflict("version"))
+    ));
+
+    // Saving the same values is still an update of the version it names.
+    let unchanged = Organization {
+        version: 3,
+        ..renamed.clone()
+    };
+    store.update_organization(&unchanged, 2).await.unwrap();
+    assert_eq!(store.organization(first).await.unwrap(), Some(unchanged));
+}
+
+pub async fn public_organizations_have_a_public_event(store: Arc<dyn Store>) {
+    use EventStatus::{Cancelled, Draft, Published};
+    let mut public = Vec::new();
+    let mut hidden = Vec::new();
+    for statuses in [
+        &[Published][..],
+        &[Draft],
+        &[Draft, Cancelled],
+        &[],
+        &[Published, Published, Draft],
+    ] {
+        let organization = organization(store.as_ref()).await;
+        for &status in statuses {
+            let event = Event {
+                status,
+                ..event_record(organization)
+            };
+            store.insert_event(&event).await.unwrap();
+        }
+        if statuses.iter().any(|&status| status != Draft) {
+            public.push(organization);
+        } else {
+            hidden.push(organization);
+        }
+    }
+    public.sort();
+
+    for size in [1, 2, 10] {
+        let listed = walk(
+            size,
+            |organization: &Organization| organization.id.as_uuid(),
+            async |page| store.public_organizations(page).await.unwrap(),
+        )
+        .await;
+        let ids: Vec<OrganizationId> = listed.iter().map(|organization| organization.id).collect();
+        assert_eq!(ids, public, "public organizations in pages of {size}");
+    }
+    for &id in &public {
+        let found = store.public_organization(id).await.unwrap();
+        assert_eq!(found, store.organization(id).await.unwrap());
+        assert!(found.is_some());
+    }
+    for &id in &hidden {
+        assert_eq!(store.public_organization(id).await.unwrap(), None);
+        assert!(store.organization(id).await.unwrap().is_some());
+    }
+    assert_eq!(
+        store
+            .public_organization(OrganizationId::generate())
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+pub async fn account_listings_filter_and_members_resume_exactly(store: Arc<dyn Store>) {
+    let mut accounts = Vec::new();
+    for role in [
+        Role::User,
+        Role::Organizer,
+        Role::Organizer,
+        Role::Admin,
+        Role::Organizer,
+    ] {
+        let account = Account {
+            id: AccountId::generate(),
+            email: Some(Email::new(format!("{}@example.org", unique_suffix())).unwrap()),
+            display_name: "Someone".to_owned(),
+            role,
+            created_at: now(),
+            contacts: BTreeMap::new(),
+            deleted_at: None,
+        };
+        store.insert_account(&account, Some("hash")).await.unwrap();
+        accounts.push(account);
+    }
+    let without_email = passwordless(None);
+    store
+        .create_account_with_identity(&without_email, &identity("apple", without_email.id))
+        .await
+        .unwrap();
+    accounts.push(without_email);
+    accounts.sort_by_key(|account| account.id);
+    let organizers: Vec<Account> = accounts
+        .iter()
+        .filter(|account| account.role == Role::Organizer)
+        .cloned()
+        .collect();
+
+    let list = |filter: AccountFilter| {
+        let store = store.clone();
+        async move |page| store.list_accounts(&filter, page).await.unwrap()
+    };
+    let by_id = |account: &Account| account.id.as_uuid();
+    for size in [1, 2, 10] {
+        let listed = walk(size, by_id, list(AccountFilter::default())).await;
+        assert_eq!(listed, accounts, "every account in pages of {size}");
+        let organizer_filter = AccountFilter {
+            role: Some(Role::Organizer),
+            email: None,
+        };
+        let listed = walk(size, by_id, list(organizer_filter)).await;
+        assert_eq!(listed, organizers, "organizers in pages of {size}");
+    }
+    let wanted = organizers[1].clone();
+    let by_email = AccountFilter {
+        role: None,
+        email: wanted.email.clone(),
+    };
+    assert_eq!(walk(10, by_id, list(by_email)).await, vec![wanted.clone()]);
+    let wrong_role = AccountFilter {
+        role: Some(Role::User),
+        email: wanted.email.clone(),
+    };
+    assert_eq!(walk(10, by_id, list(wrong_role)).await, Vec::new());
+
+    // Members in account id order; other organizations' members stay out.
+    let elsewhere = organization(store.as_ref()).await;
+    let organization = organization(store.as_ref()).await;
+    for member in &organizers {
+        store.add_member(organization, member.id).await.unwrap();
+    }
+    store.add_member(elsewhere, accounts[0].id).await.unwrap();
+    for size in [1, 2, 10] {
+        let listed = walk(size, by_id, async |page| {
+            store.members(organization, page).await.unwrap()
+        })
+        .await;
+        assert_eq!(listed, organizers, "members in pages of {size}");
+    }
+    let nobody = OrganizationId::generate();
+    assert_eq!(
+        store.members(nobody, PageRequest::first(10)).await.unwrap(),
+        Vec::new()
+    );
+}
+
+pub async fn event_reservations_resume_exactly(store: Arc<dyn Store>) {
+    use ReservationStatus::{Cancelled, Issued, Reserved};
+    let catalog = catalog(store.as_ref(), &[100]).await;
+    let elsewhere = catalog_in(store.as_ref(), organization(store.as_ref()).await, &[100]).await;
+    reservation(store.as_ref(), &elsewhere, Issued, now()).await;
+
+    let mut reservations = Vec::new();
+    // Creation times repeat, so ties need the id.
+    for (offset, status) in [
+        (0, Issued),
+        (0, Reserved),
+        (5, Issued),
+        (9, Cancelled),
+        (9, Issued),
+    ] {
+        let at = now() + Duration::seconds(offset);
+        let buyer = account(store.as_ref()).await;
+        let request = purchase_request(buyer, &catalog, &unique_suffix());
+        store.insert_purchase_request(&request).await.unwrap();
+        let price = Money::new(1_000, Currency::JPY).unwrap();
+        let reservation = Reservation {
+            id: ReservationId::generate(),
+            purchase_request_id: request.id,
+            account_id: buyer,
+            sale_id: catalog.sale,
+            event_id: catalog.event,
+            items: vec![ReservedItem {
+                ticket_type_id: catalog.ticket_types[0],
+                quantity: 1,
+                unit_price: price,
+            }],
+            total: price,
+            environment: Environment::Live,
+            status,
+            attestor_id: None,
+            expires_at: at + Duration::minutes(10),
+            created_at: at,
+            updated_at: at,
+        };
+        let mut tx = store.begin().await.unwrap();
+        tx.reservations()
+            .insert_reservation(&reservation)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        reservations.push(reservation);
+    }
+    // Newest first; equal times in id order.
+    reservations.sort_by_key(|reservation| {
+        (
+            std::cmp::Reverse(reservation.created_at),
+            reservation.id.as_uuid(),
+        )
+    });
+    let issued: Vec<Reservation> = reservations
+        .iter()
+        .filter(|reservation| reservation.status == Issued)
+        .cloned()
+        .collect();
+
+    let position = |reservation: &Reservation| Keyset {
+        at: reservation.created_at,
+        id: reservation.id.as_uuid(),
+    };
+    for size in [1, 2, 10] {
+        for (status, expected) in [(None, &reservations), (Some(Issued), &issued)] {
+            let listed = walk(size, position, async |page| {
+                store
+                    .reservations_for_event(catalog.event, status, page)
+                    .await
+                    .unwrap()
+            })
+            .await;
+            assert_eq!(&listed, expected, "{status:?} in pages of {size}");
+        }
+    }
+    let none = store
+        .reservations_for_event(
+            catalog.event,
+            Some(ReservationStatus::Expired),
+            PageRequest::first(10),
+        )
+        .await
+        .unwrap();
+    assert_eq!(none, Vec::new());
+}
+
+pub async fn event_refunds_resume_exactly(store: Arc<dyn Store>) {
+    let elsewhere = catalog(store.as_ref(), &[100]).await;
+    let catalog = catalog(store.as_ref(), &[100]).await;
+    let mut refunds = Vec::new();
+    let mut foreign = Vec::new();
+    for (catalog, times) in [(&catalog, &[0, 0, 4, 7, 7][..]), (&elsewhere, &[0])] {
+        let (reservation, tickets) = issued(store.as_ref(), catalog, 1).await;
+        let payment = PaymentAttestation {
+            attestor_id: AttestorId::MANUAL,
+            attestation_id: format!("pay-{}", unique_suffix()),
+            reservation_id: reservation.id,
+            amount: Money::new(1_000, Currency::JPY).unwrap(),
+            occurred_at: now(),
+            received_at: now(),
+            disposition: PaymentDisposition::Applied,
+        };
+        let mut tx = store.begin().await.unwrap();
+        tx.payments().insert_attestation(&payment).await.unwrap();
+        tx.commit().await.unwrap();
+        for (i, &offset) in times.iter().enumerate() {
+            let at = now() + Duration::seconds(offset);
+            let completed = i % 2 == 1;
+            let refund = Refund {
+                id: RefundId::generate(),
+                reservation_id: reservation.id,
+                account_id: reservation.account_id,
+                event_id: catalog.event,
+                attestor_id: payment.attestor_id,
+                attestation_id: payment.attestation_id.clone(),
+                ticket_ids: vec![tickets[0].id],
+                amount: Money::new(1_000, Currency::JPY).unwrap(),
+                reason: RefundReason::Requested,
+                status: if completed {
+                    RefundStatus::Completed
+                } else {
+                    RefundStatus::Pending
+                },
+                created_at: at,
+                completed_at: completed.then_some(at),
+            };
+            let mut tx = store.begin().await.unwrap();
+            tx.payments().insert_refund(&refund).await.unwrap();
+            tx.commit().await.unwrap();
+            if catalog.event == elsewhere.event {
+                foreign.push(refund);
+            } else {
+                refunds.push(refund);
+            }
+        }
+    }
+    // Oldest first; equal times in id order.
+    refunds.sort_by_key(|refund| (refund.created_at, refund.id.as_uuid()));
+    let pending: Vec<Refund> = refunds
+        .iter()
+        .filter(|refund| refund.status == RefundStatus::Pending)
+        .cloned()
+        .collect();
+
+    let position = |refund: &Refund| Keyset {
+        at: refund.created_at,
+        id: refund.id.as_uuid(),
+    };
+    for size in [1, 2, 10] {
+        for (status, expected) in [(None, &refunds), (Some(RefundStatus::Pending), &pending)] {
+            let listed = walk(size, position, async |page| {
+                store
+                    .refunds_for_event(catalog.event, status, page)
+                    .await
+                    .unwrap()
+            })
+            .await;
+            assert_eq!(&listed, expected, "{status:?} in pages of {size}");
+        }
+    }
+    let listed = store
+        .refunds_for_event(elsewhere.event, None, PageRequest::first(10))
+        .await
+        .unwrap();
+    assert_eq!(listed, foreign);
+}
+
+pub async fn drafts_without_sales_are_deleted_with_what_hangs_on_them(store: Arc<dyn Store>) {
+    let organization = organization(store.as_ref()).await;
+    let buyer = account(store.as_ref()).await;
+    let draft = Event {
+        status: EventStatus::Draft,
+        ..event_record(organization)
+    };
+    store.insert_event(&draft).await.unwrap();
+    let image = EventImage {
+        id: ImageId::generate(),
+        event_id: draft.id,
+        format: ImageFormat::Webp,
+        size_bytes: 1_234,
+        position: 1,
+        created_at: now(),
+    };
+    store.insert_event_image(&image).await.unwrap();
+    store.add_favorite(buyer, draft.id, now()).await.unwrap();
+    let its_own = denial(organization, Some(draft.id), DenialSubject::Account(buyer));
+    let everywhere = denial(organization, None, DenialSubject::Account(buyer));
+    for denial in [&its_own, &everywhere] {
+        store.insert_denial(denial).await.unwrap();
+    }
+
+    // Not a public event, nor a draft with a sale; then nothing is touched.
+    let published = event_record(organization);
+    store.insert_event(&published).await.unwrap();
+    assert!(!store.delete_draft_event(published.id).await.unwrap());
+    assert!(store.event(published.id).await.unwrap().is_some());
+    let with_sale = catalog_in(store.as_ref(), organization, &[10]).await;
+    let mut withdrawn = store.event(with_sale.event).await.unwrap().unwrap();
+    withdrawn.status = EventStatus::Draft;
+    withdrawn.version = 2;
+    store.update_event(&withdrawn, 1).await.unwrap();
+    let kept = denial(
+        organization,
+        Some(with_sale.event),
+        DenialSubject::Account(buyer),
+    );
+    store.insert_denial(&kept).await.unwrap();
+    assert!(!store.delete_draft_event(with_sale.event).await.unwrap());
+    assert!(store.event(with_sale.event).await.unwrap().is_some());
+    assert!(
+        store.denial(kept.id).await.unwrap().is_some(),
+        "a refused deletion deletes nothing"
+    );
+    assert!(!store.delete_draft_event(EventId::generate()).await.unwrap());
+
+    assert!(store.delete_draft_event(draft.id).await.unwrap());
+    assert!(store.event(draft.id).await.unwrap().is_none());
+    assert_eq!(store.event_image(image.id).await.unwrap(), None);
+    assert!(!store.is_favorite(buyer, draft.id).await.unwrap());
+    assert_eq!(store.denial(its_own.id).await.unwrap(), None);
+    assert!(
+        store.denial(everywhere.id).await.unwrap().is_some(),
+        "the organization's own denials stay"
+    );
+    assert!(!store.delete_draft_event(draft.id).await.unwrap());
+}
+
+pub async fn lookups_by_slug_and_favorite(store: Arc<dyn Store>) {
+    let organization_id = organization(store.as_ref()).await;
+    let organization = store.organization(organization_id).await.unwrap().unwrap();
+    assert_eq!(
+        store
+            .organization_by_slug(&organization.slug)
+            .await
+            .unwrap(),
+        Some(organization)
+    );
+    let event = event_record(organization_id);
+    store.insert_event(&event).await.unwrap();
+    let found = store.event_by_slug(&event.slug).await.unwrap().unwrap();
+    assert_eq!(found.id, event.id);
+    let nobody = Slug::new(format!("nobody-{}", unique_suffix())).unwrap();
+    assert_eq!(store.organization_by_slug(&nobody).await.unwrap(), None);
+    assert!(store.event_by_slug(&nobody).await.unwrap().is_none());
+
+    let fan = account(store.as_ref()).await;
+    let other = account(store.as_ref()).await;
+    assert!(!store.is_favorite(fan, event.id).await.unwrap());
+    store.add_favorite(fan, event.id, now()).await.unwrap();
+    assert!(store.is_favorite(fan, event.id).await.unwrap());
+    assert!(!store.is_favorite(other, event.id).await.unwrap());
+    store.remove_favorite(fan, event.id).await.unwrap();
+    assert!(!store.is_favorite(fan, event.id).await.unwrap());
+}
+
+/// Issues `count` tickets of the catalog's first type to `buyer` at `at`, paid through the
+/// built-in manual attestor; returns the reservation, its payment and the tickets.
+async fn issued_to(
+    store: &dyn Store,
+    catalog: &Catalog,
+    buyer: AccountId,
+    at: Timestamp,
+    count: u32,
+) -> (Reservation, PaymentAttestation, Vec<Ticket>) {
+    let request = purchase_request(buyer, catalog, &unique_suffix());
+    store.insert_purchase_request(&request).await.unwrap();
+    let price = Money::new(1_000, Currency::JPY).unwrap();
+    let reservation = Reservation {
+        id: ReservationId::generate(),
+        purchase_request_id: request.id,
+        account_id: buyer,
+        sale_id: catalog.sale,
+        event_id: catalog.event,
+        items: vec![ReservedItem {
+            ticket_type_id: catalog.ticket_types[0],
+            quantity: count,
+            unit_price: price,
+        }],
+        total: price,
+        environment: Environment::Live,
+        status: ReservationStatus::Issued,
+        attestor_id: None,
+        expires_at: at,
+        created_at: at,
+        updated_at: at,
+    };
+    let tickets: Vec<Ticket> = (0..count)
+        .map(|_| Ticket {
+            id: TicketId::generate(),
+            reservation_id: reservation.id,
+            account_id: buyer,
+            event_id: catalog.event,
+            ticket_type_id: catalog.ticket_types[0],
+            valid_from: now(),
+            valid_until: now() + Duration::days(2),
+            issued_at: at,
+            status: TicketStatus::Valid,
+            encoded: vec![1, 2, 3],
+        })
+        .collect();
+    let payment = PaymentAttestation {
+        attestor_id: AttestorId::MANUAL,
+        attestation_id: format!("pay-{}", unique_suffix()),
+        reservation_id: reservation.id,
+        amount: price,
+        occurred_at: at,
+        received_at: at,
+        disposition: PaymentDisposition::Applied,
+    };
+    let mut tx = store.begin().await.unwrap();
+    tx.reservations()
+        .insert_reservation(&reservation)
+        .await
+        .unwrap();
+    tx.tickets().insert_tickets(&tickets).await.unwrap();
+    tx.payments().insert_attestation(&payment).await.unwrap();
+    tx.commit().await.unwrap();
+    (reservation, payment, tickets)
+}
+
+pub async fn a_buyers_tickets_by_event_and_refunds_resume_exactly(store: Arc<dyn Store>) {
+    let store = store.as_ref();
+    let first = catalog(store, &[100]).await;
+    let second = catalog(store, &[100]).await;
+    let buyer = account(store).await;
+    let someone_else = account(store).await;
+    let later = now() + Duration::seconds(5);
+    let mut bought = Vec::new();
+    // Issue times repeat, so ties need the id.
+    for (catalog, account, at, count) in [
+        (&first, buyer, now(), 2),
+        (&second, buyer, now(), 1),
+        (&first, buyer, later, 1),
+        (&first, someone_else, later, 1),
+    ] {
+        bought.push(issued_to(store, catalog, account, at, count).await);
+    }
+
+    let newest_first = |at: Timestamp, id: uuid::Uuid| (std::cmp::Reverse(at), id);
+    let mut tickets: Vec<Ticket> = bought
+        .iter()
+        .flat_map(|(_, _, tickets)| tickets.iter().cloned())
+        .filter(|ticket| ticket.account_id == buyer)
+        .collect();
+    tickets.sort_by_key(|ticket| newest_first(ticket.issued_at, ticket.id.as_uuid()));
+    let at_first: Vec<Ticket> = tickets
+        .iter()
+        .filter(|ticket| ticket.event_id == first.event)
+        .cloned()
+        .collect();
+    let position = |ticket: &Ticket| Keyset {
+        at: ticket.issued_at,
+        id: ticket.id.as_uuid(),
+    };
+    for size in [1, 2, 10] {
+        for (event, expected) in [(None, &tickets), (Some(first.event), &at_first)] {
+            let listed = walk(size, position, async |page| {
+                store.tickets_for_account(buyer, event, page).await.unwrap()
+            })
+            .await;
+            assert_eq!(&listed, expected, "{event:?} in pages of {size}");
+        }
+    }
+
+    // Refunds, newest first, of this buyer only.
+    let mut refunds = Vec::new();
+    for (i, (reservation, payment, tickets)) in bought.iter().enumerate() {
+        let refund = Refund {
+            id: RefundId::generate(),
+            reservation_id: reservation.id,
+            account_id: reservation.account_id,
+            event_id: reservation.event_id,
+            attestor_id: payment.attestor_id,
+            attestation_id: payment.attestation_id.clone(),
+            ticket_ids: vec![tickets[0].id],
+            amount: Money::new(1_000, Currency::JPY).unwrap(),
+            reason: RefundReason::Requested,
+            status: RefundStatus::Pending,
+            created_at: now() + Duration::seconds([0, 3, 3, 0][i]),
+            completed_at: None,
+        };
+        let mut tx = store.begin().await.unwrap();
+        tx.payments().insert_refund(&refund).await.unwrap();
+        tx.commit().await.unwrap();
+        refunds.push(refund);
+    }
+    refunds.retain(|refund| refund.account_id == buyer);
+    refunds.sort_by_key(|refund| newest_first(refund.created_at, refund.id.as_uuid()));
+    for size in [1, 2, 10] {
+        let listed = walk(
+            size,
+            |refund: &Refund| Keyset {
+                at: refund.created_at,
+                id: refund.id.as_uuid(),
+            },
+            async |page| store.refunds_for_account(buyer, page).await.unwrap(),
+        )
+        .await;
+        assert_eq!(listed, refunds, "refunds in pages of {size}");
+    }
+}
+
+// ── Profiles and closed accounts ─────────────────────────────────────────────────────────
+
+pub async fn profiles_change_until_the_account_closes(store: Arc<dyn Store>) {
+    let id = account(store.as_ref()).await;
+    let contacts = BTreeMap::from([
+        ("LINE".to_owned(), "miku39".to_owned()),
+        ("X".to_owned(), "@miku".to_owned()),
+    ]);
+    assert!(store.update_profile(id, "Miku", &contacts).await.unwrap());
+    let stored = store.account(id).await.unwrap().unwrap();
+    assert_eq!(
+        (stored.display_name.as_str(), &stored.contacts),
+        ("Miku", &contacts)
+    );
+    let listed = store
+        .list_accounts(&AccountFilter::default(), PageRequest::first(10))
+        .await
+        .unwrap();
+    assert_eq!(listed, vec![stored]);
+
+    assert!(store.close_account(id, None, now()).await.unwrap());
+    assert!(!store.update_profile(id, "Back", &contacts).await.unwrap());
+    assert!(!store.set_password_hash(id, "hash").await.unwrap());
+    let email = Email::new(format!("{}@example.org", unique_suffix())).unwrap();
+    assert!(!store.set_email(id, &email).await.unwrap());
+    assert!(
+        !store
+            .update_profile(AccountId::generate(), "Nobody", &contacts)
+            .await
+            .unwrap()
+    );
+}
+
+pub async fn closed_accounts_keep_their_records(store: Arc<dyn Store>) {
+    let catalog = catalog(store.as_ref(), &[10]).await;
+    let (reservation, _, tickets) = {
+        let buyer = account(store.as_ref()).await;
+        issued_to(store.as_ref(), &catalog, buyer, now(), 1).await
+    };
+    let id = reservation.account_id;
+    let before = store.account(id).await.unwrap().unwrap();
+    let email = before.email.clone().unwrap();
+    let organization = organization(store.as_ref()).await;
+    store.add_member(organization, id).await.unwrap();
+    store.add_favorite(id, catalog.event, now()).await.unwrap();
+    let session = Session {
+        id: SessionId::generate(),
+        account_id: id,
+        refresh_token_hash: format!("hash-{}", unique_suffix()),
+        created_at: now(),
+        expires_at: now() + Duration::days(1),
+    };
+    store.insert_session(&session).await.unwrap();
+    let denied = denial(organization, None, DenialSubject::Account(id));
+    store.insert_denial(&denied).await.unwrap();
+    store
+        .update_profile(
+            id,
+            "Miku",
+            &BTreeMap::from([("X".to_owned(), "@miku".to_owned())]),
+        )
+        .await
+        .unwrap();
+
+    let closed_at = now() + Duration::hours(1);
+    assert!(
+        store
+            .close_account(id, Some(&email.fingerprint()), closed_at)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store.close_account(id, None, closed_at).await.unwrap(),
+        "once"
+    );
+    assert!(
+        !store
+            .close_account(AccountId::generate(), None, closed_at)
+            .await
+            .unwrap()
+    );
+
+    // Nothing about the person remains, but everything recorded under the id does.
+    let after = store.account(id).await.unwrap().unwrap();
+    assert_eq!(
+        after,
+        Account {
+            email: None,
+            display_name: String::new(),
+            contacts: BTreeMap::new(),
+            deleted_at: Some(closed_at),
+            ..before
+        }
+    );
+    assert_eq!(store.password_hash(id).await.unwrap(), None);
+    assert_eq!(store.account_credentials(&email).await.unwrap(), None);
+    assert_eq!(store.memberships(id).await.unwrap(), Vec::new());
+    assert!(!store.is_favorite(id, catalog.event).await.unwrap());
+    let rotated = store
+        .rotate_session(
+            &session.refresh_token_hash,
+            &SessionRenewal {
+                id: SessionId::generate(),
+                refresh_token_hash: format!("next-{}", unique_suffix()),
+                created_at: now(),
+                expires_at: now() + Duration::days(1),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(rotated, None, "its sessions end");
+    assert_eq!(
+        store.reservation(reservation.id).await.unwrap(),
+        Some(reservation)
+    );
+    assert_eq!(
+        store.ticket(tickets[0].id).await.unwrap(),
+        Some(tickets[0].clone())
+    );
+    assert!(store.denial(denied.id).await.unwrap().is_some());
+}
+
+pub async fn closed_accounts_retire_their_email(store: Arc<dyn Store>) {
+    let id = account(store.as_ref()).await;
+    let email = store.account(id).await.unwrap().unwrap().email.unwrap();
+    assert!(
+        store
+            .close_account(id, Some(&email.fingerprint()), now())
+            .await
+            .unwrap()
+    );
+    let closed_at = now();
+
+    // No account may take it, by signing up or by changing email.
+    let newcomer = Account {
+        id: AccountId::generate(),
+        email: Some(email.clone()),
+        display_name: "Newcomer".to_owned(),
+        role: Role::User,
+        created_at: now(),
+        contacts: BTreeMap::new(),
+        deleted_at: None,
+    };
+    assert!(matches!(
+        store.insert_account(&newcomer, Some("hash")).await,
+        Err(StoreError::Conflict("email"))
+    ));
+    let other = account(store.as_ref()).await;
+    assert!(matches!(
+        store.set_email(other, &email).await,
+        Err(StoreError::Conflict("email"))
+    ));
+    // A fingerprint given at closing is kept for accounts whose store had none.
+    let legacy = passwordless(Some(
+        Email::new(format!("{}@example.org", unique_suffix())).unwrap(),
+    ));
+    store
+        .create_account_with_identity(&legacy, &identity("apple", legacy.id))
+        .await
+        .unwrap();
+    let legacy_email = legacy.email.clone().unwrap();
+    assert!(
+        store
+            .close_account(legacy.id, Some(&legacy_email.fingerprint()), closed_at)
+            .await
+            .unwrap()
+    );
+    let reused = Account {
+        id: AccountId::generate(),
+        email: Some(legacy_email),
+        ..newcomer
+    };
+    assert!(matches!(
+        store.insert_account(&reused, None).await,
+        Err(StoreError::Conflict("email"))
+    ));
+}
+
+pub async fn orders_count_while_someone_buys(store: Arc<dyn Store>) {
+    use ReservationStatus::{Cancelled, Expired, Issued, PaymentPending};
+    let catalog = catalog(store.as_ref(), &[100]).await;
+    assert!(!store.has_orders(catalog.event, None).await.unwrap());
+    let given_up = [
+        reservation(store.as_ref(), &catalog, Expired, now()).await,
+        reservation(store.as_ref(), &catalog, Cancelled, now()).await,
+    ];
+    assert!(
+        !store.has_orders(catalog.event, None).await.unwrap(),
+        "expired and cancelled reservations are no orders"
+    );
+    assert!(
+        !store
+            .has_orders(catalog.event, Some(given_up[0].account_id))
+            .await
+            .unwrap()
+    );
+
+    let paying = reservation(store.as_ref(), &catalog, PaymentPending, now()).await;
+    assert!(store.has_orders(catalog.event, None).await.unwrap());
+    assert!(
+        store
+            .has_orders(catalog.event, Some(paying.account_id))
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .has_orders(catalog.event, Some(given_up[1].account_id))
+            .await
+            .unwrap()
+    );
+    let elsewhere = catalog_in(store.as_ref(), organization(store.as_ref()).await, &[10]).await;
+    reservation(store.as_ref(), &elsewhere, Issued, now()).await;
+    let other_event = catalog_in(store.as_ref(), organization(store.as_ref()).await, &[10]).await;
+    assert!(!store.has_orders(other_event.event, None).await.unwrap());
 }

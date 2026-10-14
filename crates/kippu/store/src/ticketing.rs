@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use kippu_domain::ticket::Ticket;
-use kippu_domain::{AccountId, ReservationId, TicketId};
+use kippu_domain::{AccountId, EventId, ReservationId, TicketId};
 
 use crate::{Keyset, PageRequest, StoreResult};
 
@@ -9,14 +9,16 @@ use crate::{Keyset, PageRequest, StoreResult};
 pub trait TicketStore {
     /// Looks a ticket up by id.
     async fn ticket(&self, id: TicketId) -> StoreResult<Option<Ticket>>;
-    /// An account's tickets, most recently issued first (tickets issued together in id order),
-    /// resuming after the position `page.after` (`issued_at` and id of the last ticket).
+    /// An account's tickets, all of them or those for `event`, most recently issued first
+    /// (tickets issued together in id order), resuming after the position `page.after`
+    /// (`issued_at` and id of the last ticket).
     async fn tickets_for_account(
         &self,
         account: AccountId,
+        event: Option<EventId>,
         page: PageRequest<Keyset>,
     ) -> StoreResult<Vec<Ticket>>;
-    /// The tickets issued for a reservation.
+    /// The tickets issued for a reservation, in id order.
     async fn tickets_for_reservation(&self, reservation: ReservationId)
     -> StoreResult<Vec<Ticket>>;
 }

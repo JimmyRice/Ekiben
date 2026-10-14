@@ -38,7 +38,7 @@ Keep the repository root uncluttered and do not add speculative `.gitignore` ent
 ## Commands
 
 ```bash
-cargo test --workspace --all-features                                   # 316 tests incl. e2e over TCP
+cargo test --workspace --all-features                                   # 375 tests incl. e2e over TCP
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets           # default features too
 cargo fmt --all
@@ -220,10 +220,26 @@ as `shop`, `attestor`, `reserve`, `drain`); the full journey over real TCP is
 
 Do not change these unless the user explicitly asks.
 
+- **Kippu stays small.** The API serves what clients need to operate: records, listings,
+  counters the domain keeps anyway (stock). Analytics, reports and dashboards (revenue over
+  time, conversion, audit search) belong to data tools reading the database directly; do not
+  add aggregation endpoints for them.
 - **Ticket format:** compact binary **KP1** — 12-byte header + canonical TLV claims + Ed25519
   signature over `header‖claims` (`spec/ticket-protocol.md`). One signing key for all events;
   KP1's `key_id` already supports a key ring if an organizer ever needs its own.
 - **Organizers** are isolated per Organization; Admin works across organizations.
+- **Organizations are public once they have a public event** (published or cancelled):
+  `GET /v1/organizations[/{id}]` shows `{id, slug, name}` only and `/{id}/events` the public
+  events; its organizers and admins see it, and its drafts, from the start. Members are listed
+  to admins only; organizations do not manage themselves (no owner role).
+- **Organizers read their events' orders** (`orders.read`): reservations
+  (`/v1/events/{id}/reservations`), tickets without the signed bytes (only the holder gets
+  those) and refunds (`/v1/events/{id}/refunds`). Cancelling and checking out stay the buyer's.
+  Buyers see a sale's `payment-methods` (accepted, unrevoked, environment-compatible attestors).
+- **Deleting events:** only a draft without sales, with its images, favourites and its own
+  denials (`DELETE /v1/events/{id}`, `event-not-deletable` otherwise). A published event is
+  cancelled instead: buyers and gates may know it. Events and organizations are also found by
+  slug (`/by-slug/{slug}`), under the same visibility rules as by id.
 - **Root login:** no separate CLI. Only the root public key is in the config; the private key
   signs an EdDSA JWT of at most 10 minutes locally (`kippu root-token` or any JWT library).
 - **Payments:** the backend integrates no payment provider. Attestors with registered Ed25519
@@ -242,6 +258,20 @@ Do not change these unless the user explicitly asks.
   needed: first make the business layer HTTP-independent (error class separate from status,
   a `RequestContext`, public `service`), then add `crates/kippu/transports/grpc`. Prefer SSE for
   push.
+- **Profiles:** `PATCH /v1/me` changes `display_name` and `contacts`, free-form
+  `{name: address}` (at most 10, names ≤ 40, addresses ≤ 200 characters), seen by the account
+  itself, admins and the organizers of events it ordered for
+  (`GET /v1/events/{id}/buyers/{account_id}`, never the email).
+- **Closing accounts** (`DELETE /v1/me` with the password, `DELETE /v1/admin/accounts/{id}`)
+  anonymizes, never deletes: the id stays with every order, ticket, refund and denial; email,
+  password, name, contacts, sessions, memberships and favourites go. The email's SHA-256
+  fingerprint (`email_hash`, unique, kept for every account) and the external identities stay,
+  so neither can make another account (no way back: Kippu does not verify emails, so a
+  "restore" would let anyone with the address take over the old tickets). Closed accounts
+  change no more; `sessions::issue` refuses them (`account-closed`).
+- **Event status and sales:** only a published event sells (front door and worker; a request
+  queued before a cancellation is rejected). An event someone ordered for (a reservation not
+  expired or cancelled) can be cancelled but not withdrawn to a draft.
 - **External sign-in:** Kippu ships no OAuth client; forks write a `Module` that calls
   `auth::external::link_or_create` and `auth::sessions::issue` (`docs/external-login.md`).
   Accounts may have no password and no email; merging by email requires a verified email and is
@@ -311,6 +341,10 @@ Do not change these unless the user explicitly asks.
 
 ## Known limitations
 
+- Access tokens are not looked up: a closed account's tokens, and an organizer's membership
+  in them, work until they expire (`auth.access_token_ttl_seconds`, 15 minutes by default).
+- Withdrawing an event checks for orders, then updates it; a purchase the worker commits in
+  between leaves a reservation on a draft (rare; the organizer publishes or cancels it).
 - The generic `Idempotency-Key` middleware does not stop two simultaneous first requests with
   the same key from both running (purchases and payments are idempotent on their own). A strict
   fix is a "processing" placeholder row.

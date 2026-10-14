@@ -772,3 +772,307 @@ async fn the_attestor_feed_reads_past_other_attestors_events() {
     let (events, last) = poll(&theirs, position).await;
     assert!(events.is_empty() && last == our_sequence);
 }
+
+#[tokio::test]
+async fn organizers_read_the_reservations_of_their_events() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let other_shop = app.shop(10, 1_000, json!({})).await;
+    let buyer = app.buyer().await;
+    let reservation = app.reserve(&buyer, &shop, 1).await;
+    let id = reservation["id"].as_str().unwrap();
+    let path = format!("/v1/reservations/{id}");
+
+    let read = app
+        .call(Method::GET, &path, Some(&shop.organizer), None)
+        .await;
+    assert_eq!(read.status, StatusCode::OK);
+    assert_eq!(read.body, reservation);
+    let stranger = app
+        .call(Method::GET, &path, Some(&other_shop.organizer), None)
+        .await;
+    assert_eq!(stranger.status, StatusCode::NOT_FOUND);
+    // Reading is all: the buyer's actions stay the buyer's.
+    for action in ["cancel", "checkout"] {
+        let refused = app
+            .call(
+                Method::POST,
+                &format!("{path}/{action}"),
+                Some(&shop.organizer),
+                Some(json!({})),
+            )
+            .await;
+        assert_eq!(refused.status, StatusCode::NOT_FOUND, "{action}");
+    }
+
+    let listing = format!("/v1/events/{}/reservations", shop.event_id);
+    for (query, expected) in [
+        ("", json!([id])),
+        ("?status=reserved", json!([id])),
+        ("?status=issued", json!([])),
+    ] {
+        let listed = app
+            .call(
+                Method::GET,
+                &format!("{listing}{query}"),
+                Some(&shop.organizer),
+                None,
+            )
+            .await;
+        assert_eq!(listed.status, StatusCode::OK, "{:?}", listed.body);
+        let ids: Vec<Value> = listed.body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|reservation| reservation["id"].clone())
+            .collect();
+        assert_eq!(json!(ids), expected, "{query}");
+    }
+    for (token, status) in [
+        (Some(other_shop.organizer.as_str()), StatusCode::FORBIDDEN),
+        (Some(buyer.as_str()), StatusCode::FORBIDDEN),
+        (None, StatusCode::UNAUTHORIZED),
+    ] {
+        let refused = app.call(Method::GET, &listing, token, None).await;
+        assert_eq!(refused.status, status);
+    }
+    let invalid = app
+        .call(
+            Method::GET,
+            &format!("{listing}?status=sold"),
+            Some(&shop.organizer),
+            None,
+        )
+        .await;
+    assert_eq!(invalid.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn buyers_see_the_payment_methods_a_sale_accepts() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let live = app.attestor("live").await;
+    let sandbox = app.attestor("sandbox").await;
+    let free = "00000000-0000-0000-0000-000000000001";
+    let manual = "00000000-0000-0000-0000-000000000002";
+    let sale_path = format!("/v1/sales/{}", shop.sale_id);
+    let mut sale = app.call(Method::GET, &sale_path, None, None).await.body;
+    sale["accepted_attestors"] = json!([sandbox.id, manual, live.id, free]);
+    let updated = app
+        .call(Method::PUT, &sale_path, Some(&shop.organizer), Some(sale))
+        .await;
+    assert_eq!(updated.status, StatusCode::OK, "{:?}", updated.body);
+
+    // A live sale cannot be settled by a sandbox attestor; free reservations need no choice.
+    let methods = format!("{sale_path}/payment-methods");
+    let listed = app.call(Method::GET, &methods, None, None).await;
+    assert_eq!(listed.status, StatusCode::OK, "{:?}", listed.body);
+    assert_eq!(
+        listed.body["items"],
+        json!([
+            { "id": manual, "name": listed.body["items"][0]["name"] },
+            { "id": live.id, "name": "gateway-live" },
+        ])
+    );
+
+    let revoked = app
+        .call(
+            Method::PUT,
+            &format!("/v1/admin/attestors/{}/revoked", live.id),
+            Some(&app.root_token()),
+            Some(json!({ "revoked": true })),
+        )
+        .await;
+    assert_eq!(revoked.status, StatusCode::NO_CONTENT);
+    let listed = app.call(Method::GET, &methods, None, None).await;
+    assert_eq!(listed.body["items"].as_array().unwrap().len(), 1);
+    assert_eq!(listed.body["items"][0]["id"], manual);
+
+    let unknown = app
+        .call(
+            Method::GET,
+            "/v1/sales/0190a7c4-0000-7000-8000-000000000000/payment-methods",
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn organizers_watch_the_waiting_room_fill_and_advance() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({ "admission": { "mode": "waiting_room", "admit_per_tick": 2, "max_backlog": 100 } })).await;
+    let path = format!("/v1/sales/{}/waiting-room", shop.sale_id);
+    let buyer = app.buyer().await;
+    for _ in 0..3 {
+        let joined = app
+            .call(Method::POST, &path, Some(&app.buyer().await), None)
+            .await;
+        assert_eq!(joined.status, StatusCode::OK);
+    }
+    let progress = async || {
+        app.call(Method::GET, &path, Some(&shop.organizer), None)
+            .await
+            .body
+    };
+    assert_eq!(
+        progress().await,
+        json!({ "last_position": 3, "admitted_through": 0 })
+    );
+    app.drain("admission").await;
+    assert_eq!(
+        progress().await,
+        json!({ "last_position": 3, "admitted_through": 2 })
+    );
+
+    let other = app.shop(10, 1_000, json!({})).await;
+    for token in [&buyer, &other.organizer] {
+        let refused = app.call(Method::GET, &path, Some(token), None).await;
+        assert_eq!(refused.status, StatusCode::FORBIDDEN);
+    }
+    let open = app
+        .call(
+            Method::GET,
+            &format!("/v1/sales/{}/waiting-room", other.sale_id),
+            Some(&other.organizer),
+            None,
+        )
+        .await;
+    assert_eq!(open.status, StatusCode::CONFLICT);
+    assert_eq!(open.body["type"], "urn:kippu:problem:no-waiting-room");
+}
+
+#[tokio::test]
+async fn organizers_reach_the_buyers_of_their_events() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let other_shop = app.shop(10, 1_000, json!({})).await;
+    let buyer = app.buyer().await;
+    app.call(
+        Method::PATCH,
+        "/v1/me",
+        Some(&buyer),
+        Some(json!({ "contacts": { "X": "@miku" } })),
+    )
+    .await;
+    let reservation = app.reserve(&buyer, &shop, 1).await;
+    let account_id = reservation["account_id"].as_str().unwrap();
+    let path = format!("/v1/events/{}/buyers/{account_id}", shop.event_id);
+
+    let seen = app
+        .call(Method::GET, &path, Some(&shop.organizer), None)
+        .await;
+    assert_eq!(seen.status, StatusCode::OK, "{:?}", seen.body);
+    assert_eq!(
+        seen.body,
+        json!({
+            "account_id": account_id,
+            "display_name": "Buyer",
+            "contacts": { "X": "@miku" },
+            "deleted_at": null,
+        }),
+        "no email"
+    );
+    let stranger = app
+        .call(Method::GET, &path, Some(&other_shop.organizer), None)
+        .await;
+    assert_eq!(stranger.status, StatusCode::FORBIDDEN);
+    let not_a_buyer = app
+        .call(
+            Method::GET,
+            &format!("/v1/events/{}/buyers/{account_id}", other_shop.event_id),
+            Some(&other_shop.organizer),
+            None,
+        )
+        .await;
+    assert_eq!(not_a_buyer.status, StatusCode::NOT_FOUND);
+
+    // A reservation given up is no order.
+    app.call(
+        Method::POST,
+        &format!(
+            "/v1/reservations/{}/cancel",
+            reservation["id"].as_str().unwrap()
+        ),
+        Some(&buyer),
+        None,
+    )
+    .await;
+    let gone = app
+        .call(Method::GET, &path, Some(&shop.organizer), None)
+        .await;
+    assert_eq!(gone.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn an_event_with_orders_is_cancelled_not_withdrawn() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let path = format!("/v1/events/{}", shop.event_id);
+    let set_status = async |status: &str| {
+        let current = app
+            .call(Method::GET, &path, Some(&shop.organizer), None)
+            .await;
+        app.call(
+            Method::PATCH,
+            &path,
+            Some(&shop.organizer),
+            Some(json!({ "version": current.body["version"], "status": status })),
+        )
+        .await
+    };
+    // Nobody ordered yet: it can go back to a draft and be published again.
+    assert_eq!(set_status("draft").await.status, StatusCode::OK);
+    assert_eq!(set_status("published").await.status, StatusCode::OK);
+
+    let buyer = app.buyer().await;
+    app.reserve(&buyer, &shop, 1).await;
+    let withdrawn = set_status("draft").await;
+    assert_eq!(withdrawn.status, StatusCode::CONFLICT);
+    assert_eq!(
+        withdrawn.body["type"],
+        "urn:kippu:problem:illegal-transition"
+    );
+    assert_eq!(set_status("cancelled").await.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_cancelled_event_sells_nothing_more() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let buyer = app.buyer().await;
+    // Queued before the cancellation, processed after it.
+    let queued = app.purchase(&buyer, &shop, 1, "before").await;
+    assert_eq!(queued.status, StatusCode::ACCEPTED);
+    let path = format!("/v1/events/{}", shop.event_id);
+    let current = app
+        .call(Method::GET, &path, Some(&shop.organizer), None)
+        .await;
+    let cancelled = app
+        .call(
+            Method::PATCH,
+            &path,
+            Some(&shop.organizer),
+            Some(json!({ "version": current.body["version"], "status": "cancelled" })),
+        )
+        .await;
+    assert_eq!(cancelled.status, StatusCode::OK);
+
+    app.drain("purchases").await;
+    let request = app
+        .call(
+            Method::GET,
+            &format!(
+                "/v1/purchase-requests/{}",
+                queued.body["id"].as_str().unwrap()
+            ),
+            Some(&buyer),
+            None,
+        )
+        .await;
+    assert_eq!(request.body["status"], "rejected", "{:?}", request.body);
+    let after = app.purchase(&buyer, &shop, 1, "after").await;
+    assert_eq!(after.status, StatusCode::CONFLICT);
+    assert_eq!(after.body["type"], "urn:kippu:problem:sale-closed");
+}

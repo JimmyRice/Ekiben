@@ -8,8 +8,9 @@ use kippu_store::{EventFilter, EventOrder, Keyset, Page, PageRequest};
 use super::check_version;
 use crate::app::AppState;
 use crate::auth::{Principal, Scope};
-use crate::error::{ApiError, ApiResult};
+use crate::error::{ApiError, ApiResult, ProblemKind, StatusCode};
 use crate::modules::catalog::permissions::EVENTS_WRITE;
+use crate::modules::images::service::remove_objects;
 
 /// A new event. It starts as a draft.
 #[derive(Debug, Clone)]
@@ -109,6 +110,21 @@ pub async fn event_details(
         .ok_or_else(|| ApiError::not_found("event"))
 }
 
+/// An event the caller may see, by its slug, with its content.
+#[tracing::instrument(skip_all)]
+pub async fn event_by_slug(
+    state: &AppState,
+    principal: Option<&Principal>,
+    slug: &Slug,
+) -> ApiResult<Event> {
+    state
+        .store()
+        .event_by_slug(slug)
+        .await?
+        .filter(|event| can_see(state, principal, event.is_public(), event.organization_id))
+        .ok_or_else(|| ApiError::not_found("event"))
+}
+
 /// An event the caller may edit, without its content.
 #[tracing::instrument(skip_all)]
 pub async fn writable_event(
@@ -142,21 +158,20 @@ pub async fn public_events(
     list_events(state, &filter, order, page).await
 }
 
-/// All events of an organization, drafts included, for its organizers. `filter`'s
-/// organization and visibility are set here.
+/// The events of an organization: published and cancelled ones for everyone, drafts too for
+/// its organizers. `filter`'s organization and visibility are set here.
 #[tracing::instrument(skip_all)]
 pub async fn organization_events(
     state: &AppState,
-    principal: &Principal,
+    principal: Option<&Principal>,
     organization: OrganizationId,
     filter: EventFilter,
     order: EventOrder,
     page: PageRequest<Keyset>,
 ) -> ApiResult<Page<EventSummary, Keyset>> {
-    state.authorize(principal, EVENTS_WRITE, Scope::Organization(organization))?;
     let filter = EventFilter {
         organization: Some(organization),
-        public_only: false,
+        public_only: !can_write(state, principal, organization),
         ..filter
     };
     list_events(state, &filter, order, page).await
@@ -231,6 +246,18 @@ pub async fn update_event(
         Scope::Organization(current.organization_id),
     )?;
     check_version(current.version, expected_version)?;
+    // Buyers and gates know an event once someone ordered for it: it can be cancelled, but
+    // not withdrawn.
+    if changes.status == Some(EventStatus::Draft)
+        && current.status != EventStatus::Draft
+        && state.store().has_orders(current.id, None).await?
+    {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            ProblemKind::ILLEGAL_TRANSITION,
+            "people ordered tickets for this event: cancel it instead of withdrawing it",
+        ));
+    }
     let event = Event {
         slug: match changes.slug {
             Some(slug) => Slug::new(slug)?,
@@ -251,4 +278,35 @@ pub async fn update_event(
     event.validate()?;
     state.store().update_event(&event, expected_version).await?;
     Ok(event)
+}
+
+/// Deletes a draft that has no sales, with its images, favourites and its own denials. A
+/// published event is cancelled instead: buyers and gates may know it.
+#[tracing::instrument(skip_all)]
+pub async fn delete_event(state: &AppState, principal: &Principal, id: EventId) -> ApiResult<()> {
+    let event = writable_event(state, principal, id).await?;
+    if event.status != EventStatus::Draft {
+        return Err(not_deletable(
+            "only a draft can be deleted; cancel a published event",
+        ));
+    }
+    let images = state.store().event_images(event.id).await?;
+    if !state.store().delete_draft_event(event.id).await? {
+        return Err(not_deletable(
+            "the event has a sale, or was published meanwhile",
+        ));
+    }
+    remove_objects(state, &images).await;
+    state.audit(principal, "event.delete", event.id).await?;
+    tracing::info!(event = %event.id, "draft event deleted");
+    Ok(())
+}
+
+#[track_caller]
+fn not_deletable(detail: &'static str) -> ApiError {
+    ApiError::new(
+        StatusCode::CONFLICT,
+        ProblemKind::EVENT_NOT_DELETABLE,
+        detail,
+    )
 }

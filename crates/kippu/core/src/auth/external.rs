@@ -16,6 +16,8 @@
 //! Ok(Json(sessions::issue(&state, linked.account).await?))
 //! ```
 
+use std::collections::BTreeMap;
+
 use kippu_domain::AccountId;
 use kippu_domain::account::{Account, Identity, Role};
 use kippu_domain::validation::{Email, ProviderName, Subject};
@@ -160,6 +162,8 @@ pub async fn link_or_create(state: &AppState, identity: ExternalIdentity) -> Api
         display_name: identity.name(),
         role: Role::User,
         created_at: now,
+        contacts: BTreeMap::new(),
+        deleted_at: None,
     };
     let link = Identity {
         provider,

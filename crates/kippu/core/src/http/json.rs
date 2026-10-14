@@ -1,7 +1,7 @@
 //! A JSON extractor whose rejections are Kippu problems.
 
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{FromRequest, Request};
+use axum::extract::{FromRequest, OptionalFromRequest, Request};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
@@ -19,6 +19,9 @@ use crate::error::{ApiError, ProblemKind};
 /// | not JSON, or JSON of the wrong shape (types, missing or unknown fields) | 400 / 422 | `invalid-json` |
 /// | no `Content-Type: application/json` | 415 | `unsupported-media-type` |
 /// | larger than `server.max_body_bytes` | 413 | `payload-too-large` |
+///
+/// Taken as `Option<Json<T>>`, a request without a `Content-Type` has no body (`None`); one
+/// with a body is read as above.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Json<T>(pub T);
 
@@ -30,8 +33,23 @@ where
     type Rejection = ApiError;
 
     async fn from_request(request: Request, state: &S) -> Result<Self, ApiError> {
-        match axum::Json::<T>::from_request(request, state).await {
+        match <axum::Json<T> as FromRequest<S>>::from_request(request, state).await {
             Ok(axum::Json(value)) => Ok(Self(value)),
+            Err(rejection) => Err(problem(&rejection)),
+        }
+    }
+}
+
+impl<T, S> OptionalFromRequest<S> for Json<T>
+where
+    T: DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request(request: Request, state: &S) -> Result<Option<Self>, ApiError> {
+        match <axum::Json<T> as OptionalFromRequest<S>>::from_request(request, state).await {
+            Ok(body) => Ok(body.map(|axum::Json(value)| Self(value))),
             Err(rejection) => Err(problem(&rejection)),
         }
     }

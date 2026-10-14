@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use kippu_domain::admission::WaitingRoom;
 use kippu_domain::catalog::{Event, EventStatus, EventSummary, Inventory, Sale, TicketType};
-use kippu_domain::validation::CountryCode;
+use kippu_domain::validation::{CountryCode, Slug};
 use kippu_domain::{AccountId, EventId, OrganizationId, SaleId, TicketTypeId, Timestamp};
 
 use crate::{Keyset, PageRequest, StoreResult};
@@ -89,6 +89,8 @@ pub trait CatalogStore {
     async fn update_event(&self, event: &Event, expected_version: i64) -> StoreResult<()>;
     /// Looks an event up by id.
     async fn event(&self, id: EventId) -> StoreResult<Option<Event>>;
+    /// Looks an event up by slug.
+    async fn event_by_slug(&self, slug: &Slug) -> StoreResult<Option<Event>>;
     /// Looks an event up by id, without its content: what checks of who may see or edit it
     /// need, at a fraction of the read.
     async fn event_summary(&self, id: EventId) -> StoreResult<Option<EventSummary>>;
@@ -100,6 +102,14 @@ pub trait CatalogStore {
         order: EventOrder,
         page: PageRequest<Keyset>,
     ) -> StoreResult<Vec<EventSummary>>;
+
+    /// Deletes an event that is a draft without sales, together with its images' records, its
+    /// favourites and the denials made for it alone. Returns whether it was deleted.
+    ///
+    /// **Contract:** atomic. Nothing is deleted, and `false` returned, if the event does not
+    /// exist, is no longer a draft or has a sale. A sale created concurrently either makes this
+    /// return `false` or fails itself (with `Conflict`); an event never loses a sale.
+    async fn delete_draft_event(&self, id: EventId) -> StoreResult<bool>;
 
     /// Creates a sale.
     async fn insert_sale(&self, sale: &Sale) -> StoreResult<()>;
@@ -139,6 +149,8 @@ pub trait CatalogStore {
     ) -> StoreResult<()>;
     /// Removes a favourite. Idempotent.
     async fn remove_favorite(&self, account: AccountId, event: EventId) -> StoreResult<()>;
+    /// Whether an account marked an event as a favourite.
+    async fn is_favorite(&self, account: AccountId, event: EventId) -> StoreResult<bool>;
     /// An account's favourite events, most recently marked first (ties by event id),
     /// resuming after the position `page.after` (see [`Favorite::position`]).
     async fn favorites(

@@ -74,11 +74,13 @@ pub(super) async fn submit(
 /// Why a request cannot be fulfilled, judged from the catalog alone.
 fn precheck(
     request: &PurchaseRequest,
+    event: &EventSummary,
     sale: &Sale,
     ticket_types: &[TicketType],
 ) -> Option<RejectionReason> {
-    // A request is judged by when it was accepted, not by how long the queue took.
-    if !sale.is_open_at(request.created_at) {
+    // A request is judged by when it was accepted, not by how long the queue took; but an
+    // event cancelled or withdrawn meanwhile sells nothing more.
+    if !event.is_on_sale() || !sale.is_open_at(request.created_at) {
         return Some(RejectionReason::SaleClosed);
     }
     if request.basket.items().iter().any(|item| {
@@ -236,7 +238,12 @@ async fn decide(
         let rejection = if denied[index] {
             Some(RejectionReason::AccountDenied)
         } else {
-            precheck(&current, &catalog.sale, &catalog.ticket_types)
+            precheck(
+                &current,
+                &catalog.event,
+                &catalog.sale,
+                &catalog.ticket_types,
+            )
         };
         decisions[index] = Some(if let Some(reason) = rejection {
             Decision::Rejected(reason)

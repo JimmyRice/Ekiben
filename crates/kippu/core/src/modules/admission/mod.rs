@@ -34,7 +34,7 @@ impl Module for Admission {
 
     fn routes(&self) -> OpenApiRouter<AppState> {
         OpenApiRouter::new()
-            .routes(routes!(routes::join_waiting_room))
+            .routes(routes!(routes::get_waiting_room, routes::join_waiting_room))
             .routes(routes!(routes::request_admission))
     }
 

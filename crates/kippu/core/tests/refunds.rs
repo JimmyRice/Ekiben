@@ -531,3 +531,129 @@ async fn only_manual_refunds_are_confirmed_by_organizers() {
         "urn:kippu:problem:refund-not-manual"
     );
 }
+
+#[tokio::test]
+async fn organizers_list_an_events_refunds_to_hand_cash_back() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let other_shop = app.shop(10, 1_000, json!({})).await;
+    let buyer = app.buyer().await;
+    let reservation = app.reserve(&buyer, &shop, 2).await;
+    let paid = app
+        .call(
+            Method::POST,
+            &format!(
+                "/v1/reservations/{}/manual-payment",
+                reservation["id"].as_str().unwrap()
+            ),
+            Some(&shop.organizer),
+            Some(json!({ "attestation_id": "receipt-9", "amount": reservation["total"] })),
+        )
+        .await;
+    assert_eq!(paid.body["disposition"], "applied", "{:?}", paid.body);
+    let tickets = paid.body["ticket_ids"].as_array().unwrap();
+    let mut refunds = Vec::new();
+    for ticket in tickets {
+        let refunded = refund(
+            &app,
+            &shop.organizer,
+            &reservation,
+            json!({ "ticket_ids": [ticket] }),
+        )
+        .await;
+        assert_eq!(refunded.body["status"], "pending", "{:?}", refunded.body);
+        refunds.push(refunded.body["id"].clone());
+    }
+    let confirmed = app
+        .call(
+            Method::POST,
+            &format!(
+                "/v1/refunds/{}/manual-confirmation",
+                refunds[0].as_str().unwrap()
+            ),
+            Some(&shop.organizer),
+            None,
+        )
+        .await;
+    assert_eq!(confirmed.status, StatusCode::OK, "{:?}", confirmed.body);
+
+    let listing = format!("/v1/events/{}/refunds", shop.event_id);
+    for (query, expected) in [
+        ("", json!(refunds)),
+        ("?status=pending", json!([refunds[1]])),
+        ("?status=completed", json!([refunds[0]])),
+        ("?limit=1", json!([refunds[0]])),
+    ] {
+        let listed = app
+            .call(
+                Method::GET,
+                &format!("{listing}{query}"),
+                Some(&shop.organizer),
+                None,
+            )
+            .await;
+        assert_eq!(listed.status, StatusCode::OK, "{:?}", listed.body);
+        let ids: Vec<Value> = listed.body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|refund| refund["id"].clone())
+            .collect();
+        assert_eq!(json!(ids), expected, "{query}");
+    }
+    for token in [&other_shop.organizer, &buyer] {
+        let refused = app.call(Method::GET, &listing, Some(token), None).await;
+        assert_eq!(refused.status, StatusCode::FORBIDDEN);
+    }
+}
+
+#[tokio::test]
+async fn buyers_list_their_own_refunds_newest_first() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let buyer = app.buyer().await;
+    let mut refunds = Vec::new();
+    for receipt in ["receipt-a", "receipt-b"] {
+        let reservation = app.reserve(&buyer, &shop, 1).await;
+        let paid = app
+            .call(
+                Method::POST,
+                &format!(
+                    "/v1/reservations/{}/manual-payment",
+                    reservation["id"].as_str().unwrap()
+                ),
+                Some(&shop.organizer),
+                Some(json!({ "attestation_id": receipt, "amount": reservation["total"] })),
+            )
+            .await;
+        assert_eq!(paid.body["disposition"], "applied", "{:?}", paid.body);
+        let refunded = refund(&app, &shop.organizer, &reservation, json!({})).await;
+        assert_eq!(refunded.status, StatusCode::CREATED, "{:?}", refunded.body);
+        refunds.push(refunded.body["id"].clone());
+        app.clock.advance(Duration::minutes(1));
+    }
+    refunds.reverse();
+
+    let mine = app
+        .call(Method::GET, "/v1/me/refunds", Some(&buyer), None)
+        .await;
+    assert_eq!(mine.status, StatusCode::OK, "{:?}", mine.body);
+    let ids: Vec<Value> = mine.body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|refund| refund["id"].clone())
+        .collect();
+    assert_eq!(json!(ids), json!(refunds));
+    let first = app
+        .call(Method::GET, "/v1/me/refunds?limit=1", Some(&buyer), None)
+        .await;
+    assert_eq!(first.body["items"][0]["id"], refunds[0]);
+    assert!(first.body["next_cursor"].is_string());
+
+    let someone_else = app.buyer().await;
+    let theirs = app
+        .call(Method::GET, "/v1/me/refunds", Some(&someone_else), None)
+        .await;
+    assert_eq!(theirs.body["items"], json!([]));
+}

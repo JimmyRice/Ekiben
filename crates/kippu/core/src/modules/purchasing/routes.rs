@@ -7,9 +7,11 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use kippu_domain::purchase::PurchaseRequest;
 use kippu_domain::reservation::Reservation;
-use kippu_domain::{PurchaseRequestId, ReservationId, SaleId};
+use kippu_domain::{AccountId, EventId, PurchaseRequestId, ReservationId, SaleId};
 
-use super::dto::{CheckoutRequest, PollQuery, PurchaseRequestBody};
+use super::dto::{
+    BuyerView, CheckoutRequest, EventReservationsQuery, PollQuery, PurchaseRequestBody,
+};
 use super::service::{self, PurchaseSubmission};
 use crate::app::AppState;
 use crate::auth::Principal;
@@ -113,7 +115,60 @@ pub(crate) async fn my_reservations(
     )))
 }
 
-/// A reservation.
+/// An event's reservations, newest first, for its organizers: who bought what, in every
+/// status or in one.
+#[utoipa::path(
+    get, path = "/v1/events/{event_id}/reservations", tag = TAG,
+    security(("bearer" = [])),
+    params(("event_id" = EventId, Path), EventReservationsQuery),
+    responses(
+        (status = 200, body = Listing<Reservation>),
+        (status = 400, body = Problem),
+        (status = 403, body = Problem),
+        (status = 404, body = Problem)
+    )
+)]
+pub(crate) async fn list_event_reservations(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(event_id): Path<EventId>,
+    Query(query): Query<EventReservationsQuery>,
+) -> ApiResult<Json<Listing<Reservation>>> {
+    let (status, page) = query.into_parts()?;
+    let reservations =
+        service::event_reservations(&state, &principal, event_id, status, page).await?;
+    Ok(Json(Listing::page(
+        reservations,
+        ListingTag::EVENT_RESERVATIONS,
+        |reservation| reservation,
+    )))
+}
+
+/// Someone who ordered for an event, for its organizers: their name and the contact details
+/// they share, to reach them about the event. Not their email.
+#[utoipa::path(
+    get, path = "/v1/events/{event_id}/buyers/{account_id}", tag = TAG,
+    security(("bearer" = [])),
+    params(("event_id" = EventId, Path), ("account_id" = AccountId, Path)),
+    responses(
+        (status = 200, body = BuyerView),
+        (status = 403, body = Problem),
+        (status = 404, description = "No such buyer of this event", body = Problem)
+    )
+)]
+pub(crate) async fn get_buyer(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((event_id, account_id)): Path<(EventId, AccountId)>,
+) -> ApiResult<Json<BuyerView>> {
+    Ok(Json(
+        service::buyer(&state, &principal, event_id, account_id)
+            .await?
+            .into(),
+    ))
+}
+
+/// A reservation: your own, or, for organizers, one for their event.
 #[utoipa::path(
     get, path = "/v1/reservations/{reservation_id}", tag = TAG,
     security(("bearer" = [])),

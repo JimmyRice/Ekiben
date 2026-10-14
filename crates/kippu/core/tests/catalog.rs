@@ -3,7 +3,7 @@
 mod support;
 
 use axum::http::{Method, StatusCode};
-use serde_json::json;
+use serde_json::{Value, json};
 use support::TestApp;
 
 #[tokio::test]
@@ -201,7 +201,7 @@ async fn ticket_types_whose_tickets_cannot_be_issued_are_refused() {
     let shop = app.shop(10, 1_000, json!({})).await;
     let now = app.now();
     let long = "x".repeat(512);
-    let extensions: serde_json::Map<String, serde_json::Value> = (128..133)
+    let extensions: serde_json::Map<String, Value> = (128..133)
         .map(|tag| (tag.to_string(), json!(long)))
         .collect();
     let refused = app
@@ -473,4 +473,391 @@ async fn events_carry_a_structured_address_besides_the_venue() {
     assert_eq!(moved.body["address"]["region"], json!(null));
     let listed = app.call(Method::GET, "/v1/events", None, None).await.body;
     assert_eq!(listed["items"][0]["address"], moved.body["address"]);
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one organization's way from hidden to public, told in order"
+)]
+async fn organizations_are_public_once_they_have_a_public_event() {
+    let app = TestApp::start().await;
+    let root = app.root_token();
+    let organization = app
+        .call(
+            Method::POST,
+            "/v1/admin/organizations",
+            Some(&root),
+            Some(json!({ "slug": "circle", "name": "Circle" })),
+        )
+        .await;
+    let organization_id = organization.body["id"].as_str().unwrap().to_owned();
+    let organizer = app.organizer(&organization_id).await;
+    let other = app.shop(10, 0, json!({})).await;
+    let profile = format!("/v1/organizations/{organization_id}");
+    let events = format!("{profile}/events");
+
+    // Without a public event, an organization is known only to its organizers and admins.
+    let listed = app.call(Method::GET, "/v1/organizations", None, None).await;
+    let ids: Vec<&Value> = listed.body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| &item["id"])
+        .collect();
+    assert_eq!(ids, [&json!(other.organization_id)]);
+    for token in [None, Some(other.organizer.as_str())] {
+        let hidden = app.call(Method::GET, &profile, token, None).await;
+        assert_eq!(hidden.status, StatusCode::NOT_FOUND);
+    }
+    for token in [&organizer, &root] {
+        let own = app.call(Method::GET, &profile, Some(token), None).await;
+        assert_eq!(own.status, StatusCode::OK);
+        assert_eq!(
+            own.body,
+            json!({ "id": organization_id, "slug": "circle", "name": "Circle" }),
+            "nothing beyond the public profile"
+        );
+    }
+
+    let draft = app
+        .call(
+            Method::POST,
+            &events,
+            Some(&organizer),
+            Some(json!({
+                "slug": "draft-event",
+                "title": "Draft",
+                "venue": "Hall",
+                "starts_at": "2031-05-01T10:00:00Z",
+                "ends_at": "2031-05-02T18:00:00Z",
+            })),
+        )
+        .await;
+    assert_eq!(draft.status, StatusCode::CREATED, "{:?}", draft.body);
+    let draft_id = draft.body["id"].clone();
+    let anonymous = app.call(Method::GET, &events, None, None).await;
+    assert_eq!(anonymous.status, StatusCode::OK);
+    assert_eq!(anonymous.body["items"], json!([]));
+    let hidden = app.call(Method::GET, &profile, None, None).await;
+    assert_eq!(
+        hidden.status,
+        StatusCode::NOT_FOUND,
+        "a draft is not public"
+    );
+
+    let published = app
+        .call(
+            Method::POST,
+            &events,
+            Some(&organizer),
+            Some(json!({
+                "slug": "public-event",
+                "title": "Public",
+                "venue": "Hall",
+                "starts_at": "2031-06-01T10:00:00Z",
+                "ends_at": "2031-06-02T18:00:00Z",
+            })),
+        )
+        .await;
+    let published_id = published.body["id"].clone();
+    app.call(
+        Method::PATCH,
+        &format!("/v1/events/{}", published_id.as_str().unwrap()),
+        Some(&organizer),
+        Some(json!({ "version": published.body["version"], "status": "published" })),
+    )
+    .await;
+
+    // Once it has one, everyone sees its profile and its public events; only its organizers
+    // see the drafts.
+    let listed = app.call(Method::GET, "/v1/organizations", None, None).await;
+    let ids: Vec<&str> = listed.body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["id"].as_str().unwrap())
+        .collect();
+    let mut expected = vec![organization_id.as_str(), other.organization_id.as_str()];
+    expected.sort_unstable();
+    assert_eq!(ids, expected, "in id order");
+    let first = app
+        .call(Method::GET, "/v1/organizations?limit=1", None, None)
+        .await;
+    let cursor = first.body["next_cursor"].as_str().unwrap();
+    let second = app
+        .call(
+            Method::GET,
+            &format!("/v1/organizations?limit=1&cursor={cursor}"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(second.body["items"][0]["id"], json!(expected[1]));
+    assert_eq!(second.body["next_cursor"], json!(null));
+
+    let public = app.call(Method::GET, &profile, None, None).await;
+    assert_eq!(public.status, StatusCode::OK);
+    assert_eq!(public.body["name"], "Circle");
+    for (token, expected) in [
+        (None, json!([published_id])),
+        (Some(other.organizer.as_str()), json!([published_id])),
+        (Some(organizer.as_str()), json!([draft_id, published_id])),
+    ] {
+        let listed = app.call(Method::GET, &events, token, None).await;
+        let ids: Vec<Value> = listed.body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|event| event["id"].clone())
+            .collect();
+        assert_eq!(json!(ids), expected, "{token:?}");
+    }
+    let unknown = app
+        .call(
+            Method::GET,
+            "/v1/organizations/0190a7c4-0000-7000-8000-000000000000",
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn only_drafts_without_sales_are_deleted() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let other = app.shop(10, 1_000, json!({})).await;
+    let events = format!("/v1/organizations/{}/events", shop.organization_id);
+    let create = |slug: &'static str| {
+        app.call(
+            Method::POST,
+            &events,
+            Some(&shop.organizer),
+            Some(json!({
+                "slug": slug,
+                "title": "Draft",
+                "venue": "Hall",
+                "starts_at": "2031-05-01T10:00:00Z",
+                "ends_at": "2031-05-02T18:00:00Z",
+            })),
+        )
+    };
+    let draft = create("abandoned").await.body;
+    let path = format!("/v1/events/{}", draft["id"].as_str().unwrap());
+
+    // Published events are cancelled instead; a draft with a sale stays.
+    let published = app
+        .call(
+            Method::DELETE,
+            &format!("/v1/events/{}", shop.event_id),
+            Some(&shop.organizer),
+            None,
+        )
+        .await;
+    assert_eq!(published.status, StatusCode::CONFLICT);
+    assert_eq!(
+        published.body["type"],
+        "urn:kippu:problem:event-not-deletable"
+    );
+    let with_sale = create("with-sale").await.body;
+    let sale = app
+        .call(
+            Method::POST,
+            &format!("/v1/events/{}/sales", with_sale["id"].as_str().unwrap()),
+            Some(&shop.organizer),
+            Some(json!({
+                "name": "General",
+                "opens_at": "2031-01-01T00:00:00Z",
+                "closes_at": "2031-04-01T00:00:00Z",
+            })),
+        )
+        .await;
+    assert_eq!(sale.status, StatusCode::CREATED, "{:?}", sale.body);
+    let refused = app
+        .call(
+            Method::DELETE,
+            &format!("/v1/events/{}", with_sale["id"].as_str().unwrap()),
+            Some(&shop.organizer),
+            None,
+        )
+        .await;
+    assert_eq!(refused.status, StatusCode::CONFLICT);
+
+    // Only its organizers may delete a draft; others do not even see it.
+    let stranger = app
+        .call(Method::DELETE, &path, Some(&other.organizer), None)
+        .await;
+    assert_eq!(stranger.status, StatusCode::NOT_FOUND);
+    let deleted = app
+        .call(Method::DELETE, &path, Some(&shop.organizer), None)
+        .await;
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{:?}", deleted.body);
+    let again = app
+        .call(Method::DELETE, &path, Some(&shop.organizer), None)
+        .await;
+    assert_eq!(again.status, StatusCode::NOT_FOUND);
+    // The slug is free again.
+    assert_eq!(create("abandoned").await.status, StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn events_and_organizations_are_found_by_slug() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let event = app
+        .call(
+            Method::GET,
+            &format!("/v1/events/{}", shop.event_id),
+            None,
+            None,
+        )
+        .await
+        .body;
+    let by_slug = app
+        .call(
+            Method::GET,
+            &format!("/v1/events/by-slug/{}", event["slug"].as_str().unwrap()),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(by_slug.status, StatusCode::OK);
+    assert_eq!(by_slug.body, event);
+    let organization = app
+        .call(
+            Method::GET,
+            &format!("/v1/organizations/{}", shop.organization_id),
+            None,
+            None,
+        )
+        .await
+        .body;
+    let by_slug = app
+        .call(
+            Method::GET,
+            &format!(
+                "/v1/organizations/by-slug/{}",
+                organization["slug"].as_str().unwrap()
+            ),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(by_slug.body, organization);
+
+    // A draft and an organization without a public event, under the same rules as by id.
+    let draft = app
+        .call(
+            Method::POST,
+            &format!("/v1/organizations/{}/events", shop.organization_id),
+            Some(&shop.organizer),
+            Some(json!({
+                "slug": "secret-plans",
+                "title": "Draft",
+                "venue": "Hall",
+                "starts_at": "2031-05-01T10:00:00Z",
+                "ends_at": "2031-05-02T18:00:00Z",
+            })),
+        )
+        .await;
+    assert_eq!(draft.status, StatusCode::CREATED);
+    let root = app.root_token();
+    app.call(
+        Method::POST,
+        "/v1/admin/organizations",
+        Some(&root),
+        Some(json!({ "slug": "stealth", "name": "Stealth" })),
+    )
+    .await;
+    for path in [
+        "/v1/events/by-slug/secret-plans",
+        "/v1/organizations/by-slug/stealth",
+    ] {
+        let hidden = app.call(Method::GET, path, None, None).await;
+        assert_eq!(hidden.status, StatusCode::NOT_FOUND, "{path}");
+        let admin = app.call(Method::GET, path, Some(&root), None).await;
+        assert_eq!(admin.status, StatusCode::OK, "{path}");
+    }
+    let own = app
+        .call(
+            Method::GET,
+            "/v1/events/by-slug/secret-plans",
+            Some(&shop.organizer),
+            None,
+        )
+        .await;
+    assert_eq!(own.status, StatusCode::OK);
+    let malformed = app
+        .call(Method::GET, "/v1/events/by-slug/Not%20A%20Slug", None, None)
+        .await;
+    assert_eq!(malformed.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn organizers_read_a_sales_stock() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let other = app.shop(10, 1_000, json!({})).await;
+    let buyer = app.buyer().await;
+    app.reserve(&buyer, &shop, 1).await;
+    let paid = app.reserve(&buyer, &shop, 1).await;
+    let settled = app
+        .call(
+            Method::POST,
+            &format!(
+                "/v1/reservations/{}/manual-payment",
+                paid["id"].as_str().unwrap()
+            ),
+            Some(&shop.organizer),
+            Some(json!({ "attestation_id": "receipt-1", "amount": paid["total"] })),
+        )
+        .await;
+    assert_eq!(settled.body["disposition"], "applied", "{:?}", settled.body);
+
+    let path = format!("/v1/sales/{}/inventory", shop.sale_id);
+    let stock = app
+        .call(Method::GET, &path, Some(&shop.organizer), None)
+        .await;
+    assert_eq!(stock.status, StatusCode::OK, "{:?}", stock.body);
+    assert_eq!(
+        stock.body["items"],
+        json!([{
+            "ticket_type_id": shop.ticket_type_id,
+            "capacity": 10,
+            "held": 1,
+            "sold": 1,
+            "available": 8,
+        }])
+    );
+    for (token, status) in [
+        (Some(other.organizer.as_str()), StatusCode::FORBIDDEN),
+        (Some(buyer.as_str()), StatusCode::FORBIDDEN),
+        (None, StatusCode::UNAUTHORIZED),
+    ] {
+        let refused = app.call(Method::GET, &path, token, None).await;
+        assert_eq!(refused.status, status);
+    }
+}
+
+#[tokio::test]
+async fn a_favourite_is_checked_one_event_at_a_time() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let buyer = app.buyer().await;
+    let path = format!("/v1/me/favorites/{}", shop.event_id);
+    let before = app.call(Method::GET, &path, Some(&buyer), None).await;
+    assert_eq!(before.status, StatusCode::NOT_FOUND);
+    app.call(Method::PUT, &path, Some(&buyer), None).await;
+    let marked = app.call(Method::GET, &path, Some(&buyer), None).await;
+    assert_eq!(marked.status, StatusCode::NO_CONTENT);
+    let someone_else = app.buyer().await;
+    let theirs = app
+        .call(Method::GET, &path, Some(&someone_else), None)
+        .await;
+    assert_eq!(theirs.status, StatusCode::NOT_FOUND);
+    app.call(Method::DELETE, &path, Some(&buyer), None).await;
+    let after = app.call(Method::GET, &path, Some(&buyer), None).await;
+    assert_eq!(after.status, StatusCode::NOT_FOUND);
 }

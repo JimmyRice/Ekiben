@@ -219,6 +219,12 @@ impl EventSummary {
     pub const fn is_public(&self) -> bool {
         matches!(self.status, EventStatus::Published | EventStatus::Cancelled)
     }
+
+    /// Whether its tickets are sold: only while it is published, not as a draft or once
+    /// cancelled.
+    pub const fn is_on_sale(&self) -> bool {
+        matches!(self.status, EventStatus::Published)
+    }
 }
 
 impl From<Event> for EventSummary {

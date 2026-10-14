@@ -230,6 +230,25 @@ pub async fn delete_image(
     Ok(())
 }
 
+/// Removes the objects of images whose records are gone, e.g. with their event. Best effort:
+/// an object that cannot be removed is logged and left behind.
+pub async fn remove_objects(state: &AppState, images: &[EventImage]) {
+    let Some(storage) = state.images() else {
+        return;
+    };
+    for image in images {
+        if let Err(error) = kippu_telemetry::call(
+            "object storage",
+            "delete",
+            storage.objects.delete(&image.object_key()),
+        )
+        .await
+        {
+            tracing::warn!(image = %image.id, %error, "image forgotten, but its object remains");
+        }
+    }
+}
+
 /// Puts an event's images in a new order: `order` lists every image exactly once.
 #[tracing::instrument(skip_all)]
 pub async fn order_images(

@@ -21,7 +21,7 @@ mod store;
 mod ticketing;
 mod webhooks;
 
-pub use accounts::{AccountStore, Session, SessionRenewal, Unlink};
+pub use accounts::{AccountFilter, AccountStore, Session, SessionRenewal, Unlink};
 pub use catalog::{CatalogStore, EventFilter, EventOrder, Favorite};
 pub use denials::DenialStore;
 pub use error::{BoxError, StoreError, StoreResult};

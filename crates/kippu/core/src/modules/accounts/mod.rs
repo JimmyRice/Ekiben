@@ -1,10 +1,14 @@
 //! Accounts, sessions, organizations and the audit log.
 //!
 //! - Anyone may register a `user` account and sign in.
-//! - Admins (and root) create admin and organizer accounts, organizations and memberships.
+//! - Admins (and root) create admin and organizer accounts, organizations and memberships,
+//!   and read and edit them.
 //! - Root signs in with a key-signed token instead (see [`crate::auth::tokens`]).
 //! - Accounts may also sign in through external providers (see [`crate::auth::external`]);
 //!   their owners set an email and password, and unlink providers, under `/v1/me`.
+//! - Owners change their name and contact details, and close their account; closed accounts
+//!   keep their records but nothing about the person, and their email and external sign-ins
+//!   never make another account.
 
 mod dto;
 mod routes;
@@ -59,17 +63,23 @@ impl Module for Accounts {
             .routes(routes!(routes::login))
             .routes(routes!(routes::refresh))
             .routes(routes!(routes::logout))
-            .routes(routes!(routes::me))
+            .routes(routes!(routes::me, routes::update_me, routes::close_me))
             .routes(routes!(routes::set_email))
             .routes(routes!(routes::change_password))
             .routes(routes!(routes::list_identities))
             .routes(routes!(routes::unlink_identity))
             .routes(routes!(routes::create_account, routes::list_accounts))
-            .routes(routes!(routes::delete_account))
+            .routes(routes!(routes::get_account, routes::delete_account))
             .routes(routes!(
                 routes::create_organization,
                 routes::list_organizations
             ))
+            .routes(routes!(
+                routes::get_organization,
+                routes::update_organization,
+                routes::patch_organization
+            ))
+            .routes(routes!(routes::list_members))
             .routes(routes!(routes::add_member, routes::remove_member))
             .routes(routes!(routes::audit_log))
     }
