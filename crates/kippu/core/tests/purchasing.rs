@@ -761,6 +761,72 @@ async fn a_batch_of_buyers_is_served_in_arrival_order() {
     );
 }
 
+#[tokio::test]
+async fn a_run_decides_each_request_as_serving_them_one_by_one_would() {
+    let app = TestApp::start().await;
+    let shop = app.shop(5, 1_000, json!({})).await;
+    let first = app.buyer().await;
+    app.reserve(&first, &shop, 2).await; // its limit of two; three tickets are left
+    let mut buyers = vec![first];
+    for _ in 0..4 {
+        buyers.push(app.buyer().await);
+    }
+    // One run of five accounts: the first is over its limit, and a pair that no longer fits
+    // does not keep a single ticket from the buyer behind it.
+    let mut submitted = Vec::new();
+    for (buyer, quantity) in buyers.iter().zip([1, 2, 2, 1, 1]) {
+        app.clock.advance(Duration::milliseconds(1));
+        let reply = app.purchase(buyer, &shop, quantity, &uuid_suffix()).await;
+        assert_eq!(reply.status, StatusCode::ACCEPTED, "{:?}", reply.body);
+        submitted.push((buyer, reply.body["id"].as_str().unwrap().to_owned()));
+    }
+    app.drain("purchases").await;
+
+    let mut outcomes = Vec::new();
+    let mut reservations = Vec::new();
+    for (buyer, id) in &submitted {
+        let request = app
+            .call(
+                Method::GET,
+                &format!("/v1/purchase-requests/{id}"),
+                Some(buyer),
+                None,
+            )
+            .await;
+        reservations.push(request.body["reservation_id"].as_str().map(str::to_owned));
+        outcomes.push(match request.body["status"].as_str().unwrap() {
+            "rejected" => request.body["reason"].as_str().unwrap().to_owned(),
+            status => status.to_owned(),
+        });
+    }
+    assert_eq!(
+        outcomes,
+        [
+            "limit_exceeded",
+            "reserved",
+            "sold_out",
+            "reserved",
+            "sold_out"
+        ]
+    );
+
+    // Requests turned away took no quota: once the pair before it is cancelled, the buyer
+    // whose pair did not fit gets two tickets, its whole limit.
+    let cancelled = app
+        .call(
+            Method::POST,
+            &format!(
+                "/v1/reservations/{}/cancel",
+                reservations[1].as_deref().unwrap()
+            ),
+            Some(&buyers[1]),
+            None,
+        )
+        .await;
+    assert_eq!(cancelled.body["status"], "cancelled");
+    app.reserve(&buyers[2], &shop, 2).await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_workers_serve_a_sale_in_arrival_order() {
     // Small batches, so that four workers at once (as on four instances) take turns on one

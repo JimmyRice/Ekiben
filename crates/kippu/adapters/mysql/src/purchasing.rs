@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use kippu_domain::purchase::{LineItem, PurchaseRequest, PurchaseStatus};
 use kippu_domain::reservation::{Reservation, ReservationStatus};
@@ -7,13 +9,13 @@ use kippu_domain::{
 };
 use kippu_store::{
     Holds, Insertion, InventoryTx, Keyset, LineItems, PageRequest, PurchaseStore, PurchasesTx,
-    QueuedRequest, ReservationsTx, StoreError, StoreResult,
+    QueuedRequest, QuotaLines, ReservationsTx, StoreError, StoreResult,
 };
 use uuid::Uuid;
 
 use crate::convert::{
     PurchaseRequestRow, QueuedRequestRow, ReservationRow, all, json, micros, optional,
-    purchase_status,
+    purchase_status, uncount,
 };
 use crate::tx::MySqlTx;
 use crate::{MySqlStore, error, is_duplicate, unique};
@@ -23,6 +25,15 @@ const PURCHASE_REQUEST_COLUMNS: &str = "id, account_id, sale_id, basket, status,
 const RESERVATION_COLUMNS: &str = "SELECT id, purchase_request_id, account_id, sale_id, event_id, \
      items, total_minor, currency, environment, status, attestor_id, expires_at, created_at, \
      updated_at FROM reservations";
+
+/// The most rows one multi-row statement carries, keeping its placeholders far below MySQL's
+/// limit of 65,535 for every table written this way.
+const ROWS_PER_STATEMENT: usize = 1_000;
+
+/// `count` copies of `row`, comma-separated: the rows of a multi-row statement.
+fn rows(row: &str, count: usize) -> String {
+    vec![row; count].join(", ")
+}
 
 #[async_trait]
 impl PurchaseStore for MySqlStore {
@@ -324,6 +335,43 @@ impl PurchasesTx for MySqlTx {
         .map_err(error)?;
         Ok(())
     }
+
+    async fn set_purchase_statuses(
+        &mut self,
+        outcomes: &[(PurchaseRequestId, PurchaseStatus)],
+        now: Timestamp,
+    ) -> StoreResult<()> {
+        for chunk in outcomes.chunks(ROWS_PER_STATEMENT) {
+            let statement = format!(
+                "UPDATE purchase_requests r
+                 JOIN (VALUES {}) AS o (id, status, reservation_id, rejection_reason)
+                   ON r.id = o.id
+                 SET r.status = o.status, r.reservation_id = o.reservation_id,
+                     r.rejection_reason = o.rejection_reason, r.lease_until = NULL,
+                     r.updated_at = ?",
+                // Parameters in a table value constructor are typed as text; ids are bytes.
+                rows(
+                    "ROW(CAST(? AS BINARY(16)), ?, CAST(? AS BINARY(16)), ?)",
+                    chunk.len()
+                )
+            );
+            let mut query = sqlx::query(sqlx::AssertSqlSafe(statement));
+            for &(id, status) in chunk {
+                let columns = purchase_status(status);
+                query = query
+                    .bind(id.as_uuid())
+                    .bind(columns.status)
+                    .bind(columns.reservation_id)
+                    .bind(columns.rejection_reason);
+            }
+            query
+                .bind(micros(now))
+                .execute(&mut *self.conn)
+                .await
+                .map_err(error)?;
+        }
+        Ok(())
+    }
 }
 
 /// A stock or quota change: `apply` must affect exactly one row for the change to count, and
@@ -419,16 +467,20 @@ impl MySqlTx {
 
 #[async_trait]
 impl InventoryTx for MySqlTx {
-    async fn lock_stock(&mut self, items: &LineItems) -> StoreResult<()> {
+    async fn lock_stock(&mut self, items: &LineItems) -> StoreResult<Vec<u32>> {
         // One row per statement, so the locks are taken exactly in the items' order.
+        let mut available = Vec::with_capacity(items.len());
         for item in items {
-            sqlx::query("SELECT 1 FROM inventory WHERE ticket_type_id = ? FOR UPDATE")
-                .bind(item.ticket_type_id.as_uuid())
-                .execute(&mut *self.conn)
-                .await
-                .map_err(error)?;
+            let left = sqlx::query_scalar::<_, i64>(
+                "SELECT capacity - held - sold FROM inventory WHERE ticket_type_id = ? FOR UPDATE",
+            )
+            .bind(item.ticket_type_id.as_uuid())
+            .fetch_optional(&mut *self.conn)
+            .await
+            .map_err(error)?;
+            available.push(left.map_or(Ok(0), uncount)?);
         }
-        Ok(())
+        Ok(available)
     }
 
     async fn try_hold(&mut self, items: &LineItems) -> StoreResult<bool> {
@@ -520,6 +572,70 @@ impl InventoryTx for MySqlTx {
         }
         Ok(())
     }
+
+    async fn lock_quotas(&mut self, lines: &QuotaLines) -> StoreResult<Vec<u32>> {
+        let mut taken = HashMap::with_capacity(lines.len());
+        for chunk in lines.chunks(ROWS_PER_STATEMENT) {
+            // Inserting the quotas never taken and touching the others locks them all, in the
+            // lines' order (chunks follow it too).
+            let mut insert = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "INSERT INTO quotas (account_id, ticket_type_id, taken) VALUES {}
+                 ON DUPLICATE KEY UPDATE taken = taken",
+                rows("(?, ?, 0)", chunk.len())
+            )));
+            for line in chunk {
+                insert = insert
+                    .bind(line.account_id.as_uuid())
+                    .bind(line.ticket_type_id.as_uuid());
+            }
+            insert.execute(&mut *self.conn).await.map_err(error)?;
+            // Locked by this transaction, the rows cannot change but through it: a plain read
+            // sees what a locking read would.
+            let mut select = sqlx::query_as::<_, (Uuid, Uuid, i64)>(sqlx::AssertSqlSafe(format!(
+                "SELECT account_id, ticket_type_id, taken FROM quotas
+                 WHERE (account_id, ticket_type_id) IN ({})",
+                rows("(?, ?)", chunk.len())
+            )));
+            for line in chunk {
+                select = select
+                    .bind(line.account_id.as_uuid())
+                    .bind(line.ticket_type_id.as_uuid());
+            }
+            for (account, ticket_type, count) in
+                select.fetch_all(&mut *self.conn).await.map_err(error)?
+            {
+                taken.insert((account, ticket_type), count);
+            }
+        }
+        lines
+            .iter()
+            .map(|line| {
+                taken
+                    .get(&(line.account_id.as_uuid(), line.ticket_type_id.as_uuid()))
+                    .copied()
+                    .ok_or(StoreError::NotFound("quota"))
+                    .and_then(uncount)
+            })
+            .collect()
+    }
+
+    async fn take_quotas(&mut self, lines: &QuotaLines) -> StoreResult<()> {
+        for chunk in lines.chunks(ROWS_PER_STATEMENT) {
+            let mut query = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "INSERT INTO quotas (account_id, ticket_type_id, taken) VALUES {} AS added
+                 ON DUPLICATE KEY UPDATE taken = quotas.taken + added.taken",
+                rows("(?, ?, ?)", chunk.len())
+            )));
+            for line in chunk {
+                query = query
+                    .bind(line.account_id.as_uuid())
+                    .bind(line.ticket_type_id.as_uuid())
+                    .bind(i64::from(line.quantity));
+            }
+            query.execute(&mut *self.conn).await.map_err(error)?;
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -548,6 +664,40 @@ impl ReservationsTx for MySqlTx {
         .execute(&mut *self.conn)
         .await
         .map_err(unique("purchase_request_id"))?;
+        Ok(())
+    }
+
+    async fn insert_reservations(&mut self, reservations: &[Reservation]) -> StoreResult<()> {
+        for chunk in reservations.chunks(ROWS_PER_STATEMENT) {
+            let mut query = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "INSERT INTO reservations (id, purchase_request_id, account_id, sale_id, event_id,
+                                           items, total_minor, currency, environment, status,
+                                           attestor_id, expires_at, created_at, updated_at)
+                 VALUES {}",
+                rows("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", chunk.len())
+            )));
+            for reservation in chunk {
+                query = query
+                    .bind(reservation.id.as_uuid())
+                    .bind(reservation.purchase_request_id.as_uuid())
+                    .bind(reservation.account_id.as_uuid())
+                    .bind(reservation.sale_id.as_uuid())
+                    .bind(reservation.event_id.as_uuid())
+                    .bind(json(&reservation.items)?)
+                    .bind(reservation.total.amount_minor())
+                    .bind(reservation.total.currency().as_str().to_owned())
+                    .bind(reservation.environment.as_str())
+                    .bind(reservation.status.as_str())
+                    .bind(reservation.attestor_id.map(|id| id.as_uuid()))
+                    .bind(micros(reservation.expires_at))
+                    .bind(micros(reservation.created_at))
+                    .bind(micros(reservation.updated_at));
+            }
+            query
+                .execute(&mut *self.conn)
+                .await
+                .map_err(unique("purchase_request_id"))?;
+        }
         Ok(())
     }
 

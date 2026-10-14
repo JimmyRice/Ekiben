@@ -46,7 +46,8 @@ use kippu_domain::{
 
 use crate::{
     AccountFilter, AuditEntry, EventFilter, EventOrder, Holds, Insertion, Keyset, Lease, LineItems,
-    PageRequest, Session, SessionRenewal, Store, StoreError, Unlink, WebhookRun,
+    PageRequest, QuotaLine, QuotaLines, Session, SessionRenewal, Store, StoreError, Unlink,
+    WebhookRun,
 };
 
 /// A store under test, plus whatever must outlive it (e.g. a temporary directory).
@@ -89,6 +90,9 @@ macro_rules! conformance_tests {
             sale_inventory_reads_every_type_at_once,
             stock_locked_up_front_never_deadlocks,
             quotas_are_enforced_and_all_or_nothing,
+            quotas_locked_together_never_exceed_a_limit,
+            locked_stock_reads_what_is_left,
+            requests_are_settled_together,
             dropped_transactions_roll_back,
             a_purchase_queue_is_held_by_one_transaction,
             queued_requests_are_read_in_arrival_order_with_their_denials,
@@ -619,6 +623,215 @@ pub async fn quotas_are_enforced_and_all_or_nothing(store: Arc<dyn Store>) {
             .unwrap()
     );
     tx.commit().await.unwrap();
+}
+
+pub async fn quotas_locked_together_never_exceed_a_limit(store: Arc<dyn Store>) {
+    let catalog = catalog(store.as_ref(), &[100, 100]).await;
+    let (first, second) = (catalog.ticket_types[0], catalog.ticket_types[1]);
+    let (buyer, other) = (account(store.as_ref()).await, account(store.as_ref()).await);
+    let quota = |claims: &[(AccountId, TicketTypeId, u32)]| {
+        QuotaLines::new(
+            claims
+                .iter()
+                .map(|&(account_id, ticket_type_id, quantity)| QuotaLine {
+                    account_id,
+                    ticket_type_id,
+                    quantity,
+                }),
+        )
+    };
+    // Every type allows four tickets per account.
+    let limit_four = |items: &LineItems| Holds::new(items, |_| Some(4)).unwrap();
+    let mut tx = store.begin().await.unwrap();
+    assert!(
+        tx.inventory()
+            .try_take_quota(buyer, &limit_four(&lines([line(first, 3)])))
+            .await
+            .unwrap()
+    );
+    tx.commit().await.unwrap();
+
+    // What each line's account has taken, in the lines' order; a quota never taken reads 0.
+    let claims = quota(&[(other, first, 1), (buyer, second, 2), (buyer, first, 1)]);
+    let expected = |taken: &dyn Fn(AccountId, TicketTypeId) -> u32| {
+        claims
+            .iter()
+            .map(|line| taken(line.account_id, line.ticket_type_id))
+            .collect::<Vec<_>>()
+    };
+    let mut tx = store.begin().await.unwrap();
+    assert_eq!(
+        tx.inventory().lock_quotas(&claims).await.unwrap(),
+        expected(&|account, ticket_type| u32::from((account, ticket_type) == (buyer, first)) * 3)
+    );
+    tx.inventory().take_quotas(&claims).await.unwrap();
+    tx.commit().await.unwrap();
+    let mut tx = store.begin().await.unwrap();
+    assert_eq!(
+        tx.inventory().lock_quotas(&claims).await.unwrap(),
+        expected(
+            &|account, ticket_type| match (account == buyer, ticket_type == first) {
+                (true, true) => 4,
+                (true, false) => 2,
+                (false, _) => 1,
+            }
+        )
+    );
+    assert!(
+        !tx.inventory()
+            .try_take_quota(buyer, &limit_four(&lines([line(first, 1)])))
+            .await
+            .unwrap(),
+        "quotas taken together count for single takes too"
+    );
+    drop(tx);
+
+    // Transactions deciding at once on what they read never exceed a limit of four, also for
+    // quotas no one has taken yet.
+    let late = account(store.as_ref()).await;
+    let claims = quota(&[(late, first, 1), (late, second, 1)]);
+    let deciding = (0..20).map(|_| {
+        let (store, claims) = (store.clone(), claims.clone());
+        tokio::spawn(async move {
+            let mut tx = store.begin().await?;
+            let taken = tx.inventory().lock_quotas(&claims).await?;
+            tokio::task::yield_now().await;
+            let granted = taken.iter().all(|&taken| taken < 4);
+            if granted {
+                tx.inventory().take_quotas(&claims).await?;
+            }
+            tx.commit().await?;
+            Ok::<_, StoreError>(granted)
+        })
+    });
+    let mut granted = 0;
+    for decision in deciding.collect::<Vec<_>>() {
+        if decision.await.unwrap().unwrap() {
+            granted += 1;
+        }
+    }
+    assert_eq!(granted, 4);
+    let mut tx = store.begin().await.unwrap();
+    assert_eq!(tx.inventory().lock_quotas(&claims).await.unwrap(), [4, 4]);
+}
+
+pub async fn locked_stock_reads_what_is_left(store: Arc<dyn Store>) {
+    let catalog = catalog(store.as_ref(), &[5, 1]).await;
+    let (first, second) = (catalog.ticket_types[0], catalog.ticket_types[1]);
+
+    // In the items' order; a type without stock has none.
+    let mut tx = store.begin().await.unwrap();
+    assert!(
+        tx.inventory()
+            .try_hold(&lines([line(first, 2), line(second, 1)]))
+            .await
+            .unwrap()
+    );
+    let unknown = TicketTypeId::generate();
+    let items = lines([line(first, 1), line(second, 1), line(unknown, 1)]);
+    let available = tx.inventory().lock_stock(&items).await.unwrap();
+    let expected: Vec<u32> = items
+        .iter()
+        .map(|item| match item.ticket_type_id {
+            id if id == first => 3,
+            _ => 0,
+        })
+        .collect();
+    assert_eq!(available, expected);
+    tx.commit().await.unwrap();
+}
+
+pub async fn requests_are_settled_together(store: Arc<dyn Store>) {
+    let catalog = catalog(store.as_ref(), &[5]).await;
+    let first = catalog.ticket_types[0];
+    let at = |second: i64| now() + Duration::seconds(second);
+
+    // Two requests get reservations and one is rejected, all recorded at once.
+    let mut requests = Vec::new();
+    for _ in 0..3 {
+        let request = purchase_request(account(store.as_ref()).await, &catalog, "together");
+        store.insert_purchase_request(&request).await.unwrap();
+        requests.push(request);
+    }
+    let price = Money::new(1_000, Currency::JPY).unwrap();
+    let reservation_for = |request: &PurchaseRequest| Reservation {
+        id: ReservationId::generate(),
+        purchase_request_id: request.id,
+        account_id: request.account_id,
+        sale_id: catalog.sale,
+        event_id: catalog.event,
+        items: vec![ReservedItem {
+            ticket_type_id: first,
+            quantity: 1,
+            unit_price: price,
+        }],
+        total: price,
+        environment: Environment::Live,
+        status: ReservationStatus::Reserved,
+        attestor_id: None,
+        expires_at: at(600),
+        created_at: at(5),
+        updated_at: at(5),
+    };
+    let reservations = [reservation_for(&requests[0]), reservation_for(&requests[1])];
+    let outcomes = [
+        (
+            requests[0].id,
+            PurchaseStatus::Reserved {
+                reservation_id: reservations[0].id,
+            },
+        ),
+        (
+            requests[1].id,
+            PurchaseStatus::Reserved {
+                reservation_id: reservations[1].id,
+            },
+        ),
+        (
+            requests[2].id,
+            PurchaseStatus::Rejected {
+                reason: RejectionReason::SoldOut,
+            },
+        ),
+    ];
+    let mut tx = store.begin().await.unwrap();
+    tx.reservations()
+        .insert_reservations(&reservations)
+        .await
+        .unwrap();
+    tx.purchases()
+        .set_purchase_statuses(&outcomes, at(5))
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    for reservation in &reservations {
+        assert_eq!(
+            store.reservation(reservation.id).await.unwrap().as_ref(),
+            Some(reservation)
+        );
+    }
+    for (id, status) in outcomes {
+        let request = store.purchase_request(id).await.unwrap().unwrap();
+        assert_eq!((request.status, request.updated_at), (status, at(5)));
+    }
+
+    // One reservation for a request that has one already fails them all.
+    let fresh = reservation_for(&requests[2]);
+    let again = Reservation {
+        id: ReservationId::generate(),
+        ..reservations[1].clone()
+    };
+    let mut tx = store.begin().await.unwrap();
+    let result = tx
+        .reservations()
+        .insert_reservations(&[fresh.clone(), again])
+        .await;
+    assert!(matches!(
+        result,
+        Err(StoreError::Conflict("purchase_request_id"))
+    ));
+    drop(tx);
+    assert_eq!(store.reservation(fresh.id).await.unwrap(), None);
 }
 
 pub async fn dropped_transactions_roll_back(store: Arc<dyn Store>) {

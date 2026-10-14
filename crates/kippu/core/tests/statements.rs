@@ -153,8 +153,8 @@ async fn hot_paths_run_a_fixed_number_of_statements() {
     // enters a first join in a transaction of its own.
     let (join, worker_one, worker_three, worker_ten) =
         match std::env::var("EKIBEN_TEST_BACKEND").as_deref() {
-            Ok("mysql") => (7, 13, 27, 59),
-            _ => (5, 12, 24, 58),
+            Ok("mysql") => (7, 13, 27, 15),
+            _ => (5, 12, 24, 13),
         };
     let counts = [
         ("sale offer", offer_statements, 4),

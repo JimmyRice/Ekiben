@@ -38,7 +38,7 @@ Keep the repository root uncluttered and do not add speculative `.gitignore` ent
 ## Commands
 
 ```bash
-cargo test --workspace --all-features                                   # 375 tests incl. e2e over TCP
+cargo test --workspace --all-features                                   # 395 tests incl. e2e over TCP
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets           # default features too
 cargo fmt --all
@@ -323,13 +323,17 @@ Do not change these unless the user explicitly asks.
   transaction holding a queue after 10 s without a statement). Workers skip a held queue and
   serve other sales.
 - **Purchase worker commits in groups:** a sale's requests are served in runs without a
-  repeated account, one transaction per run: the queue, then quotas (account order), then
-  `InventoryTx::lock_stock` on every type the run needs (type order), then stock in arrival
-  order. Outcomes equal one-by-one processing; a run that fails is redone one request at a
-  time, and a request that fails on its own is postponed (`lease_until`, by
+  repeated account, one transaction per run: the queue, then the run's quotas
+  (`InventoryTx::lock_quotas`, account order), then its stock (`InventoryTx::lock_stock`, type
+  order), each locked and read. Every request is then decided in memory in arrival order, as
+  one-by-one processing would, and the run is written in a few multi-row statements
+  (`take_quotas`, one `try_hold`, `insert_reservations`, `set_purchase_statuses`), so a run
+  costs about as many statements however long it is; a lone request skips the reads and is
+  decided by its conditional writes. A run that fails is redone one request at a time, and a
+  request that fails on its own is postponed (`lease_until`, by
   `workers.purchase_lease_seconds`) instead of holding up the queue. Any transaction that
   changes several requests' stock must lock it up front the same way
-  (`stock_locked_up_front_never_deadlocks`).
+  (`stock_locked_up_front_never_deadlocks`, `quotas_locked_together_never_exceed_a_limit`).
 - **PostgreSQL queue numbers** come from a per-sale counter row (`INSERT … ON CONFLICT DO
   UPDATE`), not a sequence: an admission batch means "the next N people" and needs consecutive
   numbers. The increment and the account's entry are one statement (MySQL: one transaction),
@@ -361,10 +365,10 @@ Do not change these unless the user explicitly asks.
 ## Known limitations
 
 - One sale is served by one transaction at a time, so a single sale's purchase throughput does
-  not grow with workers or instances (other sales are served in parallel): about 1,450
-  requests/s on PostgreSQL and 1,850 on MySQL in local containers. Beyond that the options are
-  fewer statements per request in the run, or inventory buckets (Open tasks), which would
-  relax strict arrival order.
+  not grow with workers or instances (other sales are served in parallel): about 7,500–8,500
+  requests/s on PostgreSQL and MySQL in local containers, with a run as long as the default
+  `workers.purchase_batch_size` (50). Beyond that the options are longer runs (a larger batch
+  size), or inventory buckets (Open tasks), which would relax strict arrival order.
 - On MySQL, a purchase worker whose machine freezes or vanishes without closing its connection
   holds its transaction, and so its sale's queue, until the server drops the connection: set
   `wait_timeout` (seconds) low enough on the server. PostgreSQL ends such a transaction after

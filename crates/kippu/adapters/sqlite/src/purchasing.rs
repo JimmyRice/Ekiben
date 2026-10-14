@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use kippu_domain::purchase::{LineItem, PurchaseRequest, PurchaseStatus};
 use kippu_domain::reservation::{Reservation, ReservationStatus};
@@ -6,7 +8,7 @@ use kippu_domain::{
 };
 use kippu_store::{
     Hold, Holds, Insertion, InventoryTx, Keyset, LineItems, PageRequest, PurchaseStore,
-    PurchasesTx, QueuedRequest, ReservationsTx, StoreError, StoreResult,
+    PurchasesTx, QueuedRequest, QuotaLines, ReservationsTx, StoreError, StoreResult,
 };
 use uuid::Uuid;
 
@@ -25,6 +27,20 @@ const PURCHASE_REQUEST_COLUMNS: &str = "id, account_id, sale_id, basket, status,
 const RESERVATION_COLUMNS: &str = "SELECT id, purchase_request_id, account_id, sale_id, event_id, \
      items, total_minor, currency, environment, status, attestor_id, expires_at, created_at, \
      updated_at FROM reservations";
+
+/// The most rows one multi-row statement carries, keeping its parameters far below SQLite's
+/// limit of 32,766 for every table written this way.
+const ROWS_PER_STATEMENT: usize = 1_000;
+
+/// `count` copies of `row`, comma-separated: the rows of a multi-row statement.
+fn rows(row: &str, count: usize) -> String {
+    vec![row; count].join(", ")
+}
+
+/// Converts a count read from an INTEGER column.
+fn uncount(value: i64) -> StoreResult<u32> {
+    u32::try_from(value).map_err(StoreError::backend)
+}
 
 #[async_trait]
 impl PurchaseStore for SqliteStore {
@@ -283,6 +299,39 @@ impl PurchasesTx for SqliteTx {
         .map_err(error)?;
         Ok(())
     }
+
+    async fn set_purchase_statuses(
+        &mut self,
+        outcomes: &[(PurchaseRequestId, PurchaseStatus)],
+        now: Timestamp,
+    ) -> StoreResult<()> {
+        for chunk in outcomes.chunks(ROWS_PER_STATEMENT) {
+            let statement = format!(
+                "WITH outcome (id, status, reservation_id, rejection_reason) AS (VALUES {})
+                 UPDATE purchase_requests
+                 SET status = outcome.status, reservation_id = outcome.reservation_id,
+                     rejection_reason = outcome.rejection_reason, lease_until = NULL,
+                     updated_at = ?
+                 FROM outcome WHERE purchase_requests.id = outcome.id",
+                rows("(?, ?, ?, ?)", chunk.len())
+            );
+            let mut query = sqlx::query(sqlx::AssertSqlSafe(statement));
+            for &(id, status) in chunk {
+                let columns = purchase_status(status);
+                query = query
+                    .bind(id.as_uuid())
+                    .bind(columns.status)
+                    .bind(columns.reservation_id)
+                    .bind(columns.rejection_reason);
+            }
+            query
+                .bind(micros(now))
+                .execute(&mut *self.conn)
+                .await
+                .map_err(error)?;
+        }
+        Ok(())
+    }
 }
 
 impl SqliteTx {
@@ -338,9 +387,20 @@ fn bind_item(query: SqliteQuery<'_>, item: LineItem) -> SqliteQuery<'_> {
 
 #[async_trait]
 impl InventoryTx for SqliteTx {
-    async fn lock_stock(&mut self, _items: &LineItems) -> StoreResult<()> {
+    async fn lock_stock(&mut self, items: &LineItems) -> StoreResult<Vec<u32>> {
         // Transactions begin with BEGIN IMMEDIATE: the one writer holds every row already.
-        Ok(())
+        let mut available = Vec::with_capacity(items.len());
+        for item in items {
+            let left = sqlx::query_scalar::<_, i64>(
+                "SELECT capacity - held - sold FROM inventory WHERE ticket_type_id = ?1",
+            )
+            .bind(item.ticket_type_id.as_uuid())
+            .fetch_optional(&mut *self.conn)
+            .await
+            .map_err(error)?;
+            available.push(left.map_or(Ok(0), uncount)?);
+        }
+        Ok(available)
     }
 
     async fn try_hold(&mut self, items: &LineItems) -> StoreResult<bool> {
@@ -433,6 +493,55 @@ impl InventoryTx for SqliteTx {
         }
         Ok(())
     }
+
+    async fn lock_quotas(&mut self, lines: &QuotaLines) -> StoreResult<Vec<u32>> {
+        // Transactions begin with BEGIN IMMEDIATE: the one writer holds every row already.
+        let mut taken = HashMap::with_capacity(lines.len());
+        for chunk in lines.chunks(ROWS_PER_STATEMENT) {
+            let mut select = sqlx::query_as::<_, (Uuid, Uuid, i64)>(sqlx::AssertSqlSafe(format!(
+                "SELECT account_id, ticket_type_id, taken FROM quotas
+                 WHERE (account_id, ticket_type_id) IN (VALUES {})",
+                rows("(?, ?)", chunk.len())
+            )));
+            for line in chunk {
+                select = select
+                    .bind(line.account_id.as_uuid())
+                    .bind(line.ticket_type_id.as_uuid());
+            }
+            for (account, ticket_type, count) in
+                select.fetch_all(&mut *self.conn).await.map_err(error)?
+            {
+                taken.insert((account, ticket_type), count);
+            }
+        }
+        lines
+            .iter()
+            .map(|line| {
+                taken
+                    .get(&(line.account_id.as_uuid(), line.ticket_type_id.as_uuid()))
+                    .copied()
+                    .map_or(Ok(0), uncount)
+            })
+            .collect()
+    }
+
+    async fn take_quotas(&mut self, lines: &QuotaLines) -> StoreResult<()> {
+        for chunk in lines.chunks(ROWS_PER_STATEMENT) {
+            let mut query = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "INSERT INTO quotas (account_id, ticket_type_id, taken) VALUES {}
+                 ON CONFLICT (account_id, ticket_type_id) DO UPDATE SET taken = taken + excluded.taken",
+                rows("(?, ?, ?)", chunk.len())
+            )));
+            for line in chunk {
+                query = query
+                    .bind(line.account_id.as_uuid())
+                    .bind(line.ticket_type_id.as_uuid())
+                    .bind(line.quantity);
+            }
+            query.execute(&mut *self.conn).await.map_err(error)?;
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -461,6 +570,40 @@ impl ReservationsTx for SqliteTx {
         .execute(&mut *self.conn)
         .await
         .map_err(unique("purchase_request_id"))?;
+        Ok(())
+    }
+
+    async fn insert_reservations(&mut self, reservations: &[Reservation]) -> StoreResult<()> {
+        for chunk in reservations.chunks(ROWS_PER_STATEMENT) {
+            let mut query = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "INSERT INTO reservations (id, purchase_request_id, account_id, sale_id, event_id,
+                                           items, total_minor, currency, environment, status,
+                                           attestor_id, expires_at, created_at, updated_at)
+                 VALUES {}",
+                rows("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", chunk.len())
+            )));
+            for reservation in chunk {
+                query = query
+                    .bind(reservation.id.as_uuid())
+                    .bind(reservation.purchase_request_id.as_uuid())
+                    .bind(reservation.account_id.as_uuid())
+                    .bind(reservation.sale_id.as_uuid())
+                    .bind(reservation.event_id.as_uuid())
+                    .bind(json(&reservation.items)?)
+                    .bind(reservation.total.amount_minor())
+                    .bind(reservation.total.currency().as_str().to_owned())
+                    .bind(reservation.environment.as_str())
+                    .bind(reservation.status.as_str())
+                    .bind(reservation.attestor_id.map(|id| id.as_uuid()))
+                    .bind(micros(reservation.expires_at))
+                    .bind(micros(reservation.created_at))
+                    .bind(micros(reservation.updated_at));
+            }
+            query
+                .execute(&mut *self.conn)
+                .await
+                .map_err(unique("purchase_request_id"))?;
+        }
         Ok(())
     }
 
