@@ -360,6 +360,25 @@ pub async fn reservation_refunds(
         .await?)
 }
 
+/// The caller's refunds, newest first.
+#[tracing::instrument(skip_all)]
+pub async fn my_refunds(
+    state: &AppState,
+    principal: &Principal,
+    page: PageRequest<Keyset>,
+) -> ApiResult<Page<Refund, Keyset>> {
+    let account = principal.require_account()?;
+    state.authorize(principal, REFUNDS_REQUEST, Scope::Account(account))?;
+    let refunds = state
+        .store()
+        .refunds_for_account(account, page.plus_one())
+        .await?;
+    Ok(Page::from_lookahead(refunds, page.limit, |refund| Keyset {
+        at: refund.created_at,
+        id: refund.id.as_uuid(),
+    }))
+}
+
 /// An event's refunds, all of them or those in `status`, oldest first, for its organizers —
 /// e.g. the pending refunds of cash taken in person, to hand back and confirm.
 #[tracing::instrument(skip_all)]

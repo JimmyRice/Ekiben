@@ -249,6 +249,9 @@ GET /v1/organizations HTTP/1.1
 Host: localhost:8080
 ```
 
+For readable URLs, `GET /v1/events/by-slug/{slug}` and `GET /v1/organizations/by-slug/{slug}`
+find one by its slug, under the same rules as by id.
+
 Ask for two tickets. The request is queued durably and answered with `202 Accepted` and a
 `Location`; sending it again with the same `Idempotency-Key` returns the same request instead
 of buying twice:
@@ -292,7 +295,8 @@ Content-Type: application/json
 { "attestor_id": "{{attestor_id}}" }
 ```
 
-The organizer follows orders as they come in: `GET /v1/events/{{event_id}}/reservations`
+The organizer follows orders as they come in: the stock of each ticket type
+(`GET /v1/sales/{{sale_id}}/inventory`: held, sold, left), `GET /v1/events/{{event_id}}/reservations`
 (optionally `?status=issued`), each reservation and its tickets
 (`GET /v1/reservations/{{reservation_id}}/tickets`, without the signed bytes, which only the
 holder gets), and the refunds still to hand back in cash

@@ -74,6 +74,8 @@ impl ProblemKind {
     pub const EMAIL_ALREADY_REGISTERED: Self = Self::new("email-already-registered");
     /// A sandbox payment method cannot pay for a live sale.
     pub const ENVIRONMENT_MISMATCH: Self = Self::new("environment-mismatch");
+    /// Only a draft event without sales can be deleted.
+    pub const EVENT_NOT_DELETABLE: Self = Self::new("event-not-deletable");
     /// Authenticated, but not allowed.
     pub const FORBIDDEN: Self = Self::new("forbidden");
     /// The `Idempotency-Key` was used for a different request.
@@ -138,13 +140,14 @@ impl ProblemKind {
     pub const WRONG_PASSWORD: Self = Self::new("wrong-password");
 
     /// Every kind Kippu itself reports.
-    pub const ALL: [Self; 37] = [
+    pub const ALL: [Self; 38] = [
         Self::ADMISSION_REQUIRED,
         Self::AMOUNT_MISMATCH,
         Self::ATTESTOR_NOT_ACCEPTED,
         Self::CONFLICT,
         Self::EMAIL_ALREADY_REGISTERED,
         Self::ENVIRONMENT_MISMATCH,
+        Self::EVENT_NOT_DELETABLE,
         Self::FORBIDDEN,
         Self::IDEMPOTENCY_KEY_REUSED,
         Self::IDENTITY_LINKED_ELSEWHERE,
@@ -432,6 +435,7 @@ mod tests {
                 "conflict",
                 "email-already-registered",
                 "environment-mismatch",
+                "event-not-deletable",
                 "forbidden",
                 "idempotency-key-reused",
                 "identity-linked-elsewhere",

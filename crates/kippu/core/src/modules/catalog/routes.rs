@@ -4,12 +4,13 @@
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use kippu_domain::catalog::{Event, EventSummary, Sale, TicketType};
+use kippu_domain::validation::Slug;
 use kippu_domain::{EventId, OrganizationId, SaleId, TicketTypeId};
 
 use super::dto::{
-    CreateEventRequest, EventPatch, EventsQuery, OrganizationProfile, SaleDetail, SalePatch,
-    SaleRequest, TicketTypeOffer, TicketTypePatch, TicketTypeRequest, UpdateEventRequest,
-    event_listing, required_version,
+    CreateEventRequest, EventPatch, EventsQuery, InventoryView, OrganizationProfile, SaleDetail,
+    SalePatch, SaleRequest, TicketTypeOffer, TicketTypePatch, TicketTypeRequest,
+    UpdateEventRequest, event_listing, required_version,
 };
 use super::service;
 use crate::app::AppState;
@@ -75,6 +76,24 @@ pub(crate) async fn get_organization(
     ))
 }
 
+/// An organization by its slug, under the same rules as by its id.
+#[utoipa::path(
+    get, path = "/v1/organizations/by-slug/{slug}", tag = TAG,
+    params(("slug" = String, Path)),
+    responses((status = 200, body = OrganizationProfile), (status = 404, body = Problem))
+)]
+pub(crate) async fn get_organization_by_slug(
+    State(state): State<AppState>,
+    principal: Option<Principal>,
+    Path(slug): Path<Slug>,
+) -> ApiResult<Json<OrganizationProfile>> {
+    Ok(Json(
+        service::visible_organization_by_slug(&state, principal.as_ref(), &slug)
+            .await?
+            .into(),
+    ))
+}
+
 /// An organization's events, one page at a time: published and cancelled ones for everyone,
 /// drafts too for its organizers. Listings leave out each event's `content`.
 #[utoipa::path(
@@ -119,6 +138,22 @@ pub(crate) async fn create_event(
 ) -> ApiResult<(StatusCode, Json<Event>)> {
     let event = service::create_event(&state, &principal, organization_id, request.into()).await?;
     Ok((StatusCode::CREATED, Json(event)))
+}
+
+/// An event by its slug, under the same rules as by its id.
+#[utoipa::path(
+    get, path = "/v1/events/by-slug/{slug}", tag = TAG,
+    params(("slug" = String, Path)),
+    responses((status = 200, body = Event), (status = 404, body = Problem))
+)]
+pub(crate) async fn get_event_by_slug(
+    State(state): State<AppState>,
+    principal: Option<Principal>,
+    Path(slug): Path<Slug>,
+) -> ApiResult<Json<Event>> {
+    Ok(Json(
+        service::event_by_slug(&state, principal.as_ref(), &slug).await?,
+    ))
 }
 
 /// An event.
@@ -177,6 +212,27 @@ pub(crate) async fn patch_event(
     ))
 }
 
+/// Delete a draft that has no sales, with its images. Cancel a published event instead.
+#[utoipa::path(
+    delete, path = "/v1/events/{event_id}", tag = TAG,
+    security(("bearer" = [])),
+    params(("event_id" = EventId, Path)),
+    responses(
+        (status = 204),
+        (status = 403, body = Problem),
+        (status = 404, body = Problem),
+        (status = 409, description = "Not a draft, or it has a sale", body = Problem)
+    )
+)]
+pub(crate) async fn delete_event(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(event_id): Path<EventId>,
+) -> ApiResult<StatusCode> {
+    service::delete_event(&state, &principal, event_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// The sales of an event, with availability.
 #[utoipa::path(
     get, path = "/v1/events/{event_id}/sales", tag = TAG,
@@ -210,6 +266,29 @@ pub(crate) async fn create_sale(
 ) -> ApiResult<(StatusCode, Json<Sale>)> {
     let sale = service::create_sale(&state, &principal, event_id, request.into()).await?;
     Ok((StatusCode::CREATED, Json(sale)))
+}
+
+/// The stock of every ticket type of a sale, for its organizers: held by unpaid reservations,
+/// sold, and left.
+#[utoipa::path(
+    get, path = "/v1/sales/{sale_id}/inventory", tag = TAG,
+    security(("bearer" = [])),
+    params(("sale_id" = SaleId, Path)),
+    responses(
+        (status = 200, body = Listing<InventoryView>),
+        (status = 403, body = Problem),
+        (status = 404, body = Problem)
+    )
+)]
+pub(crate) async fn get_sale_inventory(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(sale_id): Path<SaleId>,
+) -> ApiResult<Json<Listing<InventoryView>>> {
+    let inventory = service::sale_inventory(&state, &principal, sale_id).await?;
+    Ok(Json(Listing::all(
+        inventory.into_iter().map(InventoryView::from).collect(),
+    )))
 }
 
 /// A sale, with its ticket types and availability.
@@ -365,6 +444,22 @@ pub(crate) async fn list_favorites(
         ListingTag::FAVORITES,
         |event| event,
     )))
+}
+
+/// Whether an event is one of your favourites: 204 if it is, 404 if not.
+#[utoipa::path(
+    get, path = "/v1/me/favorites/{event_id}", tag = TAG,
+    security(("bearer" = [])),
+    params(("event_id" = EventId, Path)),
+    responses((status = 204), (status = 404, body = Problem))
+)]
+pub(crate) async fn get_favorite(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(event_id): Path<EventId>,
+) -> ApiResult<StatusCode> {
+    service::favorite(&state, &principal, event_id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Mark an event as a favourite.

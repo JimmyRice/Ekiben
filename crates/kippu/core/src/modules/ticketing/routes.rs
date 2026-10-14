@@ -6,12 +6,12 @@ use axum::http::header::CONTENT_TYPE;
 use axum::response::IntoResponse;
 use kippu_domain::{ReservationId, TicketId};
 
-use super::dto::{TicketKeys, TicketView};
+use super::dto::{TicketKeys, TicketView, TicketsQuery};
 use super::service;
 use crate::app::AppState;
 use crate::auth::Principal;
 use crate::error::{ApiResult, Problem};
-use crate::http::{Json, Listing, ListingTag, PageQuery};
+use crate::http::{Json, Listing, ListingTag};
 
 const TAG: &str = "ticketing";
 
@@ -24,20 +24,20 @@ pub(crate) async fn ticket_keys(State(state): State<AppState>) -> Json<TicketKey
     Json(service::gate_keys(&state).into())
 }
 
-/// Your tickets, most recently issued first.
+/// Your tickets, most recently issued first; with `event_id`, those for one event.
 #[utoipa::path(
     get, path = "/v1/me/tickets", tag = TAG,
     security(("bearer" = [])),
-    params(PageQuery),
+    params(TicketsQuery),
     responses((status = 200, body = Listing<TicketView>), (status = 400, body = Problem))
 )]
 pub(crate) async fn my_tickets(
     State(state): State<AppState>,
     principal: Principal,
-    Query(query): Query<PageQuery>,
+    Query(query): Query<TicketsQuery>,
 ) -> ApiResult<Json<Listing<TicketView>>> {
-    let page = query.page(ListingTag::TICKETS)?;
-    let tickets = service::tickets(&state, &principal, page).await?;
+    let (event, page) = query.into_parts()?;
+    let tickets = service::tickets(&state, &principal, event, page).await?;
     Ok(Json(Listing::page(
         tickets,
         ListingTag::TICKETS,

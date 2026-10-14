@@ -46,18 +46,19 @@ pub fn gate_keys(state: &AppState) -> GateKeys {
     }
 }
 
-/// The caller's tickets, most recently issued first.
+/// The caller's tickets, all of them or those for `event`, most recently issued first.
 #[tracing::instrument(skip_all)]
 pub async fn tickets(
     state: &AppState,
     principal: &Principal,
+    event: Option<EventId>,
     page: PageRequest<Keyset>,
 ) -> ApiResult<Page<TicketDetails, Keyset>> {
     let account = principal.require_account()?;
     state.authorize(principal, TICKETS_READ, Scope::Account(account))?;
     let tickets = state
         .store()
-        .tickets_for_account(account, page.plus_one())
+        .tickets_for_account(account, event, page.plus_one())
         .await?;
     let page = Page::from_lookahead(tickets, page.limit, |ticket| Keyset {
         at: ticket.issued_at,

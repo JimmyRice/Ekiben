@@ -898,3 +898,47 @@ async fn buyers_see_the_payment_methods_a_sale_accepts() {
         .await;
     assert_eq!(unknown.status, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn organizers_watch_the_waiting_room_fill_and_advance() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({ "admission": { "mode": "waiting_room", "admit_per_tick": 2, "max_backlog": 100 } })).await;
+    let path = format!("/v1/sales/{}/waiting-room", shop.sale_id);
+    let buyer = app.buyer().await;
+    for _ in 0..3 {
+        let joined = app
+            .call(Method::POST, &path, Some(&app.buyer().await), None)
+            .await;
+        assert_eq!(joined.status, StatusCode::OK);
+    }
+    let progress = async || {
+        app.call(Method::GET, &path, Some(&shop.organizer), None)
+            .await
+            .body
+    };
+    assert_eq!(
+        progress().await,
+        json!({ "last_position": 3, "admitted_through": 0 })
+    );
+    app.drain("admission").await;
+    assert_eq!(
+        progress().await,
+        json!({ "last_position": 3, "admitted_through": 2 })
+    );
+
+    let other = app.shop(10, 1_000, json!({})).await;
+    for token in [&buyer, &other.organizer] {
+        let refused = app.call(Method::GET, &path, Some(token), None).await;
+        assert_eq!(refused.status, StatusCode::FORBIDDEN);
+    }
+    let open = app
+        .call(
+            Method::GET,
+            &format!("/v1/sales/{}/waiting-room", other.sale_id),
+            Some(&other.organizer),
+            None,
+        )
+        .await;
+    assert_eq!(open.status, StatusCode::CONFLICT);
+    assert_eq!(open.body["type"], "urn:kippu:problem:no-waiting-room");
+}

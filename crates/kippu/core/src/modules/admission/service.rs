@@ -2,7 +2,7 @@
 //! and the task that lets the next batch in.
 
 use kippu_domain::SaleId;
-use kippu_domain::admission::AdmissionPolicy;
+use kippu_domain::admission::{AdmissionPolicy, WaitingRoom};
 use kippu_store::BoxError;
 
 use crate::app::AppState;
@@ -10,7 +10,7 @@ use crate::auth::tokens::IssuedToken;
 use crate::auth::{Principal, Scope};
 use crate::error::{ApiError, ApiResult, ProblemKind, StatusCode};
 use crate::module::Progress;
-use crate::modules::catalog::service::visible_sale;
+use crate::modules::catalog::service::{visible_sale, writable_sale};
 use crate::modules::purchasing::permissions::PURCHASES_CREATE;
 
 /// A buyer's place in a waiting room.
@@ -44,6 +44,30 @@ fn admission_required() -> ApiError {
     )
 }
 
+#[track_caller]
+fn no_waiting_room() -> ApiError {
+    ApiError::new(
+        StatusCode::CONFLICT,
+        ProblemKind::NO_WAITING_ROOM,
+        "this sale has no waiting room",
+    )
+}
+
+/// How far a sale's waiting room has got, for its organizers: the last position handed out
+/// and how far admission has reached.
+#[tracing::instrument(skip_all)]
+pub async fn waiting_room(
+    state: &AppState,
+    principal: &Principal,
+    sale_id: SaleId,
+) -> ApiResult<WaitingRoom> {
+    let (sale, _) = writable_sale(state, principal, sale_id).await?;
+    if !matches!(sale.admission, AdmissionPolicy::WaitingRoom { .. }) {
+        return Err(no_waiting_room());
+    }
+    Ok(state.store().waiting_room(sale.id).await?)
+}
+
 /// Joins a sale's waiting room.
 #[tracing::instrument(skip_all)]
 pub async fn join_waiting_room(
@@ -55,11 +79,7 @@ pub async fn join_waiting_room(
     state.authorize(principal, PURCHASES_CREATE, Scope::Account(account))?;
     let (sale, _) = visible_sale(state, Some(principal), sale_id).await?;
     if !matches!(sale.admission, AdmissionPolicy::WaitingRoom { .. }) {
-        return Err(ApiError::new(
-            StatusCode::CONFLICT,
-            ProblemKind::NO_WAITING_ROOM,
-            "this sale has no waiting room",
-        ));
+        return Err(no_waiting_room());
     }
     let position = state.store().join_waiting_room(sale.id).await?;
     let token = state

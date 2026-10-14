@@ -2,11 +2,39 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use kippu_domain::ticket::TicketStatus;
 use kippu_domain::{EventId, ReservationId, TicketId, TicketTypeId, Timestamp};
-use serde::Serialize;
-use utoipa::ToSchema;
+use kippu_store::{Keyset, PageRequest};
+use serde::{Deserialize, Serialize};
+use utoipa::{IntoParams, ToSchema};
 
 use super::service::{GateKeys, TicketDetails};
+use crate::error::ApiError;
+use crate::http::{ListingTag, PageQuery};
 use crate::keys::PublishedKey;
+
+/// Which of your tickets to list, and which page.
+#[derive(Debug, Default, Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
+#[into_params(parameter_in = Query)]
+pub struct TicketsQuery {
+    /// Only tickets for this event.
+    pub event_id: Option<EventId>,
+    /// At most this many tickets (default 50, at most 200).
+    pub limit: Option<u32>,
+    /// The `next_cursor` of the previous page. Keep the other parameters as they were.
+    pub cursor: Option<String>,
+}
+
+impl TicketsQuery {
+    /// The event to list tickets for, if one, and the page.
+    pub(crate) fn into_parts(self) -> Result<(Option<EventId>, PageRequest<Keyset>), ApiError> {
+        let page = PageQuery {
+            limit: self.limit,
+            cursor: self.cursor,
+        }
+        .page(ListingTag::TICKETS)?;
+        Ok((self.event_id, page))
+    }
+}
 
 /// A ticket, and its signed bytes for its holder.
 #[derive(Debug, Serialize, ToSchema)]

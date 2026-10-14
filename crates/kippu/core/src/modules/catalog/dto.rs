@@ -2,11 +2,11 @@ use std::collections::BTreeMap;
 
 use kippu_domain::account::Organization;
 use kippu_domain::admission::AdmissionPolicy;
-use kippu_domain::catalog::{Address, EventStatus, Sale, TicketType};
+use kippu_domain::catalog::{Address, EventStatus, Inventory, Sale, TicketType};
 use kippu_domain::payment::Environment;
 use kippu_domain::validation::CountryCode;
 use kippu_domain::validation::Slug;
-use kippu_domain::{AttestorId, Money, OrganizationId, Timestamp, ValidationError};
+use kippu_domain::{AttestorId, Money, OrganizationId, TicketTypeId, Timestamp, ValidationError};
 use kippu_store::{EventFilter, EventOrder, Keyset, PageRequest};
 use serde::{Deserialize, Deserializer, Serialize};
 use utoipa::{IntoParams, ToSchema};
@@ -43,6 +43,33 @@ impl From<Organization> for OrganizationProfile {
             id: organization.id,
             slug: organization.slug,
             name: organization.name,
+        }
+    }
+}
+
+/// The stock of a ticket type.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct InventoryView {
+    /// The ticket type.
+    pub ticket_type_id: TicketTypeId,
+    /// How many tickets it has in all.
+    pub capacity: u32,
+    /// Held by reservations not paid yet.
+    pub held: u32,
+    /// Sold (refunded tickets return to the stock).
+    pub sold: u32,
+    /// Left to buy: `capacity - held - sold`. Capacity can drop no lower than `held + sold`.
+    pub available: u32,
+}
+
+impl From<Inventory> for InventoryView {
+    fn from(inventory: Inventory) -> Self {
+        Self {
+            ticket_type_id: inventory.ticket_type_id,
+            capacity: inventory.capacity,
+            held: inventory.held,
+            sold: inventory.sold,
+            available: inventory.available(),
         }
     }
 }

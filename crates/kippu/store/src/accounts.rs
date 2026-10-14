@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use kippu_domain::account::{Account, Identity, Organization, Role};
-use kippu_domain::validation::{Email, ProviderName, Subject};
+use kippu_domain::validation::{Email, ProviderName, Slug, Subject};
 use kippu_domain::{AccountId, OrganizationId, SessionId, Timestamp};
 
 use crate::{Insertion, PageRequest, StoreResult};
@@ -155,6 +155,9 @@ pub trait AccountStore {
 
     /// Looks an organization up by id.
     async fn organization(&self, id: OrganizationId) -> StoreResult<Option<Organization>>;
+
+    /// Looks an organization up by slug.
+    async fn organization_by_slug(&self, slug: &Slug) -> StoreResult<Option<Organization>>;
 
     /// Replaces an organization's slug and name if its stored version is still
     /// `expected_version`; fails with `Conflict("version")` if not (or if it does not exist),

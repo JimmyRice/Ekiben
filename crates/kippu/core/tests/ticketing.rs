@@ -151,3 +151,59 @@ async fn organizers_see_their_events_tickets_without_the_signed_bytes() {
         assert_eq!(stranger.status, StatusCode::NOT_FOUND, "{path}");
     }
 }
+
+#[tokio::test]
+async fn a_buyers_tickets_are_listed_per_event() {
+    let app = TestApp::start().await;
+    let buyer = app.buyer().await;
+    let mut events = Vec::new();
+    for _ in 0..2 {
+        let shop = app.shop(10, 0, json!({})).await;
+        let reservation = app.reserve(&buyer, &shop, 1).await;
+        let checkout = app
+            .call(
+                Method::POST,
+                &format!(
+                    "/v1/reservations/{}/checkout",
+                    reservation["id"].as_str().unwrap()
+                ),
+                Some(&buyer),
+                Some(json!({})),
+            )
+            .await;
+        assert_eq!(checkout.body["status"], "issued", "{:?}", checkout.body);
+        events.push(shop.event_id);
+    }
+
+    let all = app
+        .call(Method::GET, "/v1/me/tickets", Some(&buyer), None)
+        .await;
+    assert_eq!(all.body["items"].as_array().unwrap().len(), 2);
+    for event in &events {
+        let one = app
+            .call(
+                Method::GET,
+                &format!("/v1/me/tickets?event_id={event}"),
+                Some(&buyer),
+                None,
+            )
+            .await;
+        assert_eq!(one.status, StatusCode::OK, "{:?}", one.body);
+        let listed: Vec<&Value> = one.body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|ticket| &ticket["event_id"])
+            .collect();
+        assert_eq!(listed, [&json!(event)]);
+    }
+    let malformed = app
+        .call(
+            Method::GET,
+            "/v1/me/tickets?event_id=not-an-id",
+            Some(&buyer),
+            None,
+        )
+        .await;
+    assert_eq!(malformed.status, StatusCode::BAD_REQUEST);
+}

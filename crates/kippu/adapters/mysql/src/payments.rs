@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use kippu_domain::payment::{Attestor, AttestorKey, PaymentAttestation, PaymentDisposition};
 use kippu_domain::refund::{Refund, RefundStatus};
-use kippu_domain::{AttestorId, EventId, RefundId, ReservationId, Timestamp};
+use kippu_domain::{AccountId, AttestorId, EventId, RefundId, ReservationId, Timestamp};
 use kippu_store::{Insertion, Keyset, PageRequest, PaymentStore, PaymentsTx, StoreResult};
 
 use crate::convert::{
@@ -178,6 +178,29 @@ impl PaymentStore for MySqlStore {
             "{REFUND_COLUMNS} WHERE reservation_id = ? ORDER BY created_at, id"
         )))
         .bind(reservation.as_uuid())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(error)?;
+        all(rows)
+    }
+
+    async fn refunds_for_account(
+        &self,
+        account: AccountId,
+        page: PageRequest<Keyset>,
+    ) -> StoreResult<Vec<Refund>> {
+        let after_at = page.after.map(|after| micros(after.at));
+        let rows = sqlx::query_as::<_, RefundRow>(sqlx::AssertSqlSafe(format!(
+            "{REFUND_COLUMNS} WHERE account_id = ?
+               AND (? IS NULL OR created_at < ? OR (created_at = ? AND id > ?))
+             ORDER BY created_at DESC, id LIMIT ?"
+        )))
+        .bind(account.as_uuid())
+        .bind(after_at)
+        .bind(after_at)
+        .bind(after_at)
+        .bind(page.after.map(|after| after.id))
+        .bind(page.limit)
         .fetch_all(&self.pool)
         .await
         .map_err(error)?;

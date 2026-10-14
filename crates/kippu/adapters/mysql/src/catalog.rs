@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use kippu_domain::admission::WaitingRoom;
 use kippu_domain::catalog::{Event, EventSummary, Inventory, Sale, TicketType};
-use kippu_domain::validation::CountryCode;
+use kippu_domain::validation::{CountryCode, Slug};
 use kippu_domain::{AccountId, EventId, SaleId, TicketTypeId, Timestamp};
 use kippu_store::{
     CatalogStore, EventFilter, EventOrder, Favorite, Keyset, PageRequest, StoreError, StoreResult,
@@ -134,6 +134,17 @@ impl CatalogStore for MySqlStore {
         optional(row)
     }
 
+    async fn event_by_slug(&self, slug: &Slug) -> StoreResult<Option<Event>> {
+        let row = sqlx::query_as::<_, EventRow>(sqlx::AssertSqlSafe(format!(
+            "{EVENT_COLUMNS} WHERE slug = ?"
+        )))
+        .bind(slug.as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(error)?;
+        optional(row)
+    }
+
     async fn event_summary(&self, id: EventId) -> StoreResult<Option<EventSummary>> {
         let row = sqlx::query_as::<_, EventSummaryRow>(sqlx::AssertSqlSafe(format!(
             "{EVENT_SUMMARY_COLUMNS} WHERE id = ?"
@@ -197,6 +208,34 @@ impl CatalogStore for MySqlStore {
         .await
         .map_err(error)?;
         all(rows)
+    }
+
+    async fn delete_draft_event(&self, id: EventId) -> StoreResult<bool> {
+        let mut tx = self.pool.begin().await.map_err(error)?;
+        // Denials name the event without cascading; images and favourites cascade.
+        sqlx::query("DELETE FROM denials WHERE event_id = ?")
+            .bind(id.as_uuid())
+            .execute(&mut *tx)
+            .await
+            .map_err(error)?;
+        let deleted = sqlx::query(
+            "DELETE FROM events WHERE id = ? AND status = 'draft'
+               AND NOT EXISTS (SELECT 1 FROM sales WHERE event_id = ?)",
+        )
+        .bind(id.as_uuid())
+        .bind(id.as_uuid())
+        .execute(&mut *tx)
+        .await
+        .map_err(error);
+        match deleted {
+            Ok(result) if result.rows_affected() == 1 => {
+                tx.commit().await.map_err(error)?;
+                Ok(true)
+            }
+            // A sale committed meanwhile still references the event.
+            Ok(_) | Err(StoreError::Conflict("reference")) => Ok(false),
+            Err(other) => Err(other),
+        }
     }
 
     async fn insert_sale(&self, sale: &Sale) -> StoreResult<()> {
@@ -424,6 +463,18 @@ impl CatalogStore for MySqlStore {
             .await
             .map_err(error)?;
         Ok(())
+    }
+
+    async fn is_favorite(&self, account: AccountId, event: EventId) -> StoreResult<bool> {
+        let found = sqlx::query_scalar::<_, i64>(
+            "SELECT EXISTS (SELECT 1 FROM favorites WHERE account_id = ? AND event_id = ?)",
+        )
+        .bind(account.as_uuid())
+        .bind(event.as_uuid())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(error)?;
+        Ok(found != 0)
     }
 
     async fn favorites(

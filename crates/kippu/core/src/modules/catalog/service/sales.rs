@@ -166,6 +166,18 @@ pub async fn sale_offer(
     offer(state, sale).await
 }
 
+/// The stock of every ticket type of a sale, for its organizers: how much is held by unpaid
+/// reservations and sold, which is how low a capacity may go.
+#[tracing::instrument(skip_all)]
+pub async fn sale_inventory(
+    state: &AppState,
+    principal: &Principal,
+    id: SaleId,
+) -> ApiResult<Vec<Inventory>> {
+    let (sale, _) = writable_sale(state, principal, id).await?;
+    Ok(state.store().sale_inventory(sale.id).await?)
+}
+
 /// Creates a sale for an event.
 #[tracing::instrument(skip_all)]
 pub async fn create_sale(

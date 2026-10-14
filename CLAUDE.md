@@ -38,7 +38,7 @@ Keep the repository root uncluttered and do not add speculative `.gitignore` ent
 ## Commands
 
 ```bash
-cargo test --workspace --all-features                                   # 339 tests incl. e2e over TCP
+cargo test --workspace --all-features                                   # 356 tests incl. e2e over TCP
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets           # default features too
 cargo fmt --all
@@ -220,6 +220,10 @@ as `shop`, `attestor`, `reserve`, `drain`); the full journey over real TCP is
 
 Do not change these unless the user explicitly asks.
 
+- **Kippu stays small.** The API serves what clients need to operate: records, listings,
+  counters the domain keeps anyway (stock). Analytics, reports and dashboards (revenue over
+  time, conversion, audit search) belong to data tools reading the database directly; do not
+  add aggregation endpoints for them.
 - **Ticket format:** compact binary **KP1** — 12-byte header + canonical TLV claims + Ed25519
   signature over `header‖claims` (`spec/ticket-protocol.md`). One signing key for all events;
   KP1's `key_id` already supports a key ring if an organizer ever needs its own.
@@ -232,6 +236,10 @@ Do not change these unless the user explicitly asks.
   (`/v1/events/{id}/reservations`), tickets without the signed bytes (only the holder gets
   those) and refunds (`/v1/events/{id}/refunds`). Cancelling and checking out stay the buyer's.
   Buyers see a sale's `payment-methods` (accepted, unrevoked, environment-compatible attestors).
+- **Deleting events:** only a draft without sales, with its images, favourites and its own
+  denials (`DELETE /v1/events/{id}`, `event-not-deletable` otherwise). A published event is
+  cancelled instead: buyers and gates may know it. Events and organizations are also found by
+  slug (`/by-slug/{slug}`), under the same visibility rules as by id.
 - **Root login:** no separate CLI. Only the root public key is in the config; the private key
   signs an EdDSA JWT of at most 10 minutes locally (`kippu root-token` or any JWT library).
 - **Payments:** the backend integrates no payment provider. Attestors with registered Ed25519

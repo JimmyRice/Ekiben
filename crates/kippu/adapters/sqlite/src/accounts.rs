@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use kippu_domain::account::{Account, Identity, Organization, Role};
-use kippu_domain::validation::{Email, ProviderName, Subject};
+use kippu_domain::validation::{Email, ProviderName, Slug, Subject};
 use kippu_domain::{AccountId, OrganizationId};
 use kippu_store::{
     AccountFilter, AccountStore, Insertion, PageRequest, Session, SessionRenewal, StoreResult,
@@ -386,6 +386,17 @@ impl AccountStore for SqliteStore {
             "{ORGANIZATION_COLUMNS} WHERE id = ?1"
         )))
         .bind(id.as_uuid())
+        .fetch_optional(&self.reader)
+        .await
+        .map_err(error)?;
+        optional(row)
+    }
+
+    async fn organization_by_slug(&self, slug: &Slug) -> StoreResult<Option<Organization>> {
+        let row = sqlx::query_as::<_, OrganizationRow>(sqlx::AssertSqlSafe(format!(
+            "{ORGANIZATION_COLUMNS} WHERE slug = ?1"
+        )))
+        .bind(slug.as_str())
         .fetch_optional(&self.reader)
         .await
         .map_err(error)?;

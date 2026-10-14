@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use kippu_domain::payment::{Attestor, AttestorKey, PaymentAttestation, PaymentDisposition};
 use kippu_domain::refund::{Refund, RefundStatus};
-use kippu_domain::{AttestorId, EventId, RefundId, ReservationId, Timestamp};
+use kippu_domain::{AccountId, AttestorId, EventId, RefundId, ReservationId, Timestamp};
 
 use crate::{Insertion, Keyset, PageRequest, StoreResult};
 
@@ -53,6 +53,13 @@ pub trait PaymentStore {
     /// A reservation's refunds, oldest first (refunds recorded together in id order).
     async fn refunds_for_reservation(&self, reservation: ReservationId)
     -> StoreResult<Vec<Refund>>;
+    /// An account's refunds, newest first (ties in id order), resuming after the position
+    /// `page.after` (`created_at` and id of the last refund).
+    async fn refunds_for_account(
+        &self,
+        account: AccountId,
+        page: PageRequest<Keyset>,
+    ) -> StoreResult<Vec<Refund>>;
     /// An event's refunds, all of them or those in `status`, oldest first (ties in id order),
     /// resuming after the position `page.after` (`created_at` and id of the last refund).
     async fn refunds_for_event(

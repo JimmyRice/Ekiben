@@ -623,3 +623,241 @@ async fn organizations_are_public_once_they_have_a_public_event() {
         .await;
     assert_eq!(unknown.status, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn only_drafts_without_sales_are_deleted() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let other = app.shop(10, 1_000, json!({})).await;
+    let events = format!("/v1/organizations/{}/events", shop.organization_id);
+    let create = |slug: &'static str| {
+        app.call(
+            Method::POST,
+            &events,
+            Some(&shop.organizer),
+            Some(json!({
+                "slug": slug,
+                "title": "Draft",
+                "venue": "Hall",
+                "starts_at": "2031-05-01T10:00:00Z",
+                "ends_at": "2031-05-02T18:00:00Z",
+            })),
+        )
+    };
+    let draft = create("abandoned").await.body;
+    let path = format!("/v1/events/{}", draft["id"].as_str().unwrap());
+
+    // Published events are cancelled instead; a draft with a sale stays.
+    let published = app
+        .call(
+            Method::DELETE,
+            &format!("/v1/events/{}", shop.event_id),
+            Some(&shop.organizer),
+            None,
+        )
+        .await;
+    assert_eq!(published.status, StatusCode::CONFLICT);
+    assert_eq!(
+        published.body["type"],
+        "urn:kippu:problem:event-not-deletable"
+    );
+    let with_sale = create("with-sale").await.body;
+    let sale = app
+        .call(
+            Method::POST,
+            &format!("/v1/events/{}/sales", with_sale["id"].as_str().unwrap()),
+            Some(&shop.organizer),
+            Some(json!({
+                "name": "General",
+                "opens_at": "2031-01-01T00:00:00Z",
+                "closes_at": "2031-04-01T00:00:00Z",
+            })),
+        )
+        .await;
+    assert_eq!(sale.status, StatusCode::CREATED, "{:?}", sale.body);
+    let refused = app
+        .call(
+            Method::DELETE,
+            &format!("/v1/events/{}", with_sale["id"].as_str().unwrap()),
+            Some(&shop.organizer),
+            None,
+        )
+        .await;
+    assert_eq!(refused.status, StatusCode::CONFLICT);
+
+    // Only its organizers may delete a draft; others do not even see it.
+    let stranger = app
+        .call(Method::DELETE, &path, Some(&other.organizer), None)
+        .await;
+    assert_eq!(stranger.status, StatusCode::NOT_FOUND);
+    let deleted = app
+        .call(Method::DELETE, &path, Some(&shop.organizer), None)
+        .await;
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{:?}", deleted.body);
+    let again = app
+        .call(Method::DELETE, &path, Some(&shop.organizer), None)
+        .await;
+    assert_eq!(again.status, StatusCode::NOT_FOUND);
+    // The slug is free again.
+    assert_eq!(create("abandoned").await.status, StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn events_and_organizations_are_found_by_slug() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let event = app
+        .call(
+            Method::GET,
+            &format!("/v1/events/{}", shop.event_id),
+            None,
+            None,
+        )
+        .await
+        .body;
+    let by_slug = app
+        .call(
+            Method::GET,
+            &format!("/v1/events/by-slug/{}", event["slug"].as_str().unwrap()),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(by_slug.status, StatusCode::OK);
+    assert_eq!(by_slug.body, event);
+    let organization = app
+        .call(
+            Method::GET,
+            &format!("/v1/organizations/{}", shop.organization_id),
+            None,
+            None,
+        )
+        .await
+        .body;
+    let by_slug = app
+        .call(
+            Method::GET,
+            &format!(
+                "/v1/organizations/by-slug/{}",
+                organization["slug"].as_str().unwrap()
+            ),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(by_slug.body, organization);
+
+    // A draft and an organization without a public event, under the same rules as by id.
+    let draft = app
+        .call(
+            Method::POST,
+            &format!("/v1/organizations/{}/events", shop.organization_id),
+            Some(&shop.organizer),
+            Some(json!({
+                "slug": "secret-plans",
+                "title": "Draft",
+                "venue": "Hall",
+                "starts_at": "2031-05-01T10:00:00Z",
+                "ends_at": "2031-05-02T18:00:00Z",
+            })),
+        )
+        .await;
+    assert_eq!(draft.status, StatusCode::CREATED);
+    let root = app.root_token();
+    app.call(
+        Method::POST,
+        "/v1/admin/organizations",
+        Some(&root),
+        Some(json!({ "slug": "stealth", "name": "Stealth" })),
+    )
+    .await;
+    for path in [
+        "/v1/events/by-slug/secret-plans",
+        "/v1/organizations/by-slug/stealth",
+    ] {
+        let hidden = app.call(Method::GET, path, None, None).await;
+        assert_eq!(hidden.status, StatusCode::NOT_FOUND, "{path}");
+        let admin = app.call(Method::GET, path, Some(&root), None).await;
+        assert_eq!(admin.status, StatusCode::OK, "{path}");
+    }
+    let own = app
+        .call(
+            Method::GET,
+            "/v1/events/by-slug/secret-plans",
+            Some(&shop.organizer),
+            None,
+        )
+        .await;
+    assert_eq!(own.status, StatusCode::OK);
+    let malformed = app
+        .call(Method::GET, "/v1/events/by-slug/Not%20A%20Slug", None, None)
+        .await;
+    assert_eq!(malformed.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn organizers_read_a_sales_stock() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let other = app.shop(10, 1_000, json!({})).await;
+    let buyer = app.buyer().await;
+    app.reserve(&buyer, &shop, 1).await;
+    let paid = app.reserve(&buyer, &shop, 1).await;
+    let settled = app
+        .call(
+            Method::POST,
+            &format!(
+                "/v1/reservations/{}/manual-payment",
+                paid["id"].as_str().unwrap()
+            ),
+            Some(&shop.organizer),
+            Some(json!({ "attestation_id": "receipt-1", "amount": paid["total"] })),
+        )
+        .await;
+    assert_eq!(settled.body["disposition"], "applied", "{:?}", settled.body);
+
+    let path = format!("/v1/sales/{}/inventory", shop.sale_id);
+    let stock = app
+        .call(Method::GET, &path, Some(&shop.organizer), None)
+        .await;
+    assert_eq!(stock.status, StatusCode::OK, "{:?}", stock.body);
+    assert_eq!(
+        stock.body["items"],
+        json!([{
+            "ticket_type_id": shop.ticket_type_id,
+            "capacity": 10,
+            "held": 1,
+            "sold": 1,
+            "available": 8,
+        }])
+    );
+    for (token, status) in [
+        (Some(other.organizer.as_str()), StatusCode::FORBIDDEN),
+        (Some(buyer.as_str()), StatusCode::FORBIDDEN),
+        (None, StatusCode::UNAUTHORIZED),
+    ] {
+        let refused = app.call(Method::GET, &path, token, None).await;
+        assert_eq!(refused.status, status);
+    }
+}
+
+#[tokio::test]
+async fn a_favourite_is_checked_one_event_at_a_time() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let buyer = app.buyer().await;
+    let path = format!("/v1/me/favorites/{}", shop.event_id);
+    let before = app.call(Method::GET, &path, Some(&buyer), None).await;
+    assert_eq!(before.status, StatusCode::NOT_FOUND);
+    app.call(Method::PUT, &path, Some(&buyer), None).await;
+    let marked = app.call(Method::GET, &path, Some(&buyer), None).await;
+    assert_eq!(marked.status, StatusCode::NO_CONTENT);
+    let someone_else = app.buyer().await;
+    let theirs = app
+        .call(Method::GET, &path, Some(&someone_else), None)
+        .await;
+    assert_eq!(theirs.status, StatusCode::NOT_FOUND);
+    app.call(Method::DELETE, &path, Some(&buyer), None).await;
+    let after = app.call(Method::GET, &path, Some(&buyer), None).await;
+    assert_eq!(after.status, StatusCode::NOT_FOUND);
+}

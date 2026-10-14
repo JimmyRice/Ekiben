@@ -606,3 +606,54 @@ async fn organizers_list_an_events_refunds_to_hand_cash_back() {
         assert_eq!(refused.status, StatusCode::FORBIDDEN);
     }
 }
+
+#[tokio::test]
+async fn buyers_list_their_own_refunds_newest_first() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let buyer = app.buyer().await;
+    let mut refunds = Vec::new();
+    for receipt in ["receipt-a", "receipt-b"] {
+        let reservation = app.reserve(&buyer, &shop, 1).await;
+        let paid = app
+            .call(
+                Method::POST,
+                &format!(
+                    "/v1/reservations/{}/manual-payment",
+                    reservation["id"].as_str().unwrap()
+                ),
+                Some(&shop.organizer),
+                Some(json!({ "attestation_id": receipt, "amount": reservation["total"] })),
+            )
+            .await;
+        assert_eq!(paid.body["disposition"], "applied", "{:?}", paid.body);
+        let refunded = refund(&app, &shop.organizer, &reservation, json!({})).await;
+        assert_eq!(refunded.status, StatusCode::CREATED, "{:?}", refunded.body);
+        refunds.push(refunded.body["id"].clone());
+        app.clock.advance(Duration::minutes(1));
+    }
+    refunds.reverse();
+
+    let mine = app
+        .call(Method::GET, "/v1/me/refunds", Some(&buyer), None)
+        .await;
+    assert_eq!(mine.status, StatusCode::OK, "{:?}", mine.body);
+    let ids: Vec<Value> = mine.body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|refund| refund["id"].clone())
+        .collect();
+    assert_eq!(json!(ids), json!(refunds));
+    let first = app
+        .call(Method::GET, "/v1/me/refunds?limit=1", Some(&buyer), None)
+        .await;
+    assert_eq!(first.body["items"][0]["id"], refunds[0]);
+    assert!(first.body["next_cursor"].is_string());
+
+    let someone_else = app.buyer().await;
+    let theirs = app
+        .call(Method::GET, "/v1/me/refunds", Some(&someone_else), None)
+        .await;
+    assert_eq!(theirs.body["items"], json!([]));
+}

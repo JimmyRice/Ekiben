@@ -19,7 +19,7 @@ use super::signature::Attested;
 use crate::app::AppState;
 use crate::auth::Principal;
 use crate::error::{ApiResult, Problem};
-use crate::http::{Json, Listing, ListingTag};
+use crate::http::{Json, Listing, ListingTag, PageQuery};
 
 const TAG: &str = "payments";
 
@@ -305,6 +305,27 @@ pub(crate) async fn list_event_refunds(
     Ok(Json(Listing::page(
         refunds,
         ListingTag::EVENT_REFUNDS,
+        |refund| refund,
+    )))
+}
+
+/// Your refunds, newest first.
+#[utoipa::path(
+    get, path = "/v1/me/refunds", tag = TAG,
+    security(("bearer" = [])),
+    params(PageQuery),
+    responses((status = 200, body = Listing<Refund>), (status = 400, body = Problem))
+)]
+pub(crate) async fn my_refunds(
+    State(state): State<AppState>,
+    principal: Principal,
+    Query(query): Query<PageQuery>,
+) -> ApiResult<Json<Listing<Refund>>> {
+    let page = query.page(ListingTag::MY_REFUNDS)?;
+    let refunds = service::my_refunds(&state, &principal, page).await?;
+    Ok(Json(Listing::page(
+        refunds,
+        ListingTag::MY_REFUNDS,
         |refund| refund,
     )))
 }
