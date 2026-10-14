@@ -445,6 +445,63 @@ async fn the_waiting_room_admits_in_batches() {
 }
 
 #[tokio::test]
+async fn the_waiting_room_admits_nobody_before_the_sale_opens() {
+    let app = TestApp::start().await;
+    // Within the access tokens' lifetime, so the clock can move to the opening.
+    let opens_at = app.now() + Duration::minutes(10);
+    let shop = app
+        .shop(
+            10,
+            1_000,
+            json!({
+                "opens_at": opens_at.to_string(),
+                "admission": { "mode": "waiting_room", "admit_per_tick": 2, "max_backlog": 100 },
+            }),
+        )
+        .await;
+    let path = format!("/v1/sales/{}/waiting-room", shop.sale_id);
+    let first = app.buyer().await;
+    let place = app.call(Method::POST, &path, Some(&first), None).await;
+    assert_eq!(place.status, StatusCode::OK, "{:?}", place.body);
+    for _ in 0..4 {
+        app.call(Method::POST, &path, Some(&app.buyer().await), None)
+            .await;
+    }
+    let progress = async || {
+        app.call(Method::GET, &path, Some(&shop.organizer), None)
+            .await
+            .body
+    };
+    let ask = async || {
+        app.call(
+            Method::POST,
+            &format!("/v1/sales/{}/admission", shop.sale_id),
+            Some(&first),
+            Some(json!({ "queue_ticket": place.body["queue_ticket"]["token"] })),
+        )
+        .await
+        .body
+    };
+
+    app.drain("admission").await;
+    assert_eq!(
+        progress().await,
+        json!({ "last_position": 5, "admitted_through": 0 }),
+        "an empty backlog before the opening admits nobody"
+    );
+    assert_eq!(ask().await["status"], "waiting");
+
+    app.clock.set(opens_at);
+    app.drain("admission").await;
+    assert_eq!(
+        progress().await,
+        json!({ "last_position": 5, "admitted_through": 2 }),
+        "the opening admits one batch, not the whole room"
+    );
+    assert_eq!(ask().await["status"], "admitted");
+}
+
+#[tokio::test]
 async fn free_tickets_are_issued_at_checkout() {
     let app = TestApp::start().await;
     let shop = app.shop(10, 0, json!({})).await;

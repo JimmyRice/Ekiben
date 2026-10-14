@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! join ──▶ queue ticket (position n) ──poll──▶ waiting … ──▶ admitted: admission pass ──▶ purchase
-//!                         admitted_through advances by a batch per tick, while the backlog is small
+//!       admitted_through advances by a batch per tick once the sale opens, while the backlog is small
 //! ```
 //!
 //! Positions come from the store; tickets and passes are signed tokens, so any instance can

@@ -119,11 +119,13 @@ pub async fn request_admission(
     ))
 }
 
-/// Background task: advances every waiting room by one batch, unless its sale's purchase
-/// backlog is already large. Safe on many instances: the advance is a compare-and-set.
+/// Background task: advances every waiting room by one batch, unless its sale has not opened
+/// yet or its purchase backlog is already large. Safe on many instances: the advance is a
+/// compare-and-set.
 #[tracing::instrument(skip_all)]
 pub(crate) async fn admit_batches(state: AppState) -> Result<Progress, BoxError> {
     let store = state.store();
+    let now = state.now();
     for sale_id in store.pending_waiting_rooms().await? {
         let Some(sale) = store.sale(sale_id).await? else {
             continue;
@@ -135,6 +137,12 @@ pub(crate) async fn admit_batches(state: AppState) -> Result<Progress, BoxError>
         else {
             continue;
         };
+        // Before the sale opens nobody can buy, so the backlog stays empty and the whole room
+        // would be let through before the first purchase. A closed sale keeps draining: its
+        // buyers are turned away by the purchase itself, and the room stops being pending.
+        if now < sale.opens_at {
+            continue;
+        }
         let room = store.waiting_room(sale_id).await?;
         // Only whether the backlog reached the limit matters, so counting stops there.
         let backlog = store.queued_purchase_count(sale_id, max_backlog).await?;

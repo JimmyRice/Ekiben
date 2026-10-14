@@ -1,9 +1,9 @@
 //! Admission control: who may submit a purchase request, and when.
 //!
-//! A waiting room hands out queue positions in arrival order and admits them in batches.
-//! A batch is released only while the purchase backlog is small, so admissions follow the
-//! speed at which workers actually process purchases — the queue applies back-pressure all
-//! the way to the buyer's browser.
+//! A waiting room hands out queue positions in arrival order and, once the sale opens, admits
+//! them in batches. A batch is released only while the purchase backlog is small, so
+//! admissions follow the speed at which workers actually process purchases — the queue
+//! applies back-pressure all the way to the buyer's browser.
 
 use serde::{Deserialize, Serialize};
 
@@ -16,7 +16,8 @@ use crate::validation::ValidationError;
 pub enum AdmissionPolicy {
     /// Anyone may submit purchase requests while the sale is open.
     Open,
-    /// Buyers join a queue and are admitted in batches.
+    /// Buyers join a queue, also before the sale opens, and are admitted in batches from the
+    /// moment it opens.
     WaitingRoom {
         /// How many queue positions are admitted per admission tick.
         admit_per_tick: u32,

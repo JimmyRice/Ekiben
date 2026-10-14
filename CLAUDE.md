@@ -272,6 +272,10 @@ Do not change these unless the user explicitly asks.
 - **Event status and sales:** only a published event sells (front door and worker; a request
   queued before a cancellation is rejected). An event someone ordered for (a reservation not
   expired or cancelled) can be cancelled but not withdrawn to a draft.
+- **Waiting rooms:** buyers may join before the sale opens and keep the order they joined in;
+  nobody is admitted before `opens_at` (with no purchases yet the backlog is empty and would
+  let the whole room through), then one batch per tick while the backlog is below
+  `max_backlog`.
 - **External sign-in:** Kippu ships no OAuth client; forks write a `Module` that calls
   `auth::external::link_or_create` and `auth::sessions::issue` (`docs/external-login.md`).
   Accounts may have no password and no email; merging by email requires a verified email and is
