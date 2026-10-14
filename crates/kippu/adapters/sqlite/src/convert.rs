@@ -85,6 +85,8 @@ pub(crate) struct AccountRow {
     display_name: String,
     role: String,
     created_at: i64,
+    contacts: String,
+    deleted_at: Option<i64>,
 }
 
 impl TryFrom<AccountRow> for Account {
@@ -101,6 +103,8 @@ impl TryFrom<AccountRow> for Account {
             display_name: row.display_name,
             role: parse::<Role>(&row.role)?,
             created_at: instant(row.created_at),
+            contacts: from_json(&row.contacts)?,
+            deleted_at: row.deleted_at.map(instant),
         })
     }
 }

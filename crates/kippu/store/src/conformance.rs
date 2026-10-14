@@ -129,6 +129,10 @@ macro_rules! conformance_tests {
             drafts_without_sales_are_deleted_with_what_hangs_on_them,
             lookups_by_slug_and_favorite,
             a_buyers_tickets_by_event_and_refunds_resume_exactly,
+            profiles_change_until_the_account_closes,
+            closed_accounts_keep_their_records,
+            closed_accounts_retire_their_email,
+            orders_count_while_someone_buys,
         );
     };
     (@cases $mode:tt; $($case:ident),* $(,)?) => {
@@ -168,6 +172,8 @@ async fn account(store: &dyn Store) -> AccountId {
         display_name: "Buyer".to_owned(),
         role: Role::User,
         created_at: now(),
+        contacts: BTreeMap::new(),
+        deleted_at: None,
     };
     store.insert_account(&account, Some("hash")).await.unwrap();
     account.id
@@ -344,6 +350,8 @@ pub async fn unique_keys_report_conflicts(store: Arc<dyn Store>) {
         display_name: "Twin".to_owned(),
         role: Role::User,
         created_at: now(),
+        contacts: BTreeMap::new(),
+        deleted_at: None,
     };
     store.insert_account(&account, Some("hash")).await.unwrap();
     let twin = Account {
@@ -950,6 +958,8 @@ fn passwordless(email: Option<Email>) -> Account {
         display_name: "Social".to_owned(),
         role: Role::User,
         created_at: now(),
+        contacts: BTreeMap::new(),
+        deleted_at: None,
     }
 }
 
@@ -1116,14 +1126,14 @@ pub async fn identities_link_to_one_account(store: Arc<dyn Store>) {
 
     let listed = store.identities(owner).await.unwrap();
     assert_eq!(listed, vec![wechat.clone()]);
-    assert!(store.delete_account(owner).await.unwrap());
+    assert!(store.close_account(owner, None, now()).await.unwrap());
     assert_eq!(
         store
             .identity_account(&wechat.provider, &wechat.subject)
             .await
             .unwrap(),
-        None,
-        "identities go with their account"
+        Some(owner),
+        "identities stay with a closed account, so they never sign up anew"
     );
 }
 
@@ -2547,6 +2557,8 @@ pub async fn account_listings_filter_and_members_resume_exactly(store: Arc<dyn S
             display_name: "Someone".to_owned(),
             role,
             created_at: now(),
+            contacts: BTreeMap::new(),
+            deleted_at: None,
         };
         store.insert_account(&account, Some("hash")).await.unwrap();
         accounts.push(account);
@@ -3013,4 +3025,221 @@ pub async fn a_buyers_tickets_by_event_and_refunds_resume_exactly(store: Arc<dyn
         .await;
         assert_eq!(listed, refunds, "refunds in pages of {size}");
     }
+}
+
+// ── Profiles and closed accounts ─────────────────────────────────────────────────────────
+
+pub async fn profiles_change_until_the_account_closes(store: Arc<dyn Store>) {
+    let id = account(store.as_ref()).await;
+    let contacts = BTreeMap::from([
+        ("LINE".to_owned(), "miku39".to_owned()),
+        ("X".to_owned(), "@miku".to_owned()),
+    ]);
+    assert!(store.update_profile(id, "Miku", &contacts).await.unwrap());
+    let stored = store.account(id).await.unwrap().unwrap();
+    assert_eq!(
+        (stored.display_name.as_str(), &stored.contacts),
+        ("Miku", &contacts)
+    );
+    let listed = store
+        .list_accounts(&AccountFilter::default(), PageRequest::first(10))
+        .await
+        .unwrap();
+    assert_eq!(listed, vec![stored]);
+
+    assert!(store.close_account(id, None, now()).await.unwrap());
+    assert!(!store.update_profile(id, "Back", &contacts).await.unwrap());
+    assert!(!store.set_password_hash(id, "hash").await.unwrap());
+    let email = Email::new(format!("{}@example.org", unique_suffix())).unwrap();
+    assert!(!store.set_email(id, &email).await.unwrap());
+    assert!(
+        !store
+            .update_profile(AccountId::generate(), "Nobody", &contacts)
+            .await
+            .unwrap()
+    );
+}
+
+pub async fn closed_accounts_keep_their_records(store: Arc<dyn Store>) {
+    let catalog = catalog(store.as_ref(), &[10]).await;
+    let (reservation, _, tickets) = {
+        let buyer = account(store.as_ref()).await;
+        issued_to(store.as_ref(), &catalog, buyer, now(), 1).await
+    };
+    let id = reservation.account_id;
+    let before = store.account(id).await.unwrap().unwrap();
+    let email = before.email.clone().unwrap();
+    let organization = organization(store.as_ref()).await;
+    store.add_member(organization, id).await.unwrap();
+    store.add_favorite(id, catalog.event, now()).await.unwrap();
+    let session = Session {
+        id: SessionId::generate(),
+        account_id: id,
+        refresh_token_hash: format!("hash-{}", unique_suffix()),
+        created_at: now(),
+        expires_at: now() + Duration::days(1),
+    };
+    store.insert_session(&session).await.unwrap();
+    let denied = denial(organization, None, DenialSubject::Account(id));
+    store.insert_denial(&denied).await.unwrap();
+    store
+        .update_profile(
+            id,
+            "Miku",
+            &BTreeMap::from([("X".to_owned(), "@miku".to_owned())]),
+        )
+        .await
+        .unwrap();
+
+    let closed_at = now() + Duration::hours(1);
+    assert!(
+        store
+            .close_account(id, Some(&email.fingerprint()), closed_at)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store.close_account(id, None, closed_at).await.unwrap(),
+        "once"
+    );
+    assert!(
+        !store
+            .close_account(AccountId::generate(), None, closed_at)
+            .await
+            .unwrap()
+    );
+
+    // Nothing about the person remains, but everything recorded under the id does.
+    let after = store.account(id).await.unwrap().unwrap();
+    assert_eq!(
+        after,
+        Account {
+            email: None,
+            display_name: String::new(),
+            contacts: BTreeMap::new(),
+            deleted_at: Some(closed_at),
+            ..before
+        }
+    );
+    assert_eq!(store.password_hash(id).await.unwrap(), None);
+    assert_eq!(store.account_credentials(&email).await.unwrap(), None);
+    assert_eq!(store.memberships(id).await.unwrap(), Vec::new());
+    assert!(!store.is_favorite(id, catalog.event).await.unwrap());
+    let rotated = store
+        .rotate_session(
+            &session.refresh_token_hash,
+            &SessionRenewal {
+                id: SessionId::generate(),
+                refresh_token_hash: format!("next-{}", unique_suffix()),
+                created_at: now(),
+                expires_at: now() + Duration::days(1),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(rotated, None, "its sessions end");
+    assert_eq!(
+        store.reservation(reservation.id).await.unwrap(),
+        Some(reservation)
+    );
+    assert_eq!(
+        store.ticket(tickets[0].id).await.unwrap(),
+        Some(tickets[0].clone())
+    );
+    assert!(store.denial(denied.id).await.unwrap().is_some());
+}
+
+pub async fn closed_accounts_retire_their_email(store: Arc<dyn Store>) {
+    let id = account(store.as_ref()).await;
+    let email = store.account(id).await.unwrap().unwrap().email.unwrap();
+    assert!(
+        store
+            .close_account(id, Some(&email.fingerprint()), now())
+            .await
+            .unwrap()
+    );
+    let closed_at = now();
+
+    // No account may take it, by signing up or by changing email.
+    let newcomer = Account {
+        id: AccountId::generate(),
+        email: Some(email.clone()),
+        display_name: "Newcomer".to_owned(),
+        role: Role::User,
+        created_at: now(),
+        contacts: BTreeMap::new(),
+        deleted_at: None,
+    };
+    assert!(matches!(
+        store.insert_account(&newcomer, Some("hash")).await,
+        Err(StoreError::Conflict("email"))
+    ));
+    let other = account(store.as_ref()).await;
+    assert!(matches!(
+        store.set_email(other, &email).await,
+        Err(StoreError::Conflict("email"))
+    ));
+    // A fingerprint given at closing is kept for accounts whose store had none.
+    let legacy = passwordless(Some(
+        Email::new(format!("{}@example.org", unique_suffix())).unwrap(),
+    ));
+    store
+        .create_account_with_identity(&legacy, &identity("apple", legacy.id))
+        .await
+        .unwrap();
+    let legacy_email = legacy.email.clone().unwrap();
+    assert!(
+        store
+            .close_account(legacy.id, Some(&legacy_email.fingerprint()), closed_at)
+            .await
+            .unwrap()
+    );
+    let reused = Account {
+        id: AccountId::generate(),
+        email: Some(legacy_email),
+        ..newcomer
+    };
+    assert!(matches!(
+        store.insert_account(&reused, None).await,
+        Err(StoreError::Conflict("email"))
+    ));
+}
+
+pub async fn orders_count_while_someone_buys(store: Arc<dyn Store>) {
+    use ReservationStatus::{Cancelled, Expired, Issued, PaymentPending};
+    let catalog = catalog(store.as_ref(), &[100]).await;
+    assert!(!store.has_orders(catalog.event, None).await.unwrap());
+    let given_up = [
+        reservation(store.as_ref(), &catalog, Expired, now()).await,
+        reservation(store.as_ref(), &catalog, Cancelled, now()).await,
+    ];
+    assert!(
+        !store.has_orders(catalog.event, None).await.unwrap(),
+        "expired and cancelled reservations are no orders"
+    );
+    assert!(
+        !store
+            .has_orders(catalog.event, Some(given_up[0].account_id))
+            .await
+            .unwrap()
+    );
+
+    let paying = reservation(store.as_ref(), &catalog, PaymentPending, now()).await;
+    assert!(store.has_orders(catalog.event, None).await.unwrap());
+    assert!(
+        store
+            .has_orders(catalog.event, Some(paying.account_id))
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .has_orders(catalog.event, Some(given_up[1].account_id))
+            .await
+            .unwrap()
+    );
+    let elsewhere = catalog_in(store.as_ref(), organization(store.as_ref()).await, &[10]).await;
+    reservation(store.as_ref(), &elsewhere, Issued, now()).await;
+    let other_event = catalog_in(store.as_ref(), organization(store.as_ref()).await, &[10]).await;
+    assert!(!store.has_orders(other_event.event, None).await.unwrap());
 }

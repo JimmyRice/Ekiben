@@ -168,6 +168,15 @@ validated_string!(
     }
 );
 
+impl Email {
+    /// SHA-256 of the address, hex-encoded: what is kept of it once its account is closed, so
+    /// that no other account takes it.
+    pub fn fingerprint(&self) -> String {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(self.as_str().as_bytes()))
+    }
+}
+
 /// Validates a required, human-readable text field.
 pub fn non_empty(field: &'static str, value: &str, max_len: usize) -> Result<(), ValidationError> {
     if value.trim().is_empty() {

@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::str::FromStr;
 
 use kippu_domain::AttestorId;
-use kippu_domain::account::{Account, Identity, Organization, Role};
+use kippu_domain::account::{Account, Contacts, Identity, Organization, Role};
 use kippu_domain::admission::AdmissionPolicy;
 use kippu_domain::catalog::{
     Address, Event, EventStatus, EventSummary, Inventory, Sale, TicketType,
@@ -90,6 +90,8 @@ pub(crate) struct AccountRow {
     display_name: String,
     role: String,
     created_at: OffsetDateTime,
+    contacts: Json<Contacts>,
+    deleted_at: Option<OffsetDateTime>,
 }
 
 impl TryFrom<AccountRow> for Account {
@@ -106,6 +108,8 @@ impl TryFrom<AccountRow> for Account {
             display_name: row.display_name,
             role: parse::<Role>(&row.role)?,
             created_at: instant(row.created_at),
+            contacts: row.contacts.0,
+            deleted_at: row.deleted_at.map(instant),
         })
     }
 }

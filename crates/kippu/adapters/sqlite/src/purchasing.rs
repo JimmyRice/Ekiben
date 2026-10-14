@@ -164,6 +164,20 @@ impl PurchaseStore for SqliteStore {
         all(rows)
     }
 
+    async fn has_orders(&self, event: EventId, account: Option<AccountId>) -> StoreResult<bool> {
+        let found = sqlx::query_scalar::<_, i64>(
+            "SELECT EXISTS (SELECT 1 FROM reservations
+                            WHERE event_id = ?1 AND (?2 IS NULL OR account_id = ?2)
+                              AND status NOT IN ('expired', 'cancelled'))",
+        )
+        .bind(event.as_uuid())
+        .bind(account.map(|id| id.as_uuid()))
+        .fetch_one(&self.reader)
+        .await
+        .map_err(error)?;
+        Ok(found != 0)
+    }
+
     async fn overdue_reservations(
         &self,
         now: Timestamp,

@@ -1,8 +1,9 @@
-use kippu_domain::AttestorId;
+use kippu_domain::account::{Account, Contacts};
 use kippu_domain::purchase::LineItem;
 use kippu_domain::reservation::ReservationStatus;
+use kippu_domain::{AccountId, AttestorId, Timestamp};
 use kippu_store::{Keyset, PageRequest};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
 use crate::error::ApiError;
@@ -56,5 +57,30 @@ impl EventReservationsQuery {
         }
         .page(ListingTag::EVENT_RESERVATIONS)?;
         Ok((self.status, page))
+    }
+}
+
+/// Someone who ordered for an event, as its organizers see them: no email, only what they
+/// chose to share.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct BuyerView {
+    /// The buyer's account, as reservations and denials name it.
+    pub account_id: AccountId,
+    /// Their name; empty if they closed their account.
+    pub display_name: String,
+    /// Ways to reach them, as they named them.
+    pub contacts: Contacts,
+    /// When they closed their account, if they did.
+    pub deleted_at: Option<Timestamp>,
+}
+
+impl From<Account> for BuyerView {
+    fn from(account: Account) -> Self {
+        Self {
+            account_id: account.id,
+            display_name: account.display_name,
+            contacts: account.contacts,
+            deleted_at: account.deleted_at,
+        }
     }
 }

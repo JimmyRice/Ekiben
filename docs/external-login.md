@@ -32,7 +32,9 @@ provider being reachable.
 - **`kippu_core::auth::external::link(&state, &account, &identity)`** links a provider to an
   account that is already signed in, e.g. from its settings page.
 - **`kippu_core::auth::sessions::issue(&state, account)`** signs an account in: an access
-  token plus a single-use refresh token, the same response as `POST /v1/auth/login`.
+  token plus a single-use refresh token, the same response as `POST /v1/auth/login`. A closed
+  account is refused (`403 account-closed`): its identities stay linked to it, so a person
+  who closed their account cannot sign up again through the same provider.
 
 People manage their sign-in methods themselves:
 

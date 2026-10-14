@@ -942,3 +942,65 @@ async fn organizers_watch_the_waiting_room_fill_and_advance() {
     assert_eq!(open.status, StatusCode::CONFLICT);
     assert_eq!(open.body["type"], "urn:kippu:problem:no-waiting-room");
 }
+
+#[tokio::test]
+async fn organizers_reach_the_buyers_of_their_events() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let other_shop = app.shop(10, 1_000, json!({})).await;
+    let buyer = app.buyer().await;
+    app.call(
+        Method::PATCH,
+        "/v1/me",
+        Some(&buyer),
+        Some(json!({ "contacts": { "X": "@miku" } })),
+    )
+    .await;
+    let reservation = app.reserve(&buyer, &shop, 1).await;
+    let account_id = reservation["account_id"].as_str().unwrap();
+    let path = format!("/v1/events/{}/buyers/{account_id}", shop.event_id);
+
+    let seen = app
+        .call(Method::GET, &path, Some(&shop.organizer), None)
+        .await;
+    assert_eq!(seen.status, StatusCode::OK, "{:?}", seen.body);
+    assert_eq!(
+        seen.body,
+        json!({
+            "account_id": account_id,
+            "display_name": "Buyer",
+            "contacts": { "X": "@miku" },
+            "deleted_at": null,
+        }),
+        "no email"
+    );
+    let stranger = app
+        .call(Method::GET, &path, Some(&other_shop.organizer), None)
+        .await;
+    assert_eq!(stranger.status, StatusCode::FORBIDDEN);
+    let not_a_buyer = app
+        .call(
+            Method::GET,
+            &format!("/v1/events/{}/buyers/{account_id}", other_shop.event_id),
+            Some(&other_shop.organizer),
+            None,
+        )
+        .await;
+    assert_eq!(not_a_buyer.status, StatusCode::NOT_FOUND);
+
+    // A reservation given up is no order.
+    app.call(
+        Method::POST,
+        &format!(
+            "/v1/reservations/{}/cancel",
+            reservation["id"].as_str().unwrap()
+        ),
+        Some(&buyer),
+        None,
+    )
+    .await;
+    let gone = app
+        .call(Method::GET, &path, Some(&shop.organizer), None)
+        .await;
+    assert_eq!(gone.status, StatusCode::NOT_FOUND);
+}

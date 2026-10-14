@@ -38,7 +38,7 @@ Keep the repository root uncluttered and do not add speculative `.gitignore` ent
 ## Commands
 
 ```bash
-cargo test --workspace --all-features                                   # 356 tests incl. e2e over TCP
+cargo test --workspace --all-features                                   # 373 tests incl. e2e over TCP
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets           # default features too
 cargo fmt --all
@@ -258,6 +258,17 @@ Do not change these unless the user explicitly asks.
   needed: first make the business layer HTTP-independent (error class separate from status,
   a `RequestContext`, public `service`), then add `crates/kippu/transports/grpc`. Prefer SSE for
   push.
+- **Profiles:** `PATCH /v1/me` changes `display_name` and `contacts`, free-form
+  `{name: address}` (at most 10, names ≤ 40, addresses ≤ 200 characters), seen by the account
+  itself, admins and the organizers of events it ordered for
+  (`GET /v1/events/{id}/buyers/{account_id}`, never the email).
+- **Closing accounts** (`DELETE /v1/me` with the password, `DELETE /v1/admin/accounts/{id}`)
+  anonymizes, never deletes: the id stays with every order, ticket, refund and denial; email,
+  password, name, contacts, sessions, memberships and favourites go. The email's SHA-256
+  fingerprint (`email_hash`, unique, kept for every account) and the external identities stay,
+  so neither can make another account (no way back: Kippu does not verify emails, so a
+  "restore" would let anyone with the address take over the old tickets). Closed accounts
+  change no more; `sessions::issue` refuses them (`account-closed`).
 - **External sign-in:** Kippu ships no OAuth client; forks write a `Module` that calls
   `auth::external::link_or_create` and `auth::sessions::issue` (`docs/external-login.md`).
   Accounts may have no password and no email; merging by email requires a verified email and is
@@ -327,6 +338,8 @@ Do not change these unless the user explicitly asks.
 
 ## Known limitations
 
+- Access tokens are not looked up: a closed account's tokens, and an organizer's membership
+  in them, work until they expire (`auth.access_token_ttl_seconds`, 15 minutes by default).
 - The generic `Idempotency-Key` middleware does not stop two simultaneous first requests with
   the same key from both running (purchases and payments are idempotent on their own). A strict
   fix is a "processing" placeholder row.

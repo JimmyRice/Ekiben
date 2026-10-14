@@ -166,6 +166,19 @@ impl PurchaseStore for PostgresStore {
         all(rows)
     }
 
+    async fn has_orders(&self, event: EventId, account: Option<AccountId>) -> StoreResult<bool> {
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM reservations
+                            WHERE event_id = $1 AND ($2 IS NULL OR account_id = $2)
+                              AND status NOT IN ('expired', 'cancelled'))",
+        )
+        .bind(event.as_uuid())
+        .bind(account.map(|id| id.as_uuid()))
+        .fetch_one(&self.pool)
+        .await
+        .map_err(error)
+    }
+
     async fn overdue_reservations(
         &self,
         now: Timestamp,

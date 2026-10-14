@@ -1,12 +1,14 @@
-//! What organizers read: the reservations of their events, whoever bought them.
+//! What organizers read: the reservations of their events, whoever bought them, and how to
+//! reach those people.
 
-use kippu_domain::EventId;
+use kippu_domain::account::Account;
 use kippu_domain::reservation::{Reservation, ReservationStatus};
+use kippu_domain::{AccountId, EventId};
 use kippu_store::{Keyset, Page, PageRequest};
 
 use crate::app::AppState;
 use crate::auth::{Principal, Scope};
-use crate::error::ApiResult;
+use crate::error::{ApiError, ApiResult};
 use crate::modules::catalog::service::visible_event;
 use crate::modules::purchasing::permissions::ORDERS_READ;
 
@@ -59,4 +61,30 @@ pub async fn event_reservations(
             id: reservation.id.as_uuid(),
         },
     ))
+}
+
+/// Someone who ordered for an event (a reservation that has not expired or been cancelled),
+/// for the event's organizers: to reach them about the event, through the contact details
+/// they share. Others are reported as missing.
+#[tracing::instrument(skip_all)]
+pub async fn buyer(
+    state: &AppState,
+    principal: &Principal,
+    event_id: EventId,
+    account_id: AccountId,
+) -> ApiResult<Account> {
+    let event = visible_event(state, Some(principal), event_id).await?;
+    state.authorize(
+        principal,
+        ORDERS_READ,
+        Scope::Organization(event.organization_id),
+    )?;
+    if !state.store().has_orders(event.id, Some(account_id)).await? {
+        return Err(ApiError::not_found("buyer"));
+    }
+    state
+        .store()
+        .account(account_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("buyer"))
 }

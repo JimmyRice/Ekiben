@@ -1,11 +1,13 @@
-use kippu_domain::account::{Account, Role};
+use kippu_domain::account::{Account, Contacts, Role};
 use kippu_domain::validation::Email;
 use kippu_domain::{OrganizationId, Timestamp};
 use kippu_store::{AccountFilter, AuditRecord, PageRequest};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
-use super::service::{AccountDetails, NewAccount, NewOrganization, OrganizationChanges, Whoami};
+use super::service::{
+    AccountDetails, NewAccount, NewOrganization, OrganizationChanges, ProfileChanges, Whoami,
+};
 pub use crate::auth::sessions::SessionResponse;
 use crate::error::ApiError;
 use crate::http::{ListingTag, PageQuery};
@@ -52,6 +54,25 @@ pub struct SetPasswordRequest {
     pub current_password: Option<String>,
     /// 10 to 256 characters.
     pub new_password: String,
+}
+
+/// Change your name or contact details; leave out what stays.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ProfilePatch {
+    /// Name shown to others, up to 100 characters.
+    pub display_name: Option<String>,
+    /// Ways to reach you, replaced as a whole: up to 10, each named in up to 40 characters
+    /// (`"X"`, `"LINE"`, `"WeChat"`) with an address of up to 200; `{}` removes them. You,
+    /// admins and the organizers of events you ordered for see them.
+    pub contacts: Option<Contacts>,
+}
+
+/// Close your account.
+#[derive(Debug, Default, Deserialize, ToSchema)]
+pub struct CloseAccountRequest {
+    /// Your password. Leave it out only if the account has none (it was created through an
+    /// external sign-in).
+    pub current_password: Option<String>,
 }
 
 /// Who the caller is.
@@ -197,6 +218,15 @@ impl From<CreateOrganizationRequest> for NewOrganization {
         Self {
             slug: request.slug,
             name: request.name,
+        }
+    }
+}
+
+impl From<ProfilePatch> for ProfileChanges {
+    fn from(patch: ProfilePatch) -> Self {
+        Self {
+            display_name: patch.display_name,
+            contacts: patch.contacts,
         }
     }
 }

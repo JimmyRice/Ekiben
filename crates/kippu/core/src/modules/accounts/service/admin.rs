@@ -93,9 +93,11 @@ pub async fn account(
     })
 }
 
-/// Deletes an account of a role below the caller's own.
+/// Closes an account of a role below the caller's own, as
+/// [`close_own_account`](super::close_own_account) does: its records stay, nothing about the
+/// person does. Closing it again changes nothing.
 #[tracing::instrument(skip_all)]
-pub async fn delete_account(
+pub async fn close_account(
     state: &AppState,
     principal: &Principal,
     account_id: AccountId,
@@ -109,8 +111,7 @@ pub async fn delete_account(
     if !principal.role().can_manage(account.role) {
         return Err(ApiError::forbidden());
     }
-    state.store().delete_account(account_id).await?;
-    state.audit(principal, "account.delete", account_id).await
+    super::profile::close(state, principal, &account).await
 }
 
 /// Creates an organization.

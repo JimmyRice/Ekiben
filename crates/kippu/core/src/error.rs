@@ -62,6 +62,8 @@ impl ProblemKind {
         self.0
     }
 
+    /// The account was closed: it cannot sign in again.
+    pub const ACCOUNT_CLOSED: Self = Self::new("account-closed");
     /// A waiting room must be passed first.
     pub const ADMISSION_REQUIRED: Self = Self::new("admission-required");
     /// A payment does not match the reservation total.
@@ -140,7 +142,8 @@ impl ProblemKind {
     pub const WRONG_PASSWORD: Self = Self::new("wrong-password");
 
     /// Every kind Kippu itself reports.
-    pub const ALL: [Self; 38] = [
+    pub const ALL: [Self; 39] = [
+        Self::ACCOUNT_CLOSED,
         Self::ADMISSION_REQUIRED,
         Self::AMOUNT_MISMATCH,
         Self::ATTESTOR_NOT_ACCEPTED,
@@ -429,6 +432,7 @@ mod tests {
         assert_eq!(
             kinds,
             [
+                "account-closed",
                 "admission-required",
                 "amount-mismatch",
                 "attestor-not-accepted",

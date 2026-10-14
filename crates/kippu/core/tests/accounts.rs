@@ -559,3 +559,203 @@ async fn admins_find_accounts_by_role_and_email() {
         assert_eq!(refused.status, StatusCode::BAD_REQUEST, "{path}");
     }
 }
+
+#[tokio::test]
+async fn owners_change_their_name_and_contact_details() {
+    let app = TestApp::start().await;
+    let (token, _) = app.account("user", "miku@example.org").await;
+    let changed = app
+        .call(
+            Method::PATCH,
+            "/v1/me",
+            Some(&token),
+            Some(json!({ "display_name": "Miku", "contacts": { "X": "@miku", "LINE": "miku39" } })),
+        )
+        .await;
+    assert_eq!(changed.status, StatusCode::OK, "{:?}", changed.body);
+    assert_eq!(changed.body["display_name"], "Miku");
+    let me = app.call(Method::GET, "/v1/me", Some(&token), None).await;
+    assert_eq!(
+        me.body["account"]["contacts"],
+        json!({ "LINE": "miku39", "X": "@miku" })
+    );
+
+    // Leaving a field out keeps it; contacts are replaced as a whole.
+    let renamed = app
+        .call(
+            Method::PATCH,
+            "/v1/me",
+            Some(&token),
+            Some(json!({ "contacts": { "Email": "miku@example.org" } })),
+        )
+        .await;
+    assert_eq!(renamed.body["display_name"], "Miku");
+    assert_eq!(
+        renamed.body["contacts"],
+        json!({ "Email": "miku@example.org" })
+    );
+
+    let too_many: serde_json::Map<String, serde_json::Value> = (0..11)
+        .map(|i| (format!("way{i}"), json!("somewhere")))
+        .collect();
+    for body in [
+        json!({ "display_name": " " }),
+        json!({ "contacts": too_many }),
+        json!({ "contacts": { "X": "" } }),
+        json!({ "contacts": { "a very long name for a way to reach someone": "x" } }),
+    ] {
+        let refused = app
+            .call(Method::PATCH, "/v1/me", Some(&token), Some(body))
+            .await;
+        assert_eq!(
+            refused.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{:?}",
+            refused.body
+        );
+    }
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one account's closing, told in order"
+)]
+async fn a_closed_account_keeps_its_records_but_nothing_about_the_person() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    app.account("user", "miku@example.org").await;
+    let session = app
+        .call(
+            Method::POST,
+            "/v1/auth/login",
+            None,
+            Some(json!({ "email": "miku@example.org", "password": "correct horse battery" })),
+        )
+        .await;
+    let buyer = session.body["access_token"]["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let account_id = session.body["account"]["id"].as_str().unwrap().to_owned();
+    let reservation = app.reserve(&buyer, &shop, 1).await;
+    let denial = app
+        .call(
+            Method::POST,
+            &format!("/v1/organizations/{}/denials", shop.organization_id),
+            Some(&shop.organizer),
+            Some(json!({ "subject": { "kind": "account", "id": account_id }, "note": "Resold tickets" })),
+        )
+        .await;
+    assert_eq!(denial.status, StatusCode::CREATED, "{:?}", denial.body);
+
+    for body in [json!({}), json!({ "current_password": "not my password" })] {
+        let refused = app
+            .call(Method::DELETE, "/v1/me", Some(&buyer), Some(body))
+            .await;
+        assert_eq!(refused.status, StatusCode::FORBIDDEN);
+        assert_eq!(refused.body["type"], "urn:kippu:problem:wrong-password");
+    }
+    let closed = app
+        .call(
+            Method::DELETE,
+            "/v1/me",
+            Some(&buyer),
+            Some(json!({ "current_password": "correct horse battery" })),
+        )
+        .await;
+    assert_eq!(closed.status, StatusCode::NO_CONTENT, "{:?}", closed.body);
+
+    // The person cannot come back under the same email, nor keep a session.
+    let login = app
+        .call(
+            Method::POST,
+            "/v1/auth/login",
+            None,
+            Some(json!({ "email": "miku@example.org", "password": "correct horse battery" })),
+        )
+        .await;
+    assert_eq!(login.status, StatusCode::UNAUTHORIZED);
+    let refresh = app
+        .call(
+            Method::POST,
+            "/v1/auth/refresh",
+            None,
+            Some(json!({ "refresh_token": session.body["refresh_token"] })),
+        )
+        .await;
+    assert_eq!(refresh.status, StatusCode::UNAUTHORIZED);
+    let again = app
+        .call(
+            Method::POST,
+            "/v1/auth/register",
+            None,
+            Some(json!({ "email": "Miku@Example.org", "password": "correct horse battery", "display_name": "Miku" })),
+        )
+        .await;
+    assert_eq!(
+        again.status,
+        StatusCode::CONFLICT,
+        "as if the email were taken"
+    );
+
+    // What was recorded under the account stays.
+    let admin = app.root_token();
+    let stored = app
+        .call(
+            Method::GET,
+            &format!("/v1/admin/accounts/{account_id}"),
+            Some(&admin),
+            None,
+        )
+        .await;
+    let account = &stored.body["account"];
+    assert_eq!(
+        (
+            &account["email"],
+            &account["display_name"],
+            &account["contacts"]
+        ),
+        (&json!(null), &json!(""), &json!({}))
+    );
+    assert!(account["deleted_at"].is_string());
+    let reservations = app
+        .call(
+            Method::GET,
+            &format!("/v1/events/{}/reservations", shop.event_id),
+            Some(&shop.organizer),
+            None,
+        )
+        .await;
+    assert_eq!(reservations.body["items"][0]["id"], reservation["id"]);
+    let still_denied = app
+        .call(
+            Method::GET,
+            &format!("/v1/denials/{}", denial.body["id"].as_str().unwrap()),
+            Some(&shop.organizer),
+            None,
+        )
+        .await;
+    assert_eq!(still_denied.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn admins_close_accounts_the_same_way_once() {
+    let app = TestApp::start().await;
+    let admin = app.root_token();
+    let (_, other) = app.account("user", "rin@example.org").await;
+    let path = format!("/v1/admin/accounts/{}", other["id"].as_str().unwrap());
+    for _ in 0..2 {
+        let closed = app.call(Method::DELETE, &path, Some(&admin), None).await;
+        assert_eq!(closed.status, StatusCode::NO_CONTENT);
+    }
+    let created = app
+        .call(
+            Method::POST,
+            "/v1/admin/accounts",
+            Some(&admin),
+            Some(json!({ "email": "rin@example.org", "password": "correct horse battery", "display_name": "Rin", "role": "user" })),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CONFLICT);
+}

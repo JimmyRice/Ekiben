@@ -1,9 +1,34 @@
 //! Accounts, roles and organizations.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
-use crate::validation::{Email, ProviderName, Slug, Subject};
+use crate::validation::{Email, ProviderName, Slug, Subject, ValidationError, non_empty};
 use crate::{AccountId, OrganizationId, Timestamp};
+
+/// The most contact details an account may list.
+pub const MAX_CONTACTS: usize = 10;
+
+/// Ways to reach a person, as they name them: `{"X": "@miku", "LINE": "miku39"}`.
+pub type Contacts = BTreeMap<String, String>;
+
+/// Checks contact details: at most [`MAX_CONTACTS`], each named in up to 40 characters with
+/// an address of up to 200.
+///
+/// # Errors
+///
+/// A [`ValidationError`] on `contacts` naming what is wrong.
+pub fn validate_contacts(contacts: &Contacts) -> Result<(), ValidationError> {
+    if contacts.len() > MAX_CONTACTS {
+        return Err(ValidationError::new("contacts", "has more than 10 entries"));
+    }
+    for (name, address) in contacts {
+        non_empty("contacts", name, 40)?;
+        non_empty("contacts", address, 200)?;
+    }
+    Ok(())
+}
 
 /// What an authenticated principal may do. Ordered from least to most privileged.
 ///
@@ -49,7 +74,7 @@ impl Role {
 }
 
 impl std::str::FromStr for Role {
-    type Err = crate::ValidationError;
+    type Err = ValidationError;
 
     fn from_str(name: &str) -> Result<Self, Self::Err> {
         match name {
@@ -57,7 +82,7 @@ impl std::str::FromStr for Role {
             "organizer" => Ok(Self::Organizer),
             "admin" => Ok(Self::Admin),
             "root" => Ok(Self::Root),
-            _ => Err(crate::ValidationError::new("role", "is not a known role")),
+            _ => Err(ValidationError::new("role", "is not a known role")),
         }
     }
 }
@@ -72,12 +97,29 @@ pub struct Account {
     /// Sign-in address, unique across accounts. Accounts created through an external sign-in
     /// that shared no address have none.
     pub email: Option<Email>,
-    /// Name shown to other people.
+    /// Name shown to other people. Empty once the account is closed.
     pub display_name: String,
     /// What the account may do.
     pub role: Role,
     /// When the account was created.
     pub created_at: Timestamp,
+    /// Ways to reach the person, as they chose to share them; seen by themselves, admins and
+    /// the organizers of events they ordered for.
+    #[serde(default)]
+    pub contacts: Contacts,
+    /// When the account was closed. A closed account keeps its id, so its orders, tickets and
+    /// denials stay as they were, but nothing about the person: no email, password, name or
+    /// contacts. It can never sign in again, and its email and external sign-ins cannot be
+    /// used for another account.
+    #[serde(default)]
+    pub deleted_at: Option<Timestamp>,
+}
+
+impl Account {
+    /// Whether the account was closed.
+    pub const fn is_closed(&self) -> bool {
+        self.deleted_at.is_some()
+    }
 }
 
 /// A sign-in method outside Kippu, linked to an account: the account is whoever the

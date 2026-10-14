@@ -297,3 +297,33 @@ async fn signed_in_accounts_link_providers_and_keep_a_way_to_sign_in() {
         "urn:kippu:problem:identity-linked-elsewhere"
     );
 }
+
+#[tokio::test]
+async fn a_closed_accounts_external_sign_in_never_makes_another_account() {
+    let app = app(true).await;
+    let subject = format!("wx-{}", uuid_suffix());
+    let email = format!("{}@example.org", uuid_suffix());
+    let vouched = json!({ "subject": subject, "email": email, "email_verified": true });
+    let first = sign_in(&app, vouched.clone()).await;
+    assert_eq!(first.status, StatusCode::OK, "{:?}", first.body);
+    let closed = app
+        .call(
+            Method::DELETE,
+            "/v1/me",
+            Some(&token(&first)),
+            Some(json!({})),
+        )
+        .await;
+    assert_eq!(closed.status, StatusCode::NO_CONTENT, "{:?}", closed.body);
+
+    let again = sign_in(&app, vouched).await;
+    assert_eq!(again.status, StatusCode::FORBIDDEN);
+    assert_eq!(again.body["type"], "urn:kippu:problem:account-closed");
+    // Another provider account with the same verified email cannot take the address either.
+    let other = sign_in(
+        &app,
+        json!({ "subject": format!("wx-{}", uuid_suffix()), "email": email, "email_verified": true }),
+    )
+    .await;
+    assert_eq!(other.status, StatusCode::CONFLICT, "{:?}", other.body);
+}

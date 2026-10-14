@@ -61,6 +61,10 @@ pub trait PurchaseStore {
         page: PageRequest<Keyset>,
     ) -> StoreResult<Vec<Reservation>>;
 
+    /// Whether anyone (or `account`) ordered for an event: a reservation that has not expired
+    /// or been cancelled, so tickets are held, sold, or were paid for.
+    async fn has_orders(&self, event: EventId, account: Option<AccountId>) -> StoreResult<bool>;
+
     /// Reservations still holding inventory whose `expires_at` is at or before `now`.
     async fn overdue_reservations(
         &self,

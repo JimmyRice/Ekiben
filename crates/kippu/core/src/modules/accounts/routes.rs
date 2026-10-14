@@ -7,8 +7,8 @@ use kippu_domain::account::{Account, Identity, Organization};
 use kippu_domain::{AccountId, OrganizationId};
 
 use super::dto::{
-    AccountView, AccountsQuery, AuditEntryResponse, CreateAccountRequest,
-    CreateOrganizationRequest, LoginRequest, Me, OrganizationPatch, RefreshRequest,
+    AccountView, AccountsQuery, AuditEntryResponse, CloseAccountRequest, CreateAccountRequest,
+    CreateOrganizationRequest, LoginRequest, Me, OrganizationPatch, ProfilePatch, RefreshRequest,
     RegisterRequest, SessionResponse, SetEmailRequest, SetPasswordRequest,
     UpdateOrganizationRequest,
 };
@@ -90,6 +90,46 @@ pub(crate) async fn logout(
 )]
 pub(crate) async fn me(State(state): State<AppState>, principal: Principal) -> ApiResult<Json<Me>> {
     Ok(Json(service::whoami(&state, &principal).await?.into()))
+}
+
+/// Change your name or contact details; leave out what stays.
+#[utoipa::path(
+    patch, path = "/v1/me", tag = TAG,
+    security(("bearer" = [])),
+    request_body(content((ProfilePatch = "application/merge-patch+json"), (ProfilePatch = "application/json"))),
+    responses((status = 200, body = Account), (status = 404, body = Problem), (status = 422, body = Problem))
+)]
+pub(crate) async fn update_me(
+    State(state): State<AppState>,
+    principal: Principal,
+    Json(patch): Json<ProfilePatch>,
+) -> ApiResult<Json<Account>> {
+    Ok(Json(
+        service::update_profile(&state, &principal, patch.into()).await?,
+    ))
+}
+
+/// Close your account. Your orders, tickets and refunds stay on record under its id, but
+/// your email, password, name, contact details, sessions and memberships go; neither the
+/// email nor your external sign-ins can be used for an account again. Send your password if
+/// the account has one.
+#[utoipa::path(
+    delete, path = "/v1/me", tag = TAG,
+    security(("bearer" = [])),
+    request_body = CloseAccountRequest,
+    responses(
+        (status = 204),
+        (status = 403, description = "Password missing or wrong", body = Problem),
+        (status = 404, body = Problem)
+    )
+)]
+pub(crate) async fn close_me(
+    State(state): State<AppState>,
+    principal: Principal,
+    Json(request): Json<CloseAccountRequest>,
+) -> ApiResult<StatusCode> {
+    service::close_own_account(&state, &principal, request.current_password).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Set your email address, e.g. after signing up through a provider that shared none.
@@ -228,7 +268,8 @@ pub(crate) async fn get_account(
     ))
 }
 
-/// Delete an account of a role below your own.
+/// Close an account of a role below your own, as it would close itself: its records stay,
+/// nothing about the person does. Closing it again changes nothing.
 #[utoipa::path(
     delete, path = "/v1/admin/accounts/{account_id}", tag = TAG,
     security(("bearer" = [])),
@@ -240,7 +281,7 @@ pub(crate) async fn delete_account(
     principal: Principal,
     Path(account_id): Path<AccountId>,
 ) -> ApiResult<StatusCode> {
-    service::delete_account(&state, &principal, account_id).await?;
+    service::close_account(&state, &principal, account_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

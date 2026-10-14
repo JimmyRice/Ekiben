@@ -1,7 +1,7 @@
 use async_trait::async_trait;
-use kippu_domain::account::{Account, Identity, Organization, Role};
+use kippu_domain::account::{Account, Contacts, Identity, Organization, Role};
 use kippu_domain::validation::{Email, ProviderName, Slug, Subject};
-use kippu_domain::{AccountId, OrganizationId};
+use kippu_domain::{AccountId, OrganizationId, Timestamp};
 use kippu_store::{
     AccountFilter, AccountStore, Insertion, PageRequest, Session, SessionRenewal, StoreResult,
     Unlink,
@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::catalog::expect_one_updated;
 use crate::convert::{
-    AccountRow, CredentialsRow, IdentityRow, OrganizationRow, all, micros, optional,
+    AccountRow, CredentialsRow, IdentityRow, OrganizationRow, all, json, micros, optional,
 };
 use crate::{MySqlStore, error, is_duplicate, unique};
 
@@ -23,8 +23,9 @@ const HAS_PUBLIC_EVENT: &str =
                                   AND events.status IN ('published', 'cancelled'))";
 
 const INSERT_ACCOUNT: &str =
-    "INSERT INTO accounts (id, email, display_name, role, password_hash, created_at)
-     VALUES (?, ?, ?, ?, ?, ?)";
+    "INSERT INTO accounts (id, email, display_name, role, password_hash, created_at, contacts,
+                           email_hash)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
 
 const INSERT_IDENTITY: &str =
     "INSERT INTO identities (provider, subject, account_id, created_at) VALUES (?, ?, ?, ?)";
@@ -41,6 +42,8 @@ async fn insert_account(
         .bind(account.role.as_str())
         .bind(password_hash)
         .bind(micros(account.created_at))
+        .bind(json(&account.contacts)?)
+        .bind(account.email.as_ref().map(Email::fingerprint))
         .execute(connection)
         .await
         .map_err(unique("email"))?;
@@ -120,7 +123,7 @@ impl AccountStore for MySqlStore {
 
     async fn account(&self, id: AccountId) -> StoreResult<Option<Account>> {
         let row = sqlx::query_as::<_, AccountRow>(
-            "SELECT id, email, display_name, role, created_at FROM accounts WHERE id = ?",
+            "SELECT id, email, display_name, role, created_at, contacts, deleted_at FROM accounts WHERE id = ?",
         )
         .bind(id.as_uuid())
         .fetch_optional(&self.pool)
@@ -134,7 +137,7 @@ impl AccountStore for MySqlStore {
         email: &Email,
     ) -> StoreResult<Option<(Account, Option<String>)>> {
         let row = sqlx::query_as::<_, CredentialsRow>(
-            "SELECT id, email, display_name, role, created_at, password_hash
+            "SELECT id, email, display_name, role, created_at, contacts, deleted_at, password_hash
              FROM accounts WHERE email = ?",
         )
         .bind(email.as_str())
@@ -157,22 +160,46 @@ impl AccountStore for MySqlStore {
     }
 
     async fn set_password_hash(&self, id: AccountId, password_hash: &str) -> StoreResult<bool> {
-        let result = sqlx::query("UPDATE accounts SET password_hash = ? WHERE id = ?")
-            .bind(password_hash)
-            .bind(id.as_uuid())
-            .execute(&self.pool)
-            .await
-            .map_err(error)?;
+        let result = sqlx::query(
+            "UPDATE accounts SET password_hash = ? WHERE id = ? AND deleted_at IS NULL",
+        )
+        .bind(password_hash)
+        .bind(id.as_uuid())
+        .execute(&self.pool)
+        .await
+        .map_err(error)?;
         Ok(result.rows_affected() == 1)
     }
 
     async fn set_email(&self, id: AccountId, email: &Email) -> StoreResult<bool> {
-        let result = sqlx::query("UPDATE accounts SET email = ? WHERE id = ?")
-            .bind(email.as_str())
-            .bind(id.as_uuid())
-            .execute(&self.pool)
-            .await
-            .map_err(unique("email"))?;
+        let result = sqlx::query(
+            "UPDATE accounts SET email = ?, email_hash = ? WHERE id = ? AND deleted_at IS NULL",
+        )
+        .bind(email.as_str())
+        .bind(email.fingerprint())
+        .bind(id.as_uuid())
+        .execute(&self.pool)
+        .await
+        .map_err(unique("email"))?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    async fn update_profile(
+        &self,
+        id: AccountId,
+        display_name: &str,
+        contacts: &Contacts,
+    ) -> StoreResult<bool> {
+        let result = sqlx::query(
+            "UPDATE accounts SET display_name = ?, contacts = ?
+             WHERE id = ? AND deleted_at IS NULL",
+        )
+        .bind(display_name)
+        .bind(json(contacts)?)
+        .bind(id.as_uuid())
+        .execute(&self.pool)
+        .await
+        .map_err(error)?;
         Ok(result.rows_affected() == 1)
     }
 
@@ -259,7 +286,7 @@ impl AccountStore for MySqlStore {
         let role = filter.role.map(Role::as_str);
         let email = filter.email.as_ref().map(Email::as_str);
         let rows = sqlx::query_as::<_, AccountRow>(
-            "SELECT id, email, display_name, role, created_at FROM accounts
+            "SELECT id, email, display_name, role, created_at, contacts, deleted_at FROM accounts
              WHERE (? IS NULL OR role = ?) AND (? IS NULL OR email = ?)
                AND (? IS NULL OR id > ?)
              ORDER BY id LIMIT ?",
@@ -277,13 +304,41 @@ impl AccountStore for MySqlStore {
         all(rows)
     }
 
-    async fn delete_account(&self, id: AccountId) -> StoreResult<bool> {
-        let result = sqlx::query("DELETE FROM accounts WHERE id = ?")
-            .bind(id.as_uuid())
-            .execute(&self.pool)
-            .await
-            .map_err(error)?;
-        Ok(result.rows_affected() == 1)
+    async fn close_account(
+        &self,
+        id: AccountId,
+        fingerprint: Option<&str>,
+        closed_at: Timestamp,
+    ) -> StoreResult<bool> {
+        let mut tx = self.pool.begin().await.map_err(error)?;
+        let closed = sqlx::query(
+            "UPDATE accounts SET email = NULL, email_hash = COALESCE(email_hash, ?),
+                                 password_hash = NULL, display_name = '', contacts = '{}',
+                                 deleted_at = ?
+             WHERE id = ? AND deleted_at IS NULL",
+        )
+        .bind(fingerprint)
+        .bind(micros(closed_at))
+        .bind(id.as_uuid())
+        .execute(&mut *tx)
+        .await
+        .map_err(error)?;
+        if closed.rows_affected() != 1 {
+            return Ok(false);
+        }
+        for statement in [
+            "DELETE FROM sessions WHERE account_id = ?",
+            "DELETE FROM memberships WHERE account_id = ?",
+            "DELETE FROM favorites WHERE account_id = ?",
+        ] {
+            sqlx::query(statement)
+                .bind(id.as_uuid())
+                .execute(&mut *tx)
+                .await
+                .map_err(error)?;
+        }
+        tx.commit().await.map_err(error)?;
+        Ok(true)
     }
 
     async fn insert_session(&self, session: &Session) -> StoreResult<()> {
@@ -495,7 +550,7 @@ impl AccountStore for MySqlStore {
         page: PageRequest,
     ) -> StoreResult<Vec<Account>> {
         let rows = sqlx::query_as::<_, AccountRow>(
-            "SELECT accounts.id, email, display_name, role, created_at
+            "SELECT accounts.id, email, display_name, role, created_at, contacts, deleted_at
              FROM memberships JOIN accounts ON accounts.id = memberships.account_id
              WHERE memberships.organization_id = ?
                AND (? IS NULL OR memberships.account_id > ?)
