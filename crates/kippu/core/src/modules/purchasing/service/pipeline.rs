@@ -1,7 +1,7 @@
 //! The pipeline behind the front door: workers turn queued requests into reservations or
 //! rejections, and expire reservations left unpaid.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 
 use kippu_domain::catalog::{EventSummary, Sale, TicketType};
 use kippu_domain::outbox::IntegrationEvent;
@@ -173,9 +173,9 @@ enum Settled {
     },
 }
 
-/// Serves a run of one sale's queued requests, none of the same account, in the transaction
-/// that holds the sale's queue: reserves their tickets or rejects them, as serving them one by
-/// one in arrival order would.
+/// Serves a run of one sale's queued requests in the transaction that holds the sale's queue:
+/// reserves their tickets or rejects them, as serving them one by one in arrival order would,
+/// an account's later requests included.
 ///
 /// The quotas the run needs are locked first, in account order, then its stock, in ticket type
 /// order. The queue, then quota, then stock, each in a fixed order, is the lock order every
@@ -303,10 +303,9 @@ async fn take_alone(
     Ok(())
 }
 
-/// Several candidates are decided on what is read under lock. Their quotas, then their stock,
-/// are locked and read; in arrival order each gets its tickets if its quota and the stock left
-/// allow, as when they are served one by one; then what the reserved ones take is written at
-/// once.
+/// Several candidates are decided on what is read under lock: their quotas, then their stock,
+/// are locked and read, [`decide_in_order`] decides them, and what the reserved ones take is
+/// written at once.
 async fn take_together(
     tx: &mut dyn StoreTx,
     run: &[QueuedRequest],
@@ -320,18 +319,47 @@ async fn take_together(
         candidates(run, decisions).flat_map(|(_, candidate)| candidate.lines.iter().copied()),
     );
     let read = tx.inventory().lock_quotas(&quota).await?;
-    let mut taken: BTreeMap<(AccountId, TicketTypeId), u32> = quota
+    let taken = quota
         .iter()
         .map(|line| (line.account_id, line.ticket_type_id))
         .zip(read)
         .collect();
     let read = tx.inventory().lock_stock(&stock).await?;
-    let mut available: BTreeMap<TicketTypeId, u32> = stock
+    let available = stock
         .iter()
         .map(|line| line.ticket_type_id)
         .zip(read)
         .collect();
+    decide_in_order(run, decisions, taken, available);
 
+    let quota = QuotaLines::new(
+        candidates(run, decisions)
+            .flat_map(|(account, candidate)| QuotaLines::of(account, &candidate.lines)),
+    );
+    if quota.is_empty() {
+        return Ok(());
+    }
+    tx.inventory().take_quotas(&quota).await?;
+    let stock = LineItems::new(
+        candidates(run, decisions).flat_map(|(_, candidate)| candidate.lines.iter().copied()),
+    );
+    if tx.inventory().try_hold(&stock).await? {
+        Ok(())
+    } else {
+        Err(ApiError::internal("stock changed while it was locked"))
+    }
+}
+
+/// Decides candidates in arrival order on what each account has `taken` of each ticket type
+/// and the stock `available`, as serving them one by one would: a candidate over a limit is
+/// rejected, then one without stock, and only those reserved count against both, so an
+/// account's later requests see what its earlier ones took.
+fn decide_in_order(
+    run: &[QueuedRequest],
+    decisions: &mut [Decision],
+    mut taken: BTreeMap<(AccountId, TicketTypeId), u32>,
+    mut available: BTreeMap<TicketTypeId, u32>,
+) {
     for (queued, decision) in run.iter().zip(decisions.iter_mut()) {
         let Decision::Reserve(candidate) = decision else {
             continue;
@@ -364,23 +392,6 @@ async fn take_together(
                 }
             }
         }
-    }
-
-    let quota = QuotaLines::new(
-        candidates(run, decisions)
-            .flat_map(|(account, candidate)| QuotaLines::of(account, &candidate.lines)),
-    );
-    if quota.is_empty() {
-        return Ok(());
-    }
-    tx.inventory().take_quotas(&quota).await?;
-    let stock = LineItems::new(
-        candidates(run, decisions).flat_map(|(_, candidate)| candidate.lines.iter().copied()),
-    );
-    if tx.inventory().try_hold(&stock).await? {
-        Ok(())
-    } else {
-        Err(ApiError::internal("stock changed while it was locked"))
     }
 }
 
@@ -442,16 +453,6 @@ async fn record(
     Ok(settled)
 }
 
-/// How many of a sale's oldest requests can be served together: those before the first
-/// account that repeats, whose quota depends on its earlier request.
-fn first_run(queued: &[QueuedRequest]) -> usize {
-    let mut accounts = HashSet::new();
-    queued
-        .iter()
-        .take_while(|queued| accounts.insert(queued.request.account_id))
-        .count()
-}
-
 /// What one transaction made of a sale's queue.
 enum Turn {
     /// Another transaction holds the queue.
@@ -467,8 +468,8 @@ enum Turn {
     },
 }
 
-/// Takes a sale's queue, reads its oldest due requests (at most `limit`) and serves the first
-/// run of them. Whatever ends the transaction lets the queue go.
+/// Takes a sale's queue, reads its oldest due requests (at most `limit`) and serves them as one
+/// run. Whatever ends the transaction lets the queue go.
 async fn take_turn(state: &AppState, catalog: &SaleCatalog, limit: u32) -> ApiResult<Turn> {
     let mut tx = state.store().begin().await?;
     if !tx.purchases().lock_purchase_queue(catalog.sale.id).await? {
@@ -484,12 +485,11 @@ async fn take_turn(state: &AppState, catalog: &SaleCatalog, limit: u32) -> ApiRe
             limit,
         )
         .await?;
-    let run = &queued[..first_run(&queued)];
+    let run = queued.as_slice();
     if run.is_empty() {
         return Ok(Turn::Empty);
     }
-    let more =
-        queued.len() > run.len() || u32::try_from(queued.len()).is_ok_and(|read| read >= limit);
+    let more = u32::try_from(run.len()).is_ok_and(|read| read >= limit);
     Ok(match serve_run(tx, state, catalog, run).await {
         Ok(()) => Turn::Served {
             count: run.len(),
@@ -513,8 +513,7 @@ enum Served {
     Partly,
 }
 
-/// Serves up to a batch of one sale's queued requests, a run per transaction, in arrival
-/// order. A run that fails is redone one request at a time; a request that fails on its own
+/// Serves up to a batch of one sale's queued requests, in arrival order, in one transaction. A run that fails is redone one request at a time; a request that fails on its own
 /// is postponed by `workers.purchase_lease_seconds`, so it holds up nobody behind it.
 async fn serve_sale(state: &AppState, sale_id: SaleId) -> Served {
     let catalog = match sale_catalog(state, sale_id).await {
@@ -717,18 +716,46 @@ mod tests {
         }
     }
 
+    fn candidate(ticket_type: TicketTypeId, quantity: u32) -> Decision {
+        let price = Money::new(1_000, kippu_domain::Currency::JPY).unwrap();
+        let lines = LineItems::new([LineItem {
+            ticket_type_id: ticket_type,
+            quantity,
+        }]);
+        Decision::Reserve(Candidate {
+            items: vec![ReservedItem {
+                ticket_type_id: ticket_type,
+                quantity,
+                unit_price: price,
+            }],
+            total: price,
+            quota: Holds::new(&lines, |_| Some(2)).unwrap(),
+            lines,
+        })
+    }
+
+    fn outcome(decision: &Decision) -> Option<RejectionReason> {
+        match decision {
+            Decision::Rejected(reason) => Some(*reason),
+            Decision::Reserve(_) => None,
+        }
+    }
+
     #[test]
-    fn the_first_run_ends_before_a_repeated_account() {
+    fn a_run_is_decided_as_one_by_one_an_accounts_later_requests_included() {
         let sale = SaleId::generate();
+        let ticket_type = TicketTypeId::generate();
         let (a, b, c) = (
             AccountId::generate(),
             AccountId::generate(),
             AccountId::generate(),
         );
-        let queue: Vec<_> = [a, b, c, a, b]
-            .into_iter()
+        // Three tickets, two per account; `c` took two before.
+        let arrivals = [(b, 2), (a, 2), (a, 1), (a, 2), (c, 1)];
+        let run: Vec<_> = arrivals
+            .iter()
             .enumerate()
-            .map(|(second, account)| QueuedRequest {
+            .map(|(second, &(account, _))| QueuedRequest {
                 request: PurchaseRequest {
                     account_id: account,
                     ..request(sale, i64::try_from(second).unwrap())
@@ -736,8 +763,32 @@ mod tests {
                 account_denied: false,
             })
             .collect();
-        assert_eq!(first_run(&queue), 3);
-        assert_eq!(first_run(&queue[3..]), 2);
-        assert_eq!(first_run(&[]), 0);
+        let mut decisions: Vec<_> = arrivals
+            .iter()
+            .map(|&(_, quantity)| candidate(ticket_type, quantity))
+            .collect();
+        let taken = [a, b, c]
+            .into_iter()
+            .map(|account| ((account, ticket_type), if account == c { 2 } else { 0 }))
+            .collect();
+        decide_in_order(
+            &run,
+            &mut decisions,
+            taken,
+            BTreeMap::from([(ticket_type, 3)]),
+        );
+        assert_eq!(
+            decisions.iter().map(outcome).collect::<Vec<_>>(),
+            [
+                None,
+                // A pair no longer fits, and takes no quota…
+                Some(RejectionReason::SoldOut),
+                // …so the same account's single is within its limit and gets the last ticket.
+                None,
+                // Then it is over its limit: quota is judged before stock.
+                Some(RejectionReason::LimitExceeded),
+                Some(RejectionReason::LimitExceeded),
+            ]
+        );
     }
 }

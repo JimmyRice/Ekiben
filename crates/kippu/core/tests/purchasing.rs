@@ -718,7 +718,7 @@ async fn a_batch_of_buyers_is_served_in_arrival_order() {
         buyers.push(app.buyer().await);
     }
     // Six buyers for three tickets, then the first buyer again, beyond its limit of two: one
-    // batch, processed together except where an account repeats.
+    // batch, processed together.
     let mut submitted = Vec::new();
     for (buyer, quantity) in buyers
         .iter()
@@ -825,6 +825,68 @@ async fn a_run_decides_each_request_as_serving_them_one_by_one_would() {
         .await;
     assert_eq!(cancelled.body["status"], "cancelled");
     app.reserve(&buyers[2], &shop, 2).await;
+}
+
+#[tokio::test]
+async fn an_accounts_requests_in_one_batch_are_decided_as_one_by_one() {
+    let app = TestApp::start().await;
+    let shop = app.shop(5, 1_000, json!({})).await;
+    let (a, b, c) = (app.buyer().await, app.buyer().await, app.buyer().await);
+    app.reserve(&c, &shop, 2).await; // its limit of two; three tickets are left
+    // One batch in which `a` asks three times.
+    let mut submitted = Vec::new();
+    for (buyer, quantity) in [(&b, 2), (&a, 2), (&a, 1), (&a, 2), (&c, 1)] {
+        app.clock.advance(Duration::milliseconds(1));
+        let reply = app.purchase(buyer, &shop, quantity, &uuid_suffix()).await;
+        assert_eq!(reply.status, StatusCode::ACCEPTED, "{:?}", reply.body);
+        submitted.push((buyer, reply.body["id"].as_str().unwrap().to_owned()));
+    }
+    app.drain("purchases").await;
+
+    let mut outcomes = Vec::new();
+    let mut reservations = Vec::new();
+    for (buyer, id) in &submitted {
+        let request = app
+            .call(
+                Method::GET,
+                &format!("/v1/purchase-requests/{id}"),
+                Some(buyer),
+                None,
+            )
+            .await;
+        reservations.push(request.body["reservation_id"].as_str().map(str::to_owned));
+        outcomes.push(match request.body["status"].as_str().unwrap() {
+            "rejected" => request.body["reason"].as_str().unwrap().to_owned(),
+            status => status.to_owned(),
+        });
+    }
+    assert_eq!(
+        outcomes,
+        [
+            "reserved",
+            // A pair no longer fits and takes no quota, so `a`'s single gets the last ticket.
+            "sold_out",
+            "reserved",
+            // Then `a` is over its limit, judged before stock, as is `c`.
+            "limit_exceeded",
+            "limit_exceeded"
+        ]
+    );
+
+    // `a` holds one ticket of its two: once `b` cancels, it gets a second.
+    let cancelled = app
+        .call(
+            Method::POST,
+            &format!(
+                "/v1/reservations/{}/cancel",
+                reservations[0].as_deref().unwrap()
+            ),
+            Some(&b),
+            None,
+        )
+        .await;
+    assert_eq!(cancelled.body["status"], "cancelled");
+    app.reserve(&a, &shop, 1).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

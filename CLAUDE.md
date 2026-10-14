@@ -38,7 +38,7 @@ Keep the repository root uncluttered and do not add speculative `.gitignore` ent
 ## Commands
 
 ```bash
-cargo test --workspace --all-features                                   # 395 tests incl. e2e over TCP
+cargo test --workspace --all-features                                   # 396 tests incl. e2e over TCP
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets           # default features too
 cargo fmt --all
@@ -322,11 +322,12 @@ Do not change these unless the user explicitly asks.
   nothing once its transaction is gone (no leases to run out; PostgreSQL also ends a
   transaction holding a queue after 10 s without a statement). Workers skip a held queue and
   serve other sales.
-- **Purchase worker commits in groups:** a sale's requests are served in runs without a
-  repeated account, one transaction per run: the queue, then the run's quotas
+- **Purchase worker commits in groups:** the oldest due requests of a sale, up to a batch, are
+  served as one run in one transaction: the queue, then the run's quotas
   (`InventoryTx::lock_quotas`, account order), then its stock (`InventoryTx::lock_stock`, type
   order), each locked and read. Every request is then decided in memory in arrival order, as
-  one-by-one processing would, and the run is written in a few multi-row statements
+  one-by-one processing would (an account's later requests see what its earlier ones took;
+  one rejected for stock takes no quota), and the run is written in a few multi-row statements
   (`take_quotas`, one `try_hold`, `insert_reservations`, `set_purchase_statuses`), so a run
   costs about as many statements however long it is; a lone request skips the reads and is
   decided by its conditional writes. A run that fails is redone one request at a time, and a
