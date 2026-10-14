@@ -275,7 +275,9 @@ Do not change these unless the user explicitly asks.
 - **Waiting rooms:** buyers may join before the sale opens and keep the order they joined in;
   nobody is admitted before `opens_at` (with no purchases yet the backlog is empty and would
   let the whole room through), then one batch per tick while the backlog is below
-  `max_backlog`.
+  `max_backlog`. An account holds one position per sale (`waiting_room_entries`): joining
+  again returns it with a new queue ticket, so repeated joins neither crowd others out nor
+  improve anyone's place.
 - **External sign-in:** Kippu ships no OAuth client; forks write a `Module` that calls
   `auth::external::link_or_create` and `auth::sessions::issue` (`docs/external-login.md`).
   Accounts may have no password and no email; merging by email requires a verified email and is
@@ -319,7 +321,9 @@ Do not change these unless the user explicitly asks.
   way (`stock_locked_up_front_never_deadlocks`).
 - **PostgreSQL queue numbers** come from a per-sale counter row (`INSERT … ON CONFLICT DO
   UPDATE`), not a sequence: an admission batch means "the next N people" and needs consecutive
-  numbers.
+  numbers. The increment and the account's entry are one statement (MySQL: one transaction),
+  so the row is locked no longer than for the increment alone; the only numbers lost are those
+  of one account's simultaneous joins racing each other on PostgreSQL and SQLite.
 
 ## Open tasks
 

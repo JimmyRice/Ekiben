@@ -12,7 +12,7 @@ use crate::convert::{
     AddressValues, EventRow, EventSummaryRow, InventoryRow, SaleRow, TicketTypeRow, all,
     event_status, extensions_json, instant, json, micros, optional,
 };
-use crate::{MySqlStore, error, unique};
+use crate::{MySqlStore, error, is_duplicate, unique};
 
 const EVENT_SUMMARY_COLUMNS: &str = "SELECT id, organization_id, slug, title, description, venue, \
      address_country, address_region, address_locality, address_postal_code, address_street, \
@@ -507,19 +507,48 @@ impl CatalogStore for MySqlStore {
             .collect())
     }
 
-    async fn join_waiting_room(&self, sale: SaleId) -> StoreResult<u64> {
+    async fn join_waiting_room(&self, sale: SaleId, account: AccountId) -> StoreResult<u64> {
+        if let Some(position) = waiting_room_entry(&self.pool, sale, account).await? {
+            return Ok(position);
+        }
+        // One transaction and one commit: the counter row stays locked until the entry is in,
+        // as long as a lone increment used to.
+        let mut tx = self.pool.begin().await.map_err(error)?;
         // LAST_INSERT_ID(expr) hands the new position back on this connection, atomically
         // with the increment.
-        let result = sqlx::query(
+        let position = sqlx::query(
             "INSERT INTO waiting_rooms (sale_id, last_position, admitted_through)
              VALUES (?, LAST_INSERT_ID(1), 0)
              ON DUPLICATE KEY UPDATE last_position = LAST_INSERT_ID(last_position + 1)",
         )
         .bind(sale.as_uuid())
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
-        .map_err(error)?;
-        Ok(result.last_insert_id())
+        .map_err(error)?
+        .last_insert_id();
+        let entered = sqlx::query(
+            "INSERT INTO waiting_room_entries (sale_id, account_id, position) VALUES (?, ?, ?)",
+        )
+        .bind(sale.as_uuid())
+        .bind(account.as_uuid())
+        .bind(i64::try_from(position).map_err(StoreError::backend)?)
+        .execute(&mut *tx)
+        .await;
+        match entered {
+            Ok(_) => {
+                tx.commit().await.map_err(error)?;
+                Ok(position)
+            }
+            // The same account joining at the same moment entered first: the increment is
+            // rolled back and its position stands.
+            Err(failure) if is_duplicate(&failure) => {
+                drop(tx);
+                waiting_room_entry(&self.pool, sale, account)
+                    .await?
+                    .ok_or_else(|| StoreError::backend("a waiting room entry vanished"))
+            }
+            Err(failure) => Err(error(failure)),
+        }
     }
 
     async fn waiting_room(&self, sale: SaleId) -> StoreResult<WaitingRoom> {
@@ -567,4 +596,23 @@ impl CatalogStore for MySqlStore {
         .map_err(error)?;
         Ok(result.rows_affected() == 1)
     }
+}
+
+/// The position `account` holds in a sale's waiting room, if it joined.
+async fn waiting_room_entry(
+    pool: &sqlx::MySqlPool,
+    sale: SaleId,
+    account: AccountId,
+) -> StoreResult<Option<u64>> {
+    let position = sqlx::query_scalar::<_, i64>(
+        "SELECT position FROM waiting_room_entries WHERE sale_id = ? AND account_id = ?",
+    )
+    .bind(sale.as_uuid())
+    .bind(account.as_uuid())
+    .fetch_optional(pool)
+    .await
+    .map_err(error)?;
+    position
+        .map(|position| u64::try_from(position).map_err(StoreError::backend))
+        .transpose()
 }

@@ -502,6 +502,44 @@ async fn the_waiting_room_admits_nobody_before_the_sale_opens() {
 }
 
 #[tokio::test]
+async fn joining_the_waiting_room_again_keeps_the_place() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({ "admission": { "mode": "waiting_room", "admit_per_tick": 1, "max_backlog": 100 } })).await;
+    let path = format!("/v1/sales/{}/waiting-room", shop.sale_id);
+    let (first, second) = (app.buyer().await, app.buyer().await);
+    let join = async |buyer: &str| app.call(Method::POST, &path, Some(buyer), None).await.body;
+
+    let place = join(&first).await;
+    assert_eq!(join(&second).await["position"], 2);
+    let again = join(&first).await;
+    assert_eq!(
+        again["position"], place["position"],
+        "one place per account"
+    );
+    assert_eq!(
+        app.call(Method::GET, &path, Some(&shop.organizer), None)
+            .await
+            .body,
+        json!({ "last_position": 2, "admitted_through": 0 }),
+        "joining again hands out no new position"
+    );
+
+    app.drain("admission").await;
+    let admitted = app
+        .call(
+            Method::POST,
+            &format!("/v1/sales/{}/admission", shop.sale_id),
+            Some(&first),
+            Some(json!({ "queue_ticket": again["queue_ticket"]["token"] })),
+        )
+        .await;
+    assert_eq!(
+        admitted.body["status"], "admitted",
+        "the new queue ticket holds the old place"
+    );
+}
+
+#[tokio::test]
 async fn free_tickets_are_issued_at_checkout() {
     let app = TestApp::start().await;
     let shop = app.shop(10, 0, json!({})).await;

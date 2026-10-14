@@ -100,13 +100,12 @@ async fn hot_paths_run_a_fixed_number_of_statements() {
     assert_eq!(offer.body["ticket_types"].as_array().unwrap().len(), 3);
 
     let buyer = app.buyer().await;
-    let place = app
-        .call(
-            Method::POST,
-            &format!("/v1/sales/{}/waiting-room", shop.sale_id),
-            Some(&buyer),
-            None,
-        )
+    let waiting_room = format!("/v1/sales/{}/waiting-room", shop.sale_id);
+    let (place, join_statements) = statements
+        .of(app.call(Method::POST, &waiting_room, Some(&buyer), None))
+        .await;
+    let (_, rejoin_statements) = statements
+        .of(app.call(Method::POST, &waiting_room, Some(&buyer), None))
         .await;
     app.drain("admission").await;
     let (admitted, admission_statements) = statements
@@ -126,13 +125,16 @@ async fn hot_paths_run_a_fixed_number_of_statements() {
     }
     let ((), three_requests) = statements.of(app.drain("purchases")).await;
 
-    // MySQL has neither RETURNING nor ON CONFLICT, so its writes take more statements.
-    let (worker_one, worker_three) = match std::env::var("EKIBEN_TEST_BACKEND").as_deref() {
-        Ok("mysql") => (17, 31),
-        _ => (12, 24),
+    // MySQL has neither RETURNING nor ON CONFLICT, so its writes take more statements, and it
+    // enters a first join in a transaction of its own.
+    let (join, worker_one, worker_three) = match std::env::var("EKIBEN_TEST_BACKEND").as_deref() {
+        Ok("mysql") => (7, 17, 31),
+        _ => (5, 12, 24),
     };
     let counts = [
         ("sale offer", offer_statements, 4),
+        ("join waiting room", join_statements, join),
+        ("join again", rejoin_statements, 3),
         ("admission", admission_statements, 3),
         ("purchase", purchase_statements, 3),
         ("worker, one request", one_request, worker_one),

@@ -37,7 +37,8 @@ pub(crate) async fn get_waiting_room(
     ))
 }
 
-/// Join a sale's waiting room.
+/// Join a sale's waiting room. Joining again returns the same position, with a new queue
+/// ticket.
 #[utoipa::path(
     post, path = "/v1/sales/{sale_id}/waiting-room", tag = TAG,
     security(("bearer" = [])),

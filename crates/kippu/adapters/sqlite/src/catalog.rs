@@ -498,7 +498,10 @@ impl CatalogStore for SqliteStore {
             .collect())
     }
 
-    async fn join_waiting_room(&self, sale: SaleId) -> StoreResult<u64> {
+    async fn join_waiting_room(&self, sale: SaleId, account: AccountId) -> StoreResult<u64> {
+        if let Some(position) = waiting_room_entry(&self.reader, sale, account).await? {
+            return Ok(position);
+        }
         let position = sqlx::query_scalar::<_, i64>(
             "INSERT INTO waiting_rooms (sale_id, last_position, admitted_through) VALUES (?1, 1, 0)
              ON CONFLICT (sale_id) DO UPDATE SET last_position = last_position + 1
@@ -508,7 +511,26 @@ impl CatalogStore for SqliteStore {
         .fetch_one(&self.writer)
         .await
         .map_err(error)?;
-        u64::try_from(position).map_err(StoreError::backend)
+        // The same account joining at the same moment may have entered first: its position
+        // stands, and this one is left unused.
+        let entered = sqlx::query(
+            "INSERT INTO waiting_room_entries (sale_id, account_id, position) VALUES (?1, ?2, ?3)
+             ON CONFLICT (sale_id, account_id) DO NOTHING",
+        )
+        .bind(sale.as_uuid())
+        .bind(account.as_uuid())
+        .bind(position)
+        .execute(&self.writer)
+        .await
+        .map_err(error)?
+        .rows_affected()
+            == 1;
+        if entered {
+            return u64::try_from(position).map_err(StoreError::backend);
+        }
+        waiting_room_entry(&self.writer, sale, account)
+            .await?
+            .ok_or_else(|| StoreError::backend("a waiting room entry vanished"))
     }
 
     async fn waiting_room(&self, sale: SaleId) -> StoreResult<WaitingRoom> {
@@ -555,4 +577,23 @@ impl CatalogStore for SqliteStore {
         .map_err(error)?;
         Ok(result.rows_affected() == 1)
     }
+}
+
+/// The position `account` holds in a sale's waiting room, if it joined.
+async fn waiting_room_entry(
+    pool: &sqlx::SqlitePool,
+    sale: SaleId,
+    account: AccountId,
+) -> StoreResult<Option<u64>> {
+    let position = sqlx::query_scalar::<_, i64>(
+        "SELECT position FROM waiting_room_entries WHERE sale_id = ?1 AND account_id = ?2",
+    )
+    .bind(sale.as_uuid())
+    .bind(account.as_uuid())
+    .fetch_optional(pool)
+    .await
+    .map_err(error)?;
+    position
+        .map(|position| u64::try_from(position).map_err(StoreError::backend))
+        .transpose()
 }

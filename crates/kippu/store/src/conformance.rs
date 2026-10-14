@@ -94,6 +94,7 @@ macro_rules! conformance_tests {
             attestations_are_recorded_once,
             one_reservation_per_purchase_request,
             waiting_room_positions_are_distinct,
+            an_account_keeps_its_waiting_room_position,
             waiting_room_advances_once,
             outbox_is_transactional_and_ordered,
             outbox_readers_never_skip_late_commits,
@@ -761,10 +762,14 @@ pub async fn one_reservation_per_purchase_request(store: Arc<dyn Store>) {
 
 pub async fn waiting_room_positions_are_distinct(store: Arc<dyn Store>) {
     let catalog = catalog(store.as_ref(), &[10]).await;
-    let joins = (0..100).map(|_| {
+    let mut buyers = Vec::new();
+    for _ in 0..100 {
+        buyers.push(account(store.as_ref()).await);
+    }
+    let joins = buyers.into_iter().map(|buyer| {
         let store = store.clone();
         let sale = catalog.sale;
-        tokio::spawn(async move { store.join_waiting_room(sale).await.unwrap() })
+        tokio::spawn(async move { store.join_waiting_room(sale, buyer).await.unwrap() })
     });
     let mut positions = Vec::new();
     for join in joins.collect::<Vec<_>>() {
@@ -782,10 +787,47 @@ pub async fn waiting_room_positions_are_distinct(store: Arc<dyn Store>) {
     );
 }
 
+pub async fn an_account_keeps_its_waiting_room_position(store: Arc<dyn Store>) {
+    let other_sale = catalog(store.as_ref(), &[10]).await;
+    let catalog = catalog(store.as_ref(), &[10]).await;
+    let (buyer, other) = (account(store.as_ref()).await, account(store.as_ref()).await);
+
+    let joins = (0..8).map(|_| {
+        let store = store.clone();
+        let sale = catalog.sale;
+        tokio::spawn(async move { store.join_waiting_room(sale, buyer).await.unwrap() })
+    });
+    let mut positions = HashSet::new();
+    for join in joins.collect::<Vec<_>>() {
+        positions.insert(join.await.unwrap());
+    }
+    assert_eq!(positions.len(), 1, "simultaneous joins share one position");
+    let position = positions.into_iter().next().unwrap();
+    assert_eq!(
+        store.join_waiting_room(catalog.sale, buyer).await.unwrap(),
+        position,
+        "joining again returns the same position"
+    );
+
+    let others = store.join_waiting_room(catalog.sale, other).await.unwrap();
+    assert_ne!(others, position, "another account gets another position");
+    let room = store.waiting_room(catalog.sale).await.unwrap();
+    assert!(others <= room.last_position && position <= room.last_position);
+    assert_eq!(
+        store
+            .join_waiting_room(other_sale.sale, buyer)
+            .await
+            .unwrap(),
+        1,
+        "each sale has a queue of its own"
+    );
+}
+
 pub async fn waiting_room_advances_once(store: Arc<dyn Store>) {
     let catalog = catalog(store.as_ref(), &[10]).await;
     for _ in 0..10 {
-        store.join_waiting_room(catalog.sale).await.unwrap();
+        let buyer = account(store.as_ref()).await;
+        store.join_waiting_room(catalog.sale, buyer).await.unwrap();
     }
     assert!(
         store

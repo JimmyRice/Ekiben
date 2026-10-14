@@ -159,10 +159,13 @@ pub trait CatalogStore {
         page: PageRequest<Keyset>,
     ) -> StoreResult<Vec<Favorite>>;
 
-    /// Hands out the next queue position of a sale's waiting room (starting at 1).
+    /// The queue position of `account` in a sale's waiting room: the one it got when it first
+    /// joined, or else the next one (starting at 1).
     ///
-    /// **Contract:** concurrent callers always receive distinct positions.
-    async fn join_waiting_room(&self, sale: SaleId) -> StoreResult<u64>;
+    /// **Contract:** an account keeps one position per sale, also when it joins several times
+    /// at once, and different accounts always receive different positions. A position may be
+    /// skipped (when one account's simultaneous joins race each other), never handed out twice.
+    async fn join_waiting_room(&self, sale: SaleId, account: AccountId) -> StoreResult<u64>;
     /// The waiting room's progress (all zeros if nobody joined yet).
     async fn waiting_room(&self, sale: SaleId) -> StoreResult<WaitingRoom>;
     /// Sales whose waiting room still has people waiting (`admitted_through < last_position`).

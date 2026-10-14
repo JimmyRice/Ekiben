@@ -68,7 +68,8 @@ pub async fn waiting_room(
     Ok(state.store().waiting_room(sale.id).await?)
 }
 
-/// Joins a sale's waiting room.
+/// Joins a sale's waiting room. An account holds one place: joining again returns the position
+/// it got the first time, with a new queue ticket.
 #[tracing::instrument(skip_all)]
 pub async fn join_waiting_room(
     state: &AppState,
@@ -81,7 +82,7 @@ pub async fn join_waiting_room(
     if !matches!(sale.admission, AdmissionPolicy::WaitingRoom { .. }) {
         return Err(no_waiting_room());
     }
-    let position = state.store().join_waiting_room(sale.id).await?;
+    let position = state.store().join_waiting_room(sale.id, account).await?;
     let token = state
         .tokens()
         .issue_queue_ticket(account, sale.id, position, state.now());
