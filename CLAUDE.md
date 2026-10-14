@@ -345,6 +345,11 @@ Do not change these unless the user explicitly asks.
 
 ## Known limitations
 
+- Arrival order (who gets the last tickets) is the `created_at` the front-door instance gave a
+  request by its own clock, not the database's: instances need NTP, and clock skew between
+  them shifts the order by as much (milliseconds in practice). With an inbox, a request still
+  on its way into the database can be overtaken by one accepted after it that is already
+  there; the window is the inbox's persisting delay.
 - Access tokens are not looked up: a closed account's tokens, and an organizer's membership
   in them, work until they expire (`auth.access_token_ttl_seconds`, 15 minutes by default).
 - Withdrawing an event checks for orders, then updates it; a purchase the worker commits in
