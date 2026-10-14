@@ -1004,3 +1004,75 @@ async fn organizers_reach_the_buyers_of_their_events() {
         .await;
     assert_eq!(gone.status, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn an_event_with_orders_is_cancelled_not_withdrawn() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let path = format!("/v1/events/{}", shop.event_id);
+    let set_status = async |status: &str| {
+        let current = app
+            .call(Method::GET, &path, Some(&shop.organizer), None)
+            .await;
+        app.call(
+            Method::PATCH,
+            &path,
+            Some(&shop.organizer),
+            Some(json!({ "version": current.body["version"], "status": status })),
+        )
+        .await
+    };
+    // Nobody ordered yet: it can go back to a draft and be published again.
+    assert_eq!(set_status("draft").await.status, StatusCode::OK);
+    assert_eq!(set_status("published").await.status, StatusCode::OK);
+
+    let buyer = app.buyer().await;
+    app.reserve(&buyer, &shop, 1).await;
+    let withdrawn = set_status("draft").await;
+    assert_eq!(withdrawn.status, StatusCode::CONFLICT);
+    assert_eq!(
+        withdrawn.body["type"],
+        "urn:kippu:problem:illegal-transition"
+    );
+    assert_eq!(set_status("cancelled").await.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_cancelled_event_sells_nothing_more() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let buyer = app.buyer().await;
+    // Queued before the cancellation, processed after it.
+    let queued = app.purchase(&buyer, &shop, 1, "before").await;
+    assert_eq!(queued.status, StatusCode::ACCEPTED);
+    let path = format!("/v1/events/{}", shop.event_id);
+    let current = app
+        .call(Method::GET, &path, Some(&shop.organizer), None)
+        .await;
+    let cancelled = app
+        .call(
+            Method::PATCH,
+            &path,
+            Some(&shop.organizer),
+            Some(json!({ "version": current.body["version"], "status": "cancelled" })),
+        )
+        .await;
+    assert_eq!(cancelled.status, StatusCode::OK);
+
+    app.drain("purchases").await;
+    let request = app
+        .call(
+            Method::GET,
+            &format!(
+                "/v1/purchase-requests/{}",
+                queued.body["id"].as_str().unwrap()
+            ),
+            Some(&buyer),
+            None,
+        )
+        .await;
+    assert_eq!(request.body["status"], "rejected", "{:?}", request.body);
+    let after = app.purchase(&buyer, &shop, 1, "after").await;
+    assert_eq!(after.status, StatusCode::CONFLICT);
+    assert_eq!(after.body["type"], "urn:kippu:problem:sale-closed");
+}

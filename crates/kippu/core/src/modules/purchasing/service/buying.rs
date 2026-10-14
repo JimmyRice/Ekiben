@@ -57,8 +57,15 @@ pub async fn submit_purchase(
             "header is required",
         ))
         .and_then(IdempotencyKey::new)?;
-    let (sale, _) = visible_sale(state, Some(principal), sale_id).await?;
+    let (sale, event) = visible_sale(state, Some(principal), sale_id).await?;
     let now = state.now();
+    if !event.is_on_sale() {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            ProblemKind::SALE_CLOSED,
+            "this event is not on sale: it is a draft or cancelled",
+        ));
+    }
     if !sale.is_open_at(now) {
         return Err(ApiError::new(
             StatusCode::CONFLICT,

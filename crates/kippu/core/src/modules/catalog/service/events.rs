@@ -246,6 +246,18 @@ pub async fn update_event(
         Scope::Organization(current.organization_id),
     )?;
     check_version(current.version, expected_version)?;
+    // Buyers and gates know an event once someone ordered for it: it can be cancelled, but
+    // not withdrawn.
+    if changes.status == Some(EventStatus::Draft)
+        && current.status != EventStatus::Draft
+        && state.store().has_orders(current.id, None).await?
+    {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            ProblemKind::ILLEGAL_TRANSITION,
+            "people ordered tickets for this event: cancel it instead of withdrawing it",
+        ));
+    }
     let event = Event {
         slug: match changes.slug {
             Some(slug) => Slug::new(slug)?,

@@ -38,7 +38,7 @@ Keep the repository root uncluttered and do not add speculative `.gitignore` ent
 ## Commands
 
 ```bash
-cargo test --workspace --all-features                                   # 373 tests incl. e2e over TCP
+cargo test --workspace --all-features                                   # 375 tests incl. e2e over TCP
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets           # default features too
 cargo fmt --all
@@ -269,6 +269,9 @@ Do not change these unless the user explicitly asks.
   so neither can make another account (no way back: Kippu does not verify emails, so a
   "restore" would let anyone with the address take over the old tickets). Closed accounts
   change no more; `sessions::issue` refuses them (`account-closed`).
+- **Event status and sales:** only a published event sells (front door and worker; a request
+  queued before a cancellation is rejected). An event someone ordered for (a reservation not
+  expired or cancelled) can be cancelled but not withdrawn to a draft.
 - **External sign-in:** Kippu ships no OAuth client; forks write a `Module` that calls
   `auth::external::link_or_create` and `auth::sessions::issue` (`docs/external-login.md`).
   Accounts may have no password and no email; merging by email requires a verified email and is
@@ -340,6 +343,8 @@ Do not change these unless the user explicitly asks.
 
 - Access tokens are not looked up: a closed account's tokens, and an organizer's membership
   in them, work until they expire (`auth.access_token_ttl_seconds`, 15 minutes by default).
+- Withdrawing an event checks for orders, then updates it; a purchase the worker commits in
+  between leaves a reservation on a draft (rare; the organizer publishes or cancels it).
 - The generic `Idempotency-Key` middleware does not stop two simultaneous first requests with
   the same key from both running (purchases and payments are idempotent on their own). A strict
   fix is a "processing" placeholder row.
