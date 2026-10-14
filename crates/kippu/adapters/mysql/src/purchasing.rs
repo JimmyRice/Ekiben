@@ -2,16 +2,18 @@ use async_trait::async_trait;
 use kippu_domain::purchase::{LineItem, PurchaseRequest, PurchaseStatus};
 use kippu_domain::reservation::{Reservation, ReservationStatus};
 use kippu_domain::{
-    AccountId, EventId, PurchaseRequestId, ReservationId, SaleId, TicketTypeId, Timestamp,
+    AccountId, EventId, OrganizationId, PurchaseRequestId, ReservationId, SaleId, TicketTypeId,
+    Timestamp,
 };
 use kippu_store::{
-    Holds, Insertion, InventoryTx, Keyset, Lease, LineItems, PageRequest, PurchaseStore,
-    PurchasesTx, ReservationsTx, StoreError, StoreResult,
+    Holds, Insertion, InventoryTx, Keyset, LineItems, PageRequest, PurchaseStore, PurchasesTx,
+    QueuedRequest, ReservationsTx, StoreError, StoreResult,
 };
 use uuid::Uuid;
 
 use crate::convert::{
-    PurchaseRequestRow, ReservationRow, all, json, micros, optional, purchase_status,
+    PurchaseRequestRow, QueuedRequestRow, ReservationRow, all, json, micros, optional,
+    purchase_status,
 };
 use crate::tx::MySqlTx;
 use crate::{MySqlStore, error, is_duplicate, unique};
@@ -74,49 +76,48 @@ impl PurchaseStore for MySqlStore {
         optional(row)
     }
 
-    async fn claim_purchase_requests(
+    async fn sales_with_queued_requests(
         &self,
-        lease: Lease,
+        now: Timestamp,
         limit: u32,
-    ) -> StoreResult<Vec<PurchaseRequest>> {
-        // No UPDATE … RETURNING in MySQL: lock the batch, lease it, read it, in one transaction.
-        // The queue index must drive the scan: with a filesort MySQL reads (and locks) every
-        // queued row before applying LIMIT, and concurrent claimers would skip them all.
-        let mut tx = self.pool.begin().await.map_err(error)?;
-        let ids = sqlx::query_scalar::<_, Uuid>(
-            "SELECT id FROM purchase_requests FORCE INDEX (purchase_requests_queue)
-             WHERE status = 'queued' AND (lease_until IS NULL OR lease_until <= ?)
-             ORDER BY created_at LIMIT ?
-             FOR UPDATE SKIP LOCKED",
+    ) -> StoreResult<Vec<(SaleId, u32)>> {
+        let sales = sqlx::query_as::<_, (Uuid, i64)>(
+            "SELECT sale_id, COUNT(*) FROM (SELECT sale_id, created_at FROM purchase_requests
+                                  WHERE status = 'queued'
+                                    AND (lease_until IS NULL OR lease_until <= ?)
+                                  ORDER BY created_at LIMIT ?) AS oldest
+             GROUP BY sale_id ORDER BY MIN(created_at), sale_id",
         )
-        .bind(micros(lease.now))
+        .bind(micros(now))
         .bind(limit)
-        .fetch_all(&mut *tx)
+        .fetch_all(&self.pool)
         .await
         .map_err(error)?;
-        if ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        let placeholders = vec!["?"; ids.len()].join(", ");
-        let mut update = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "UPDATE purchase_requests SET lease_until = ? WHERE id IN ({placeholders})"
-        )))
-        .bind(micros(lease.until));
-        for id in &ids {
-            update = update.bind(id);
-        }
-        update.execute(&mut *tx).await.map_err(error)?;
-        let mut select = sqlx::query_as::<_, PurchaseRequestRow>(sqlx::AssertSqlSafe(format!(
-            "SELECT {PURCHASE_REQUEST_COLUMNS} FROM purchase_requests WHERE id IN ({placeholders})"
-        )));
-        for id in &ids {
-            select = select.bind(id);
-        }
-        let rows = select.fetch_all(&mut *tx).await.map_err(error)?;
-        tx.commit().await.map_err(error)?;
-        let mut requests: Vec<PurchaseRequest> = all(rows)?;
-        requests.sort_by_key(|request| request.created_at);
-        Ok(requests)
+        sales
+            .into_iter()
+            .map(|(sale, queued)| {
+                Ok((
+                    sale.into(),
+                    u32::try_from(queued).map_err(StoreError::backend)?,
+                ))
+            })
+            .collect()
+    }
+
+    async fn postpone_purchase_request(
+        &self,
+        id: PurchaseRequestId,
+        until: Timestamp,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "UPDATE purchase_requests SET lease_until = ? WHERE id = ? AND status = 'queued'",
+        )
+        .bind(micros(until))
+        .bind(id.as_uuid())
+        .execute(&self.pool)
+        .await
+        .map_err(error)?;
+        Ok(())
     }
 
     async fn queued_purchase_count(&self, sale: SaleId, cap: u32) -> StoreResult<u64> {
@@ -230,18 +231,74 @@ impl PurchaseStore for MySqlStore {
 
 #[async_trait]
 impl PurchasesTx for MySqlTx {
-    async fn lock_purchase_request(
-        &mut self,
-        id: PurchaseRequestId,
-    ) -> StoreResult<Option<PurchaseRequest>> {
-        let row = sqlx::query_as::<_, PurchaseRequestRow>(sqlx::AssertSqlSafe(format!(
-            "SELECT {PURCHASE_REQUEST_COLUMNS} FROM purchase_requests WHERE id = ? FOR UPDATE"
-        )))
-        .bind(id.as_uuid())
+    async fn lock_purchase_queue(&mut self, sale: SaleId) -> StoreResult<bool> {
+        let taken = sqlx::query_scalar::<_, i64>(
+            "SELECT 1 FROM purchase_queues WHERE sale_id = ? FOR UPDATE SKIP LOCKED",
+        )
+        .bind(sale.as_uuid())
         .fetch_optional(&mut *self.conn)
         .await
         .map_err(error)?;
-        optional(row)
+        if taken.is_some() {
+            return Ok(true);
+        }
+        // Skipped because another transaction holds it, or missing because an instance older
+        // than the queues created the sale. An insert would wait on a held row, so a plain
+        // (unlocked) read tells the two apart first.
+        let exists =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM purchase_queues WHERE sale_id = ?")
+                .bind(sale.as_uuid())
+                .fetch_one(&mut *self.conn)
+                .await
+                .map_err(error)?;
+        if exists > 0 {
+            return Ok(false);
+        }
+        let created = sqlx::query("INSERT INTO purchase_queues (sale_id) VALUES (?)")
+            .bind(sale.as_uuid())
+            .execute(&mut *self.conn)
+            .await;
+        match created {
+            Ok(_) => Ok(true),
+            Err(failure) if is_duplicate(&failure) => Ok(false),
+            Err(failure) => Err(error(failure)),
+        }
+    }
+
+    async fn queued_requests(
+        &mut self,
+        sale: SaleId,
+        event: EventId,
+        organization: OrganizationId,
+        now: Timestamp,
+        limit: u32,
+    ) -> StoreResult<Vec<QueuedRequest>> {
+        // The sale's queue index must drive the scan: with a filesort MySQL would lock every
+        // queued request of the sale before applying LIMIT. FOR UPDATE: a worker of the
+        // previous release, which leases requests instead of holding the queue, may be serving
+        // some; they are left out once it commits.
+        let rows = sqlx::query_as::<_, QueuedRequestRow>(sqlx::AssertSqlSafe(format!(
+            "SELECT {PURCHASE_REQUEST_COLUMNS},
+                    EXISTS (SELECT 1 FROM denials d
+                            WHERE d.subject_id = r.account_id AND d.subject_kind = 'account'
+                              AND d.organization_id = ?
+                              AND (d.event_id IS NULL OR d.event_id = ?)) AS account_denied
+             FROM purchase_requests r FORCE INDEX (purchase_requests_sale_queue)
+             WHERE r.sale_id = ? AND r.status = 'queued'
+               AND (r.lease_until IS NULL OR r.lease_until <= ?)
+             ORDER BY r.created_at, r.id
+             LIMIT ?
+             FOR UPDATE OF r"
+        )))
+        .bind(organization.as_uuid())
+        .bind(event.as_uuid())
+        .bind(sale.as_uuid())
+        .bind(micros(now))
+        .bind(limit)
+        .fetch_all(&mut *self.conn)
+        .await
+        .map_err(error)?;
+        all(rows)
     }
 
     async fn set_purchase_status(

@@ -1,16 +1,18 @@
 use async_trait::async_trait;
 use kippu_domain::purchase::{LineItem, PurchaseRequest, PurchaseStatus};
 use kippu_domain::reservation::{Reservation, ReservationStatus};
-use kippu_domain::{AccountId, EventId, PurchaseRequestId, ReservationId, SaleId, Timestamp};
+use kippu_domain::{
+    AccountId, EventId, OrganizationId, PurchaseRequestId, ReservationId, SaleId, Timestamp,
+};
 use kippu_store::{
-    Hold, Holds, Insertion, InventoryTx, Keyset, Lease, LineItems, PageRequest, PurchaseStore,
-    PurchasesTx, ReservationsTx, StoreError, StoreResult,
+    Hold, Holds, Insertion, InventoryTx, Keyset, LineItems, PageRequest, PurchaseStore,
+    PurchasesTx, QueuedRequest, ReservationsTx, StoreError, StoreResult,
 };
 use sqlx::types::Json;
 use uuid::Uuid;
 
 use crate::convert::{
-    PurchaseRequestRow, ReservationRow, all, at, count, optional, purchase_status,
+    PurchaseRequestRow, QueuedRequestRow, ReservationRow, all, at, count, optional, purchase_status,
 };
 use crate::tx::PostgresTx;
 use crate::{PostgresStore, error, unique};
@@ -76,28 +78,48 @@ impl PurchaseStore for PostgresStore {
         optional(row)
     }
 
-    async fn claim_purchase_requests(
+    async fn sales_with_queued_requests(
         &self,
-        lease: Lease,
+        now: Timestamp,
         limit: u32,
-    ) -> StoreResult<Vec<PurchaseRequest>> {
-        let rows = sqlx::query_as::<_, PurchaseRequestRow>(sqlx::AssertSqlSafe(format!(
-            "UPDATE purchase_requests SET lease_until = $1
-             WHERE id IN (SELECT id FROM purchase_requests
-                          WHERE status = 'queued' AND (lease_until IS NULL OR lease_until <= $2)
-                          ORDER BY created_at LIMIT $3
-                          FOR UPDATE SKIP LOCKED)
-             RETURNING {PURCHASE_REQUEST_COLUMNS}"
-        )))
-        .bind(at(lease.until))
-        .bind(at(lease.now))
+    ) -> StoreResult<Vec<(SaleId, u32)>> {
+        let sales = sqlx::query_as::<_, (Uuid, i64)>(
+            "SELECT sale_id, COUNT(*) FROM (SELECT sale_id, created_at FROM purchase_requests
+                                  WHERE status = 'queued'
+                                    AND (lease_until IS NULL OR lease_until <= $1)
+                                  ORDER BY created_at LIMIT $2) AS oldest
+             GROUP BY sale_id ORDER BY MIN(created_at), sale_id",
+        )
+        .bind(at(now))
         .bind(i64::from(limit))
         .fetch_all(&self.pool)
         .await
         .map_err(error)?;
-        let mut requests: Vec<PurchaseRequest> = all(rows)?;
-        requests.sort_by_key(|request| request.created_at);
-        Ok(requests)
+        sales
+            .into_iter()
+            .map(|(sale, queued)| {
+                Ok((
+                    sale.into(),
+                    u32::try_from(queued).map_err(StoreError::backend)?,
+                ))
+            })
+            .collect()
+    }
+
+    async fn postpone_purchase_request(
+        &self,
+        id: PurchaseRequestId,
+        until: Timestamp,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "UPDATE purchase_requests SET lease_until = $2 WHERE id = $1 AND status = 'queued'",
+        )
+        .bind(id.as_uuid())
+        .bind(at(until))
+        .execute(&self.pool)
+        .await
+        .map_err(error)?;
+        Ok(())
     }
 
     async fn queued_purchase_count(&self, sale: SaleId, cap: u32) -> StoreResult<u64> {
@@ -200,18 +222,67 @@ impl PurchaseStore for PostgresStore {
 
 #[async_trait]
 impl PurchasesTx for PostgresTx {
-    async fn lock_purchase_request(
-        &mut self,
-        id: PurchaseRequestId,
-    ) -> StoreResult<Option<PurchaseRequest>> {
-        let row = sqlx::query_as::<_, PurchaseRequestRow>(sqlx::AssertSqlSafe(format!(
-            "SELECT {PURCHASE_REQUEST_COLUMNS} FROM purchase_requests WHERE id = $1 FOR UPDATE"
-        )))
-        .bind(id.as_uuid())
+    async fn lock_purchase_queue(&mut self, sale: SaleId) -> StoreResult<bool> {
+        // A worker sends its statements back to back. One whose machine froze or vanished
+        // without closing the connection would hold the queue until TCP gave up on it (hours by
+        // default), so a transaction holding a queue ends after 10 seconds without a statement.
+        let taken = sqlx::query_scalar::<_, String>(
+            "SELECT set_config('idle_in_transaction_session_timeout', '10s', true)
+             FROM purchase_queues WHERE sale_id = $1 FOR UPDATE SKIP LOCKED",
+        )
+        .bind(sale.as_uuid())
         .fetch_optional(&mut *self.conn)
         .await
         .map_err(error)?;
-        optional(row)
+        if taken.is_some() {
+            return Ok(true);
+        }
+        // Skipped because another transaction holds it, or missing because an instance older
+        // than the queues created the sale. Creating the row takes it; an existing one, held
+        // or not, makes this insert do nothing without waiting.
+        let created = sqlx::query_scalar::<_, String>(
+            "INSERT INTO purchase_queues (sale_id) VALUES ($1) ON CONFLICT (sale_id) DO NOTHING
+             RETURNING set_config('idle_in_transaction_session_timeout', '10s', true)",
+        )
+        .bind(sale.as_uuid())
+        .fetch_optional(&mut *self.conn)
+        .await
+        .map_err(error)?;
+        Ok(created.is_some())
+    }
+
+    async fn queued_requests(
+        &mut self,
+        sale: SaleId,
+        event: EventId,
+        organization: OrganizationId,
+        now: Timestamp,
+        limit: u32,
+    ) -> StoreResult<Vec<QueuedRequest>> {
+        // FOR UPDATE: a worker of the previous release, which leases requests instead of
+        // holding the queue, may be serving some; they are left out once it commits.
+        let rows = sqlx::query_as::<_, QueuedRequestRow>(sqlx::AssertSqlSafe(format!(
+            "SELECT {PURCHASE_REQUEST_COLUMNS},
+                    EXISTS (SELECT 1 FROM denials d
+                            WHERE d.subject_id = r.account_id AND d.subject_kind = 'account'
+                              AND d.organization_id = $2
+                              AND (d.event_id IS NULL OR d.event_id = $3)) AS account_denied
+             FROM purchase_requests r
+             WHERE r.sale_id = $1 AND r.status = 'queued'
+               AND (r.lease_until IS NULL OR r.lease_until <= $4)
+             ORDER BY r.created_at, r.id
+             LIMIT $5
+             FOR UPDATE OF r"
+        )))
+        .bind(sale.as_uuid())
+        .bind(organization.as_uuid())
+        .bind(event.as_uuid())
+        .bind(at(now))
+        .bind(i64::from(limit))
+        .fetch_all(&mut *self.conn)
+        .await
+        .map_err(error)?;
+        all(rows)
     }
 
     async fn set_purchase_status(

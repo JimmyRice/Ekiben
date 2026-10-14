@@ -32,7 +32,7 @@ use kippu_domain::denial::{Denial, DenialSubject, DeniedBecause, DeniedTicket};
 use kippu_domain::image::{EventImage, ImageFormat};
 use kippu_domain::outbox::IntegrationEvent;
 use kippu_domain::payment::{Environment, PaymentAttestation, PaymentDisposition};
-use kippu_domain::purchase::{Basket, LineItem, PurchaseRequest, PurchaseStatus};
+use kippu_domain::purchase::{Basket, LineItem, PurchaseRequest, PurchaseStatus, RejectionReason};
 use kippu_domain::refund::{Refund, RefundReason, RefundStatus};
 use kippu_domain::reservation::{Reservation, ReservationStatus, ReservedItem};
 use kippu_domain::ticket::{Ticket, TicketStatus};
@@ -90,7 +90,8 @@ macro_rules! conformance_tests {
             stock_locked_up_front_never_deadlocks,
             quotas_are_enforced_and_all_or_nothing,
             dropped_transactions_roll_back,
-            claims_are_exclusive_until_the_lease_lapses,
+            a_purchase_queue_is_held_by_one_transaction,
+            queued_requests_are_read_in_arrival_order_with_their_denials,
             attestations_are_recorded_once,
             one_reservation_per_purchase_request,
             waiting_room_positions_are_distinct,
@@ -640,57 +641,171 @@ pub async fn dropped_transactions_roll_back(store: Arc<dyn Store>) {
     assert_eq!(store.inventory(ticket_type).await.unwrap().unwrap().held, 0);
 }
 
-pub async fn claims_are_exclusive_until_the_lease_lapses(store: Arc<dyn Store>) {
+pub async fn a_purchase_queue_is_held_by_one_transaction(store: Arc<dyn Store>) {
+    let other = catalog(store.as_ref(), &[10]).await;
     let catalog = catalog(store.as_ref(), &[10]).await;
-    let buyer = account(store.as_ref()).await;
-    let mut expected = HashSet::new();
-    for index in 0..40 {
-        let request = purchase_request(buyer, &catalog, &format!("claim-{index}"));
-        store.insert_purchase_request(&request).await.unwrap();
-        expected.insert(request.id);
-    }
-    let lease = Lease {
-        now: now(),
-        until: now() + Duration::seconds(30),
-    };
-
-    let claimers = (0..8).map(|_| {
-        let store = store.clone();
-        tokio::spawn(async move { store.claim_purchase_requests(lease, 10).await.unwrap() })
-    });
-    let mut claimed = Vec::new();
-    for claimer in claimers.collect::<Vec<_>>() {
-        claimed.extend(claimer.await.unwrap().into_iter().map(|request| request.id));
-    }
-    let distinct: HashSet<_> = claimed.iter().copied().collect();
-    assert_eq!(distinct.len(), claimed.len(), "a request was claimed twice");
-    assert!(expected.is_subset(&distinct), "every request was claimed");
-
-    let early = Lease {
-        now: now() + Duration::seconds(29),
-        until: now() + Duration::seconds(59),
-    };
-    let reclaimed = store.claim_purchase_requests(early, 100).await.unwrap();
+    let mut first = store.begin().await.unwrap();
     assert!(
-        reclaimed
-            .iter()
-            .all(|request| !expected.contains(&request.id))
+        first
+            .purchases()
+            .lock_purchase_queue(catalog.sale)
+            .await
+            .unwrap()
+    );
+    if !store.capabilities().concurrent_writers {
+        // Write transactions never overlap: the queue is the transaction's anyway.
+        first.commit().await.unwrap();
+        return;
+    }
+
+    let mut second = store.begin().await.unwrap();
+    let held = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        second.purchases().lock_purchase_queue(catalog.sale),
+    )
+    .await
+    .expect("a held queue is refused at once, not waited for")
+    .unwrap();
+    assert!(!held, "one transaction at a time");
+    assert!(
+        second
+            .purchases()
+            .lock_purchase_queue(other.sale)
+            .await
+            .unwrap(),
+        "other sales' queues are free"
     );
 
-    let late = Lease {
-        now: now() + Duration::seconds(30),
-        until: now() + Duration::seconds(60),
-    };
-    let reclaimed: HashSet<_> = store
-        .claim_purchase_requests(late, 100)
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|request| request.id)
-        .collect();
+    first.commit().await.unwrap();
+    let mut third = store.begin().await.unwrap();
     assert!(
-        expected.is_subset(&reclaimed),
-        "lapsed leases can be claimed again"
+        third
+            .purchases()
+            .lock_purchase_queue(catalog.sale)
+            .await
+            .unwrap(),
+        "a commit lets the queue go"
+    );
+    drop(third);
+    // A dropped transaction rolls back as its connection goes back to the pool.
+    let mut taken = false;
+    for _ in 0..50 {
+        let mut fourth = store.begin().await.unwrap();
+        if fourth
+            .purchases()
+            .lock_purchase_queue(catalog.sale)
+            .await
+            .unwrap()
+        {
+            taken = true;
+            break;
+        }
+        drop(fourth);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(taken, "a dropped transaction lets the queue go");
+    drop(second);
+}
+
+pub async fn queued_requests_are_read_in_arrival_order_with_their_denials(store: Arc<dyn Store>) {
+    let organization = organization(store.as_ref()).await;
+    let elsewhere = catalog(store.as_ref(), &[10]).await;
+    let catalog = catalog_in(store.as_ref(), organization, &[10]).await;
+    let mut buyers = Vec::new();
+    for _ in 0..5 {
+        buyers.push(account(store.as_ref()).await);
+    }
+    let at = |seconds| now() + Duration::seconds(seconds);
+    let queue = |buyer, catalog: &Catalog, seconds| PurchaseRequest {
+        created_at: at(seconds),
+        updated_at: at(seconds),
+        ..purchase_request(buyer, catalog, &unique_suffix())
+    };
+    let postponed = queue(buyers[4], &catalog, 0);
+    let first = queue(buyers[0], &catalog, 1);
+    let second = queue(buyers[1], &catalog, 2);
+    let mut tied = [queue(buyers[2], &catalog, 3), queue(buyers[3], &catalog, 3)];
+    tied.sort_by_key(|request| request.id);
+    let other_sale = queue(buyers[0], &elsewhere, 0);
+    for request in [&postponed, &first, &second, &tied[0], &tied[1], &other_sale] {
+        store.insert_purchase_request(request).await.unwrap();
+    }
+    store
+        .postpone_purchase_request(postponed.id, at(60))
+        .await
+        .unwrap();
+    // One account denied for the event, another across the organization.
+    for (event, buyer) in [
+        (Some(catalog.event), first.account_id),
+        (None, tied[1].account_id),
+    ] {
+        let denied = denial(organization, event, DenialSubject::Account(buyer));
+        store.insert_denial(&denied).await.unwrap();
+    }
+
+    assert_eq!(
+        store.sales_with_queued_requests(at(10), 100).await.unwrap(),
+        vec![(elsewhere.sale, 1), (catalog.sale, 4)],
+        "by their oldest due request"
+    );
+    assert_eq!(
+        store.sales_with_queued_requests(at(10), 1).await.unwrap(),
+        vec![(elsewhere.sale, 1)],
+        "looking at no more requests than asked"
+    );
+
+    let read = async |now, limit| {
+        let mut tx = store.begin().await.unwrap();
+        assert!(
+            tx.purchases()
+                .lock_purchase_queue(catalog.sale)
+                .await
+                .unwrap()
+        );
+        tx.purchases()
+            .queued_requests(catalog.sale, catalog.event, organization, now, limit)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|queued| (queued.request.id, queued.account_denied))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        read(at(10), 10).await,
+        [
+            (first.id, true),
+            (second.id, false),
+            (tied[0].id, false),
+            (tied[1].id, true)
+        ],
+        "arrival order, ties by id, postponed requests and other sales left out"
+    );
+    assert_eq!(
+        read(at(10), 2).await,
+        [(first.id, true), (second.id, false)]
+    );
+    assert_eq!(
+        read(at(60), 1).await,
+        [(postponed.id, false)],
+        "a postponed request is due again when its time comes"
+    );
+
+    let mut tx = store.begin().await.unwrap();
+    tx.purchases()
+        .set_purchase_status(
+            first.id,
+            PurchaseStatus::Rejected {
+                reason: RejectionReason::AccountDenied,
+            },
+            at(10),
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        read(at(10), 1).await,
+        [(second.id, false)],
+        "served requests are gone from the queue"
     );
 }
 

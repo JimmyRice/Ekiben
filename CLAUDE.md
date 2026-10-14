@@ -80,7 +80,8 @@ as `shop`, `attestor`, `reserve`, `drain`); the full journey over real TCP is
 
 - **Stateless.** No in-process state shared between requests. Everything mutable lives in the
   store; tokens are signed and verified without lookups. Background tasks must be safe on any
-  number of instances (leases, compare-and-set, conditional updates).
+  number of instances (leases, compare-and-set, conditional updates, locks held for one
+  transaction).
 - **Business logic lives once, in `kippu-core` services.** Adapters only implement the store
   primitives. A new guarantee the logic relies on goes into the store's rustdoc contract *and*
   a new case in `crates/kippu/store/src/conformance.rs`; every adapter runs the suite via
@@ -313,12 +314,22 @@ Do not change these unless the user explicitly asks.
   (`account_denied`) by the worker, not the front door; a reservation held before the denial
   can still be paid (its tickets are refused at the gate). Webhooks are not the channel for gates
   (they need an inbound public endpoint and give no snapshot).
-- **Purchase worker commits in groups:** a sale's requests are processed in runs without a
-  repeated account, one transaction per run: quotas first (account order), then
+- **Purchase workers hold a sale's queue for one transaction:** each transaction takes the
+  sale's row in `purchase_queues` (`PurchasesTx::lock_purchase_queue`, `FOR UPDATE SKIP
+  LOCKED`; SQLite needs none) and only then reads its oldest queued requests
+  (`queued_requests`, `created_at` then id, with each account's denial), so every sale is
+  served in arrival order however many workers and instances run, and a worker that dies holds
+  nothing once its transaction is gone (no leases to run out; PostgreSQL also ends a
+  transaction holding a queue after 10 s without a statement). Workers skip a held queue and
+  serve other sales.
+- **Purchase worker commits in groups:** a sale's requests are served in runs without a
+  repeated account, one transaction per run: the queue, then quotas (account order), then
   `InventoryTx::lock_stock` on every type the run needs (type order), then stock in arrival
   order. Outcomes equal one-by-one processing; a run that fails is redone one request at a
-  time. Any transaction that changes several requests' stock must lock it up front the same
-  way (`stock_locked_up_front_never_deadlocks`).
+  time, and a request that fails on its own is postponed (`lease_until`, by
+  `workers.purchase_lease_seconds`) instead of holding up the queue. Any transaction that
+  changes several requests' stock must lock it up front the same way
+  (`stock_locked_up_front_never_deadlocks`).
 - **PostgreSQL queue numbers** come from a per-sale counter row (`INSERT … ON CONFLICT DO
   UPDATE`), not a sequence: an admission batch means "the next N people" and needs consecutive
   numbers. The increment and the account's entry are one statement (MySQL: one transaction),
@@ -349,6 +360,15 @@ Do not change these unless the user explicitly asks.
 
 ## Known limitations
 
+- One sale is served by one transaction at a time, so a single sale's purchase throughput does
+  not grow with workers or instances (other sales are served in parallel): about 1,450
+  requests/s on PostgreSQL and 1,850 on MySQL in local containers. Beyond that the options are
+  fewer statements per request in the run, or inventory buckets (Open tasks), which would
+  relax strict arrival order.
+- On MySQL, a purchase worker whose machine freezes or vanishes without closing its connection
+  holds its transaction, and so its sale's queue, until the server drops the connection: set
+  `wait_timeout` (seconds) low enough on the server. PostgreSQL ends such a transaction after
+  10 s by itself.
 - Arrival order (who gets the last tickets) is the `created_at` the front-door instance gave a
   request by its own clock, not the database's: instances need NTP, and clock skew between
   them shifts the order by as much (milliseconds in practice). With an inbox, a request still

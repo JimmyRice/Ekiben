@@ -19,9 +19,13 @@ pub enum AdmissionPolicy {
     /// Buyers join a queue, also before the sale opens, and are admitted in batches from the
     /// moment it opens.
     WaitingRoom {
-        /// How many queue positions are admitted per admission tick.
+        /// How many queue positions are admitted per admission tick. One sale is served by one
+        /// transaction at a time, so about 80% of what the workers serve of a single sale per
+        /// tick keeps them busy without the backlog growing.
         admit_per_tick: u32,
-        /// Admission pauses while this many purchase requests are waiting to be processed.
+        /// Admission pauses while this many purchase requests are waiting to be processed:
+        /// about one second of what the workers serve of a single sale, so a buyer let in waits
+        /// about a second for the outcome.
         max_backlog: u32,
     },
 }

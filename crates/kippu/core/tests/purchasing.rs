@@ -8,7 +8,7 @@ use std::sync::Arc;
 use axum::http::{Method, StatusCode};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use kippu_domain::Duration;
+use kippu_domain::{Duration, SaleId};
 use serde_json::{Value, json};
 use support::{TestApp, uuid_suffix};
 
@@ -759,6 +759,93 @@ async fn a_batch_of_buyers_is_served_in_arrival_order() {
             "limit_exceeded"
         ]
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_workers_serve_a_sale_in_arrival_order() {
+    // Small batches, so that four workers at once (as on four instances) take turns on one
+    // sale's queue.
+    let app = TestApp::start_with(Vec::new(), |config| {
+        config.workers.purchase_batch_size = 3.try_into().unwrap();
+    })
+    .await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let mut submitted = Vec::new();
+    for _ in 0..30 {
+        let buyer = app.buyer().await;
+        app.clock.advance(Duration::milliseconds(1));
+        let reply = app.purchase(&buyer, &shop, 1, &uuid_suffix()).await;
+        assert_eq!(reply.status, StatusCode::ACCEPTED, "{:?}", reply.body);
+        submitted.push((buyer, reply.body["id"].as_str().unwrap().to_owned()));
+    }
+    tokio::join!(
+        app.drain("purchases"),
+        app.drain("purchases"),
+        app.drain("purchases"),
+        app.drain("purchases"),
+    );
+
+    let mut served = Vec::new();
+    for (arrival, (buyer, id)) in submitted.iter().enumerate() {
+        let request = app
+            .call(
+                Method::GET,
+                &format!("/v1/purchase-requests/{id}"),
+                Some(buyer),
+                None,
+            )
+            .await;
+        if request.body["status"] == "reserved" {
+            served.push(arrival);
+        }
+    }
+    assert_eq!(
+        served,
+        (0..10).collect::<Vec<_>>(),
+        "the first ten buyers get the ten tickets"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_worker_that_dies_holds_up_nobody() {
+    let app = TestApp::start().await;
+    let store = app.app.state().store();
+    if !store.capabilities().concurrent_writers {
+        // One write transaction at a time: there is no other worker to hold anything up.
+        return;
+    }
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let buyer = app.buyer().await;
+    let reply = app.purchase(&buyer, &shop, 1, "k").await;
+    let path = format!(
+        "/v1/purchase-requests/{}",
+        reply.body["id"].as_str().unwrap()
+    );
+    let status = async || {
+        app.call(Method::GET, &path, Some(&buyer), None).await.body["status"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+
+    // A worker takes the sale's queue and dies in the middle of its transaction.
+    let sale: SaleId = shop.sale_id.parse().unwrap();
+    let mut dying = store.begin().await.unwrap();
+    assert!(dying.purchases().lock_purchase_queue(sale).await.unwrap());
+    app.drain("purchases").await;
+    assert_eq!(status().await, "queued", "the queue is held");
+    drop(dying);
+
+    // No lease to run out: once its transaction is gone, the next worker serves the sale,
+    // without the clock moving.
+    for _ in 0..50 {
+        app.drain("purchases").await;
+        if status().await != "queued" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(status().await, "reserved");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

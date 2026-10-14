@@ -239,6 +239,8 @@ impl CatalogStore for MySqlStore {
     }
 
     async fn insert_sale(&self, sale: &Sale) -> StoreResult<()> {
+        // The sale's purchase queue comes with it, in the same transaction.
+        let mut tx = self.pool.begin().await.map_err(error)?;
         sqlx::query(
             "INSERT INTO sales (id, event_id, name, opens_at, closes_at, admission,
                                 reservation_ttl_seconds, max_tickets_per_request,
@@ -257,10 +259,15 @@ impl CatalogStore for MySqlStore {
         .bind(sale.environment.as_str())
         .bind(micros(sale.created_at))
         .bind(sale.version)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(error)?;
-        Ok(())
+        sqlx::query("INSERT INTO purchase_queues (sale_id) VALUES (?)")
+            .bind(sale.id.as_uuid())
+            .execute(&mut *tx)
+            .await
+            .map_err(error)?;
+        tx.commit().await.map_err(error)
     }
 
     async fn update_sale(&self, sale: &Sale, expected_version: i64) -> StoreResult<()> {

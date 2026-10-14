@@ -224,11 +224,16 @@ impl CatalogStore for PostgresStore {
     }
 
     async fn insert_sale(&self, sale: &Sale) -> StoreResult<()> {
+        // The sale's purchase queue comes with it, in the same statement.
         sqlx::query(
-            "INSERT INTO sales (id, event_id, name, opens_at, closes_at, admission,
-                                reservation_ttl_seconds, max_tickets_per_request,
-                                accepted_attestors, environment, created_at, version)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+            "WITH sale AS (
+                 INSERT INTO sales (id, event_id, name, opens_at, closes_at, admission,
+                                    reservation_ttl_seconds, max_tickets_per_request,
+                                    accepted_attestors, environment, created_at, version)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                 RETURNING id
+             )
+             INSERT INTO purchase_queues (sale_id) SELECT id FROM sale",
         )
         .bind(sale.id.as_uuid())
         .bind(sale.event_id.as_uuid())

@@ -2,10 +2,11 @@ use async_trait::async_trait;
 use kippu_domain::purchase::{Basket, LineItem, PurchaseRequest, PurchaseStatus};
 use kippu_domain::reservation::{Reservation, ReservationStatus};
 use kippu_domain::{
-    AccountId, EventId, PurchaseRequestId, ReservationId, SaleId, TicketTypeId, Timestamp,
+    AccountId, EventId, OrganizationId, PurchaseRequestId, ReservationId, SaleId, TicketTypeId,
+    Timestamp,
 };
 
-use crate::{Insertion, Keyset, Lease, PageRequest, StoreResult};
+use crate::{Insertion, Keyset, PageRequest, StoreResult};
 
 /// Purchase requests and reservations, outside a transaction.
 #[async_trait]
@@ -23,15 +24,22 @@ pub trait PurchaseStore {
     async fn purchase_request(&self, id: PurchaseRequestId)
     -> StoreResult<Option<PurchaseRequest>>;
 
-    /// Claims up to `limit` queued requests whose previous lease (if any) has lapsed, oldest
-    /// first, and leases them until `lease.until`.
-    ///
-    /// **Contract:** while a lease is live, no other caller can claim the same request.
-    async fn claim_purchase_requests(
+    /// Sales with queued requests that are due by `now` (not postponed beyond it), in the
+    /// order of their oldest such request, looking at no more than the `limit` oldest requests;
+    /// each with how many of those requests are its.
+    async fn sales_with_queued_requests(
         &self,
-        lease: Lease,
+        now: Timestamp,
         limit: u32,
-    ) -> StoreResult<Vec<PurchaseRequest>>;
+    ) -> StoreResult<Vec<(SaleId, u32)>>;
+
+    /// Keeps a queued request from being served before `until`: a request that failed on its
+    /// own waits before it is tried again instead of holding up the requests behind it.
+    async fn postpone_purchase_request(
+        &self,
+        id: PurchaseRequestId,
+        until: Timestamp,
+    ) -> StoreResult<()>;
 
     /// How many requests of a sale are still queued, counting no further than `cap`: the
     /// backlog the waiting room compares with its limit.
@@ -76,11 +84,30 @@ pub trait PurchaseStore {
 /// Purchase requests inside a transaction.
 #[async_trait]
 pub trait PurchasesTx: Send {
-    /// Reads a request and locks it until the transaction ends.
-    async fn lock_purchase_request(
+    /// Takes a sale's purchase queue for this transaction, unless another open transaction
+    /// holds it: then returns `false` at once, without waiting.
+    ///
+    /// **Contract:** at most one open transaction holds a sale's queue, and it lets go as the
+    /// transaction ends, however it ends (commit, rollback, a dropped connection), so a worker
+    /// that dies holds nothing up. A backend whose write transactions never overlap may always
+    /// return `true`.
+    async fn lock_purchase_queue(&mut self, sale: SaleId) -> StoreResult<bool>;
+
+    /// The oldest queued requests of a sale that are due by `now`, at most `limit`, in arrival
+    /// order (`created_at`, ties by id), each locked until the transaction ends, and whether
+    /// each one's account is denied for `event` of `organization` (as
+    /// [`DenialStore::account_denied`](crate::DenialStore::account_denied) answers).
+    ///
+    /// **Contract:** read after [`PurchasesTx::lock_purchase_queue`], the requests are exactly
+    /// those no transaction that held the queue before has served.
+    async fn queued_requests(
         &mut self,
-        id: PurchaseRequestId,
-    ) -> StoreResult<Option<PurchaseRequest>>;
+        sale: SaleId,
+        event: EventId,
+        organization: OrganizationId,
+        now: Timestamp,
+        limit: u32,
+    ) -> StoreResult<Vec<QueuedRequest>>;
 
     /// Records the outcome of a request.
     async fn set_purchase_status(
@@ -89,6 +116,15 @@ pub trait PurchasesTx: Send {
         status: PurchaseStatus,
         now: Timestamp,
     ) -> StoreResult<()>;
+}
+
+/// A queued request as a purchase worker reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedRequest {
+    /// The request.
+    pub request: PurchaseRequest,
+    /// Whether its account is denied for the sale's event.
+    pub account_denied: bool,
 }
 
 /// A per-account limit to respect while taking quota.

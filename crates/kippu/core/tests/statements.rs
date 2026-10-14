@@ -125,12 +125,37 @@ async fn hot_paths_run_a_fixed_number_of_statements() {
     }
     let ((), three_requests) = statements.of(app.drain("purchases")).await;
 
+    // Ten buyers in one batch, served together: what each request costs shows here.
+    let mut tickets = Vec::new();
+    for _ in 0..10 {
+        let buyer = app.buyer().await;
+        let place = app
+            .call(Method::POST, &waiting_room, Some(&buyer), None)
+            .await;
+        tickets.push((buyer, place.body["queue_ticket"]["token"].clone()));
+    }
+    app.drain("admission").await;
+    for (buyer, ticket) in &tickets {
+        let admitted = app
+            .call(
+                Method::POST,
+                &format!("/v1/sales/{}/admission", shop.sale_id),
+                Some(buyer),
+                Some(json!({ "queue_ticket": ticket })),
+            )
+            .await;
+        let pass = admitted.body["admission_pass"]["token"].as_str().unwrap();
+        purchase(&app, &shop, buyer, pass).await;
+    }
+    let ((), ten_buyers) = statements.of(app.drain("purchases")).await;
+
     // MySQL has neither RETURNING nor ON CONFLICT, so its writes take more statements, and it
     // enters a first join in a transaction of its own.
-    let (join, worker_one, worker_three) = match std::env::var("EKIBEN_TEST_BACKEND").as_deref() {
-        Ok("mysql") => (7, 17, 31),
-        _ => (5, 12, 24),
-    };
+    let (join, worker_one, worker_three, worker_ten) =
+        match std::env::var("EKIBEN_TEST_BACKEND").as_deref() {
+            Ok("mysql") => (7, 13, 27, 59),
+            _ => (5, 12, 24, 58),
+        };
     let counts = [
         ("sale offer", offer_statements, 4),
         ("join waiting room", join_statements, join),
@@ -139,6 +164,7 @@ async fn hot_paths_run_a_fixed_number_of_statements() {
         ("purchase", purchase_statements, 3),
         ("worker, one request", one_request, worker_one),
         ("worker, three requests", three_requests, worker_three),
+        ("worker, ten buyers", ten_buyers, worker_ten),
     ];
     for (path, measured, most) in counts {
         eprintln!("{path}: {measured} statements");

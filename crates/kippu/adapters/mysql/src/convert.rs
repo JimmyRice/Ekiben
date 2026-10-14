@@ -23,7 +23,7 @@ use kippu_domain::ticket::{Ticket, TicketStatus};
 use kippu_domain::validation::{CountryCode, Email, ProviderName, Slug, Subject};
 use kippu_domain::webhook::Webhook;
 use kippu_domain::{Currency, Money, Timestamp};
-use kippu_store::StoreError;
+use kippu_store::{QueuedRequest, StoreError};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use uuid::Uuid;
@@ -433,6 +433,25 @@ pub(crate) struct PurchaseRequestRow {
     rejection_reason: Option<String>,
     created_at: i64,
     updated_at: i64,
+}
+
+/// A queued request with whether its account is denied, as purchase workers read it.
+#[derive(sqlx::FromRow)]
+pub(crate) struct QueuedRequestRow {
+    #[sqlx(flatten)]
+    request: PurchaseRequestRow,
+    account_denied: bool,
+}
+
+impl TryFrom<QueuedRequestRow> for QueuedRequest {
+    type Error = StoreError;
+
+    fn try_from(row: QueuedRequestRow) -> Result<Self, StoreError> {
+        Ok(Self {
+            request: row.request.try_into()?,
+            account_denied: row.account_denied,
+        })
+    }
 }
 
 impl TryFrom<PurchaseRequestRow> for PurchaseRequest {

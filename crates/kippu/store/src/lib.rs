@@ -32,7 +32,7 @@ pub use outbox::{OutboxRecord, OutboxStore, OutboxTx};
 pub use payments::{PaymentStore, PaymentsTx};
 pub use primitives::{Insertion, Keyset, Lease, Page, PageRequest};
 pub use purchasing::{
-    Hold, Holds, InventoryTx, LineItems, PurchaseStore, PurchasesTx, ReservationsTx,
+    Hold, Holds, InventoryTx, LineItems, PurchaseStore, PurchasesTx, QueuedRequest, ReservationsTx,
 };
 pub use queue::{EventBus, InboxDelivery, PurchaseInbox};
 pub use store::{Store, StoreCapabilities, StoreTx};
