@@ -9,10 +9,11 @@ use std::str::FromStr;
 
 use kippu_domain::account::{Account, Identity, Organization, Role};
 use kippu_domain::catalog::{
-    Address, Event, EventStatus, EventSummary, Inventory, Sale, TicketType,
+    Address, Audience, Event, EventStatus, EventSummary, Inventory, Sale, TicketType,
 };
 use kippu_domain::denial::{Denial, DenialSubject, DeniedBecause, DeniedTicket};
 use kippu_domain::image::EventImage;
+use kippu_domain::invitation::Invitation;
 use kippu_domain::payment::{
     Attestor, AttestorKey, Environment, PaymentAttestation, PaymentDisposition,
 };
@@ -297,6 +298,7 @@ pub(crate) struct SaleRow {
     id: Uuid,
     event_id: Uuid,
     name: String,
+    audience: String,
     opens_at: i64,
     closes_at: i64,
     admission: String,
@@ -316,6 +318,7 @@ impl TryFrom<SaleRow> for Sale {
             id: row.id.into(),
             event_id: row.event_id.into(),
             name: row.name,
+            audience: parse::<Audience>(&row.audience)?,
             opens_at: instant(row.opens_at),
             closes_at: instant(row.closes_at),
             admission: from_json(&row.admission)?,
@@ -428,12 +431,14 @@ pub(crate) struct PurchaseRequestRow {
     updated_at: i64,
 }
 
-/// A queued request with whether its account is denied, as purchase workers read it.
+/// A queued request with whether its account is denied and invited, as purchase workers read
+/// it.
 #[derive(sqlx::FromRow)]
 pub(crate) struct QueuedRequestRow {
     #[sqlx(flatten)]
     request: PurchaseRequestRow,
     account_denied: bool,
+    account_invited: bool,
 }
 
 impl TryFrom<QueuedRequestRow> for QueuedRequest {
@@ -443,6 +448,7 @@ impl TryFrom<QueuedRequestRow> for QueuedRequest {
         Ok(Self {
             request: row.request.try_into()?,
             account_denied: row.account_denied,
+            account_invited: row.account_invited,
         })
     }
 }
@@ -712,6 +718,25 @@ impl TryFrom<DenialRow> for Denial {
             created_at: instant(row.created_at),
             updated_at: instant(row.updated_at),
             version: row.version,
+        })
+    }
+}
+
+#[derive(sqlx::FromRow)]
+pub(crate) struct InvitationRow {
+    sale_id: Uuid,
+    account_id: Uuid,
+    created_at: i64,
+}
+
+impl TryFrom<InvitationRow> for Invitation {
+    type Error = StoreError;
+
+    fn try_from(row: InvitationRow) -> Result<Self, StoreError> {
+        Ok(Self {
+            sale_id: row.sale_id.into(),
+            account_id: row.account_id.into(),
+            created_at: instant(row.created_at),
         })
     }
 }

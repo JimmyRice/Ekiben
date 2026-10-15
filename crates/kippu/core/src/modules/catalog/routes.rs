@@ -3,9 +3,11 @@
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use kippu_domain::catalog::{Event, EventSummary, Sale, TicketType};
+use kippu_domain::invitation::Invitation;
 use kippu_domain::validation::Slug;
-use kippu_domain::{EventId, OrganizationId, SaleId, TicketTypeId};
+use kippu_domain::{AccountId, EventId, OrganizationId, SaleId, TicketTypeId};
 
 use super::dto::{
     CreateEventRequest, EventPatch, EventsQuery, InventoryView, OrganizationProfile, SaleDetail,
@@ -459,6 +461,85 @@ pub(crate) async fn get_favorite(
     Path(event_id): Path<EventId>,
 ) -> ApiResult<StatusCode> {
     service::favorite(&state, &principal, event_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// A sale's invitation list, most recently invited first. Only these accounts see and buy
+/// from a sale whose audience is `invited`.
+#[utoipa::path(
+    get, path = "/v1/sales/{sale_id}/invitations", tag = TAG,
+    security(("bearer" = [])),
+    params(("sale_id" = SaleId, Path), PageQuery),
+    responses(
+        (status = 200, body = Listing<Invitation>),
+        (status = 403, body = Problem),
+        (status = 404, body = Problem),
+        (status = 409, description = "A private sale has no list", body = Problem)
+    )
+)]
+pub(crate) async fn list_invitations(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(sale_id): Path<SaleId>,
+    Query(query): Query<PageQuery>,
+) -> ApiResult<Json<Listing<Invitation>>> {
+    let page = query.page(ListingTag::SALE_INVITATIONS)?;
+    let invitations = service::invitations(&state, &principal, sale_id, page).await?;
+    Ok(Json(Listing::page(
+        invitations,
+        ListingTag::SALE_INVITATIONS,
+        |invitation| invitation,
+    )))
+}
+
+/// Invite an account to a sale: once the sale's audience is `invited`, it sees the sale and
+/// may buy from it. The list can be kept while the sale is still public. Inviting an account
+/// again answers 200 with the invitation already there.
+#[utoipa::path(
+    put, path = "/v1/sales/{sale_id}/invitations/{account_id}", tag = TAG,
+    security(("bearer" = [])),
+    params(("sale_id" = SaleId, Path), ("account_id" = AccountId, Path)),
+    responses(
+        (status = 201, body = Invitation),
+        (status = 200, description = "The account was invited already", body = Invitation),
+        (status = 403, body = Problem),
+        (status = 404, body = Problem),
+        (status = 409, description = "The sale is private, or the account closed", body = Problem)
+    )
+)]
+pub(crate) async fn invite(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((sale_id, account_id)): Path<(SaleId, AccountId)>,
+) -> ApiResult<Response> {
+    let added = service::invite(&state, &principal, sale_id, account_id).await?;
+    let status = if added.created {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+    Ok((status, Json(added.invitation)).into_response())
+}
+
+/// Take an account off a sale's invitation list. It buys no more from the sale while the sale
+/// is for invited accounts only; tickets it already has stay valid (deny them to refuse entry).
+#[utoipa::path(
+    delete, path = "/v1/sales/{sale_id}/invitations/{account_id}", tag = TAG,
+    security(("bearer" = [])),
+    params(("sale_id" = SaleId, Path), ("account_id" = AccountId, Path)),
+    responses(
+        (status = 204),
+        (status = 403, body = Problem),
+        (status = 404, body = Problem),
+        (status = 409, description = "A private sale has no list", body = Problem)
+    )
+)]
+pub(crate) async fn uninvite(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((sale_id, account_id)): Path<(SaleId, AccountId)>,
+) -> ApiResult<StatusCode> {
+    service::uninvite(&state, &principal, sale_id, account_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

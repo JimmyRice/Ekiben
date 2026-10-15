@@ -10,6 +10,7 @@ use kippu_store::{
     Hold, Holds, Insertion, InventoryTx, Keyset, LineItems, PageRequest, PurchaseStore,
     PurchasesTx, QueuedRequest, QuotaLines, ReservationsTx, StoreError, StoreResult,
 };
+use sqlx::PgConnection;
 use sqlx::types::Json;
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -26,9 +27,54 @@ type PgQuery<'q> = sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArgu
 
 const PURCHASE_REQUEST_COLUMNS: &str = "id, account_id, sale_id, basket, status, reservation_id, rejection_reason, created_at, updated_at";
 
+/// Whether a queued request's account (`r`) is on its sale's invitation list.
+const INVITED: &str = "EXISTS (SELECT 1 FROM sale_invitations i \
+     WHERE i.sale_id = r.sale_id AND i.account_id = r.account_id)";
+
+/// What [`INVITED`] stands for when the list does not matter.
+const EVERYONE_INVITED: &str = "TRUE";
+
 const RESERVATION_COLUMNS: &str = "SELECT id, purchase_request_id, account_id, sale_id, event_id, \
      items, total_minor, currency, environment, status, attestor_id, expires_at, created_at, \
      updated_at FROM reservations";
+
+/// Records a purchase request in its status, unless one with its id exists: then returns that.
+/// `ON CONFLICT DO NOTHING` raises no error, so a transaction can go on either way.
+async fn insert_request(
+    conn: &mut PgConnection,
+    request: &PurchaseRequest,
+) -> StoreResult<Insertion<PurchaseRequest>> {
+    let status = purchase_status(request.status);
+    let inserted = sqlx::query(
+        "INSERT INTO purchase_requests (id, account_id, sale_id, basket, status, reservation_id,
+                                        rejection_reason, lease_until, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9)
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(request.id.as_uuid())
+    .bind(request.account_id.as_uuid())
+    .bind(request.sale_id.as_uuid())
+    .bind(Json(&request.basket))
+    .bind(status.status)
+    .bind(status.reservation_id)
+    .bind(status.rejection_reason)
+    .bind(at(request.created_at))
+    .bind(at(request.updated_at))
+    .execute(&mut *conn)
+    .await
+    .map_err(error)?;
+    if inserted.rows_affected() == 1 {
+        return Ok(Insertion::Inserted);
+    }
+    let existing = sqlx::query_as::<_, PurchaseRequestRow>(sqlx::AssertSqlSafe(format!(
+        "SELECT {PURCHASE_REQUEST_COLUMNS} FROM purchase_requests WHERE id = $1"
+    )))
+    .bind(request.id.as_uuid())
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(error)?;
+    Ok(Insertion::Existing(existing.try_into()?))
+}
 
 #[async_trait]
 impl PurchaseStore for PostgresStore {
@@ -36,36 +82,8 @@ impl PurchaseStore for PostgresStore {
         &self,
         request: &PurchaseRequest,
     ) -> StoreResult<Insertion<PurchaseRequest>> {
-        let status = purchase_status(request.status);
-        let inserted = sqlx::query(
-            "INSERT INTO purchase_requests (id, account_id, sale_id, basket, status, reservation_id,
-                                            rejection_reason, lease_until, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9)
-             ON CONFLICT (id) DO NOTHING",
-        )
-        .bind(request.id.as_uuid())
-        .bind(request.account_id.as_uuid())
-        .bind(request.sale_id.as_uuid())
-        .bind(Json(&request.basket))
-        .bind(status.status)
-        .bind(status.reservation_id)
-        .bind(status.rejection_reason)
-        .bind(at(request.created_at))
-        .bind(at(request.updated_at))
-        .execute(&self.pool)
-        .await
-        .map_err(error)?;
-        if inserted.rows_affected() == 1 {
-            return Ok(Insertion::Inserted);
-        }
-        let existing = sqlx::query_as::<_, PurchaseRequestRow>(sqlx::AssertSqlSafe(format!(
-            "SELECT {PURCHASE_REQUEST_COLUMNS} FROM purchase_requests WHERE id = $1"
-        )))
-        .bind(request.id.as_uuid())
-        .fetch_one(&self.pool)
-        .await
-        .map_err(error)?;
-        Ok(Insertion::Existing(existing.try_into()?))
+        let mut conn = self.pool.acquire().await.map_err(error)?;
+        insert_request(&mut conn, request).await
     }
 
     async fn purchase_request(
@@ -255,14 +273,27 @@ impl PurchasesTx for PostgresTx {
         Ok(created.is_some())
     }
 
+    async fn insert_purchase_request(
+        &mut self,
+        request: &PurchaseRequest,
+    ) -> StoreResult<Insertion<PurchaseRequest>> {
+        insert_request(&mut self.conn, request).await
+    }
+
     async fn queued_requests(
         &mut self,
         sale: SaleId,
         event: EventId,
         organization: OrganizationId,
+        invited_only: bool,
         now: Timestamp,
         limit: u32,
     ) -> StoreResult<Vec<QueuedRequest>> {
+        let invited = if invited_only {
+            INVITED
+        } else {
+            EVERYONE_INVITED
+        };
         // FOR UPDATE: a worker of the previous release, which leases requests instead of
         // holding the queue, may be serving some; they are left out once it commits.
         let rows = sqlx::query_as::<_, QueuedRequestRow>(sqlx::AssertSqlSafe(format!(
@@ -270,7 +301,8 @@ impl PurchasesTx for PostgresTx {
                     EXISTS (SELECT 1 FROM denials d
                             WHERE d.subject_id = r.account_id AND d.subject_kind = 'account'
                               AND d.organization_id = $2
-                              AND (d.event_id IS NULL OR d.event_id = $3)) AS account_denied
+                              AND (d.event_id IS NULL OR d.event_id = $3)) AS account_denied,
+                    {invited} AS account_invited
              FROM purchase_requests r
              WHERE r.sale_id = $1 AND r.status = 'queued'
                AND (r.lease_until IS NULL OR r.lease_until <= $4)

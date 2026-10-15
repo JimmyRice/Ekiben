@@ -34,7 +34,7 @@ const fn event_order(order: EventOrder) -> (&'static str, &'static str, &'static
     }
 }
 
-const SALE_COLUMNS: &str = "SELECT id, event_id, name, opens_at, closes_at, admission, \
+const SALE_COLUMNS: &str = "SELECT id, event_id, name, audience, opens_at, closes_at, admission, \
      reservation_ttl_seconds, max_tickets_per_request, accepted_attestors, environment, \
      created_at, version FROM sales";
 
@@ -245,8 +245,8 @@ impl CatalogStore for MySqlStore {
         sqlx::query(
             "INSERT INTO sales (id, event_id, name, opens_at, closes_at, admission,
                                 reservation_ttl_seconds, max_tickets_per_request,
-                                accepted_attestors, environment, created_at, version)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                accepted_attestors, environment, created_at, version, audience)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(sale.id.as_uuid())
         .bind(sale.event_id.as_uuid())
@@ -260,6 +260,7 @@ impl CatalogStore for MySqlStore {
         .bind(sale.environment.as_str())
         .bind(micros(sale.created_at))
         .bind(sale.version)
+        .bind(sale.audience.as_str())
         .execute(&mut *tx)
         .await
         .map_err(error)?;
@@ -278,7 +279,7 @@ impl CatalogStore for MySqlStore {
         let result = sqlx::query(
             "UPDATE sales SET name = ?, opens_at = ?, closes_at = ?, admission = ?,
                               reservation_ttl_seconds = ?, max_tickets_per_request = ?,
-                              accepted_attestors = ?, environment = ?, version = ?
+                              accepted_attestors = ?, environment = ?, version = ?, audience = ?
              WHERE id = ? AND version = ?",
         )
         .bind(&sale.name)
@@ -290,6 +291,7 @@ impl CatalogStore for MySqlStore {
         .bind(json(&sale.accepted_attestors)?)
         .bind(sale.environment.as_str())
         .bind(sale.version)
+        .bind(sale.audience.as_str())
         .bind(sale.id.as_uuid())
         .bind(expected_version)
         .execute(&self.pool)

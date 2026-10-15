@@ -47,6 +47,7 @@ impl ListingTag {
     pub(crate) const EVENTS_BY_START_DESC: Self = Self(17);
     pub(crate) const EVENTS_BY_CREATION: Self = Self(18);
     pub(crate) const EVENTS_BY_CREATION_DESC: Self = Self(19);
+    pub(crate) const SALE_INVITATIONS: Self = Self(20);
 }
 
 /// A position a cursor can carry: the key of the last item of a page.

@@ -10,6 +10,7 @@ use kippu_store::{
     Hold, Holds, Insertion, InventoryTx, Keyset, LineItems, PageRequest, PurchaseStore,
     PurchasesTx, QueuedRequest, QuotaLines, ReservationsTx, StoreError, StoreResult,
 };
+use sqlx::SqliteConnection;
 use uuid::Uuid;
 
 use crate::convert::{
@@ -28,6 +29,13 @@ const RESERVATION_COLUMNS: &str = "SELECT id, purchase_request_id, account_id, s
      items, total_minor, currency, environment, status, attestor_id, expires_at, created_at, \
      updated_at FROM reservations";
 
+/// Whether a queued request's account (`r`) is on its sale's invitation list.
+const INVITED: &str = "EXISTS (SELECT 1 FROM sale_invitations i \
+     WHERE i.sale_id = r.sale_id AND i.account_id = r.account_id)";
+
+/// What [`INVITED`] stands for when the list does not matter.
+const EVERYONE_INVITED: &str = "TRUE";
+
 /// The most rows one multi-row statement carries, keeping its parameters far below SQLite's
 /// limit of 32,766 for every table written this way.
 const ROWS_PER_STATEMENT: usize = 1_000;
@@ -42,42 +50,51 @@ fn uncount(value: i64) -> StoreResult<u32> {
     u32::try_from(value).map_err(StoreError::backend)
 }
 
+/// Records a purchase request in its status, unless one with its id exists: then returns that.
+async fn insert_request(
+    conn: &mut SqliteConnection,
+    request: &PurchaseRequest,
+) -> StoreResult<Insertion<PurchaseRequest>> {
+    let status = purchase_status(request.status);
+    let inserted = sqlx::query(
+        "INSERT INTO purchase_requests (id, account_id, sale_id, basket, status, reservation_id,
+                                        rejection_reason, lease_until, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9)
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(request.id.as_uuid())
+    .bind(request.account_id.as_uuid())
+    .bind(request.sale_id.as_uuid())
+    .bind(json(&request.basket)?)
+    .bind(status.status)
+    .bind(status.reservation_id)
+    .bind(status.rejection_reason)
+    .bind(micros(request.created_at))
+    .bind(micros(request.updated_at))
+    .execute(&mut *conn)
+    .await
+    .map_err(error)?;
+    if inserted.rows_affected() == 1 {
+        return Ok(Insertion::Inserted);
+    }
+    let existing = sqlx::query_as::<_, PurchaseRequestRow>(sqlx::AssertSqlSafe(format!(
+        "SELECT {PURCHASE_REQUEST_COLUMNS} FROM purchase_requests WHERE id = ?1"
+    )))
+    .bind(request.id.as_uuid())
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(error)?;
+    Ok(Insertion::Existing(existing.try_into()?))
+}
+
 #[async_trait]
 impl PurchaseStore for SqliteStore {
     async fn insert_purchase_request(
         &self,
         request: &PurchaseRequest,
     ) -> StoreResult<Insertion<PurchaseRequest>> {
-        let status = purchase_status(request.status);
-        let inserted = sqlx::query(
-            "INSERT INTO purchase_requests (id, account_id, sale_id, basket, status, reservation_id,
-                                            rejection_reason, lease_until, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9)
-             ON CONFLICT (id) DO NOTHING",
-        )
-        .bind(request.id.as_uuid())
-        .bind(request.account_id.as_uuid())
-        .bind(request.sale_id.as_uuid())
-        .bind(json(&request.basket)?)
-        .bind(status.status)
-        .bind(status.reservation_id)
-        .bind(status.rejection_reason)
-        .bind(micros(request.created_at))
-        .bind(micros(request.updated_at))
-        .execute(&self.writer)
-        .await
-        .map_err(error)?;
-        if inserted.rows_affected() == 1 {
-            return Ok(Insertion::Inserted);
-        }
-        let existing = sqlx::query_as::<_, PurchaseRequestRow>(sqlx::AssertSqlSafe(format!(
-            "SELECT {PURCHASE_REQUEST_COLUMNS} FROM purchase_requests WHERE id = ?1"
-        )))
-        .bind(request.id.as_uuid())
-        .fetch_one(&self.writer)
-        .await
-        .map_err(error)?;
-        Ok(Insertion::Existing(existing.try_into()?))
+        let mut conn = self.writer.acquire().await.map_err(error)?;
+        insert_request(&mut conn, request).await
     }
 
     async fn purchase_request(
@@ -245,20 +262,34 @@ impl PurchasesTx for SqliteTx {
         Ok(true)
     }
 
+    async fn insert_purchase_request(
+        &mut self,
+        request: &PurchaseRequest,
+    ) -> StoreResult<Insertion<PurchaseRequest>> {
+        insert_request(&mut self.conn, request).await
+    }
+
     async fn queued_requests(
         &mut self,
         sale: SaleId,
         event: EventId,
         organization: OrganizationId,
+        invited_only: bool,
         now: Timestamp,
         limit: u32,
     ) -> StoreResult<Vec<QueuedRequest>> {
+        let invited = if invited_only {
+            INVITED
+        } else {
+            EVERYONE_INVITED
+        };
         let rows = sqlx::query_as::<_, QueuedRequestRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {PURCHASE_REQUEST_COLUMNS},
                     EXISTS (SELECT 1 FROM denials d
                             WHERE d.subject_id = r.account_id AND d.subject_kind = 'account'
                               AND d.organization_id = ?2
-                              AND (d.event_id IS NULL OR d.event_id = ?3)) AS account_denied
+                              AND (d.event_id IS NULL OR d.event_id = ?3)) AS account_denied,
+                    {invited} AS account_invited
              FROM purchase_requests r
              WHERE r.sale_id = ?1 AND r.status = 'queued'
                AND (r.lease_until IS NULL OR r.lease_until <= ?4)

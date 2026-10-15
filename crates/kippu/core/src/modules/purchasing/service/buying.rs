@@ -1,6 +1,7 @@
 //! What buyers do: submit purchase requests, poll them, pay for or give up reservations.
 
 use kippu_domain::admission::AdmissionPolicy;
+use kippu_domain::catalog::Audience;
 use kippu_domain::outbox::IntegrationEvent;
 use kippu_domain::payment::Environment;
 use kippu_domain::purchase::{Basket, LineItem, PurchaseRequest};
@@ -58,6 +59,14 @@ pub async fn submit_purchase(
         ))
         .and_then(IdempotencyKey::new)?;
     let (sale, event) = visible_sale(state, Some(principal), sale_id).await?;
+    if sale.audience == Audience::Private {
+        // Only its organizers see it this far.
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            ProblemKind::WRONG_SALE_AUDIENCE,
+            "nobody buys from a private sale: grant its tickets instead",
+        ));
+    }
     let now = state.now();
     if !event.is_on_sale() {
         return Err(ApiError::new(
@@ -221,6 +230,26 @@ pub async fn cancel(
     Ok(current)
 }
 
+/// Settles a reservation that costs nothing with the built-in free attestor, issuing its
+/// tickets. Settling it again changes nothing and answers the same.
+pub(super) async fn settle_free(
+    state: &AppState,
+    reservation: &Reservation,
+) -> ApiResult<Reservation> {
+    let free = state
+        .store()
+        .attestor(AttestorId::FREE)
+        .await?
+        .ok_or_else(|| ApiError::internal("the built-in free attestor is missing"))?;
+    let payment = IncomingPayment {
+        attestation_id: format!("free:{}", reservation.id),
+        reservation_id: reservation.id,
+        amount: reservation.total,
+        occurred_at: None,
+    };
+    Ok(settle(state, &free, payment).await?.reservation)
+}
+
 /// The buyer chooses how to pay; the attestor is told through `payment.requested`. Free
 /// reservations are settled on the spot and need no attestor.
 #[tracing::instrument(skip_all)]
@@ -233,17 +262,7 @@ pub async fn checkout(
     let reservation = own_reservation(state, principal, id).await?;
     let store = state.store();
     if reservation.total.is_zero() {
-        let free = store
-            .attestor(AttestorId::FREE)
-            .await?
-            .ok_or_else(|| ApiError::internal("the built-in free attestor is missing"))?;
-        let payment = IncomingPayment {
-            attestation_id: format!("free:{}", reservation.id),
-            reservation_id: reservation.id,
-            amount: reservation.total,
-            occurred_at: None,
-        };
-        return Ok(settle(state, &free, payment).await?.reservation);
+        return settle_free(state, &reservation).await;
     }
 
     let attestor_id = attestor_id.ok_or_else(|| {

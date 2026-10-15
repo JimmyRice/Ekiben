@@ -38,7 +38,7 @@ Keep the repository root uncluttered and do not add speculative `.gitignore` ent
 ## Commands
 
 ```bash
-cargo test --workspace --all-features                                   # 405 tests incl. e2e over TCP
+cargo test --workspace --all-features                                   # 426 tests incl. e2e over TCP
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets           # default features too
 cargo fmt --all
@@ -319,10 +319,30 @@ Do not change these unless the user explicitly asks.
   (`account_denied`) by the worker, not the front door; a reservation held before the denial
   can still be paid (its tickets are refused at the gate). Webhooks are not the channel for gates
   (they need an inbound public endpoint and give no snapshot).
+- **Sale audiences** (`Sale.audience`, on the sale, not the ticket type): `public` (default);
+  `invited`, seen and bought from only by the accounts on the sale's invitation list (e.g.
+  cosplayers whose application passed buy a cheaper ticket; `PUT`/`DELETE
+  /v1/sales/{id}/invitations/{account_id}`, `events.write`); `private`, seen only by its
+  organizers and bought by nobody (guests, exhibitors, NPCs). Everyone else is told a hidden
+  sale does not exist (404). A list may be kept while the sale is public; leaving it stops
+  further purchases (the worker rejects queued requests `not_invited`, read in the same
+  `queued_requests` statement, only for invited sales) and never touches tickets bought. Private
+  is chosen at creation and kept: no attestors, no waiting room, free ticket types. A PUT
+  without `audience` keeps it, so a client unaware of it never widens who sees a sale.
+- **Grants:** `POST /v1/sales/{id}/grants {account_id, items}` (`tickets.grant`, with an
+  `Idempotency-Key`) gives a private sale's tickets to an account: one transaction records a
+  purchase request already reserved (`PurchasesTx::insert_purchase_request`, id derived from
+  account, sale and key) and its reservation, taking quota then stock; then the built-in free
+  attestor settles it, so tickets, `tickets.issued`, refunds and denials work as for purchases.
+  Per-account limits, stock, deny lists, the sale window and a published event apply.
+  Organizers get account ids from the people themselves; Kippu looks nobody up. Every organizer
+  has `tickets.grant`: manual payments and free ticket types already let any organizer issue
+  tickets, so restricting grants alone would protect nothing.
 - **Purchase workers hold a sale's queue for one transaction:** each transaction takes the
   sale's row in `purchase_queues` (`PurchasesTx::lock_purchase_queue`, `FOR UPDATE SKIP
   LOCKED`; SQLite needs none) and only then reads its oldest queued requests
-  (`queued_requests`, `created_at` then id, with each account's denial), so every sale is
+  (`queued_requests`, `created_at` then id, with each account's denial and, for invited sales,
+  invitation), so every sale is
   served in arrival order however many workers and instances run, and a worker that dies holds
   nothing once its transaction is gone (no leases to run out; PostgreSQL also ends a
   transaction holding a queue after 10 s without a statement). Workers skip a held queue and
@@ -375,7 +395,9 @@ Do not change these unless the user explicitly asks.
   cooling off and cancelling stay in that backend; Kippu keeps one irreversible step. Until
   then, leave `refundable_until` unset to keep buyers from refunding at Kippu directly.
 - Later: passkeys as a second Admin credential; inventory buckets for extremely hot sessions;
-  OpenTelemetry; per-module migrations with their own version tracking.
+  OpenTelemetry; per-module migrations with their own version tracking; roles within an
+  organization (who may grant, refund, record payments, edit sales), carried per organization
+  in access tokens.
 - Request log: a "still processing" line for requests running longer than N seconds (not built).
 
 ## Known limitations

@@ -11,6 +11,7 @@ use kippu_store::{
     Holds, Insertion, InventoryTx, Keyset, LineItems, PageRequest, PurchaseStore, PurchasesTx,
     QueuedRequest, QuotaLines, ReservationsTx, StoreError, StoreResult,
 };
+use sqlx::MySqlConnection;
 use uuid::Uuid;
 
 use crate::convert::{
@@ -21,6 +22,13 @@ use crate::tx::MySqlTx;
 use crate::{MySqlStore, error, is_duplicate, unique};
 
 const PURCHASE_REQUEST_COLUMNS: &str = "id, account_id, sale_id, basket, status, reservation_id, rejection_reason, created_at, updated_at";
+
+/// Whether a queued request's account (`r`) is on its sale's invitation list.
+const INVITED: &str = "EXISTS (SELECT 1 FROM sale_invitations i \
+     WHERE i.sale_id = r.sale_id AND i.account_id = r.account_id)";
+
+/// What [`INVITED`] stands for when the list does not matter.
+const EVERYONE_INVITED: &str = "TRUE";
 
 const RESERVATION_COLUMNS: &str = "SELECT id, purchase_request_id, account_id, sale_id, event_id, \
      items, total_minor, currency, environment, status, attestor_id, expires_at, created_at, \
@@ -35,42 +43,52 @@ fn rows(row: &str, count: usize) -> String {
     vec![row; count].join(", ")
 }
 
+/// Records a purchase request in its status, unless one with its id exists: then returns that.
+/// A duplicate key undoes the one statement, not the transaction around it, which can go on.
+async fn insert_request(
+    conn: &mut MySqlConnection,
+    request: &PurchaseRequest,
+) -> StoreResult<Insertion<PurchaseRequest>> {
+    let status = purchase_status(request.status);
+    let inserted = sqlx::query(
+        "INSERT INTO purchase_requests (id, account_id, sale_id, basket, status, reservation_id,
+                                        rejection_reason, lease_until, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)",
+    )
+    .bind(request.id.as_uuid())
+    .bind(request.account_id.as_uuid())
+    .bind(request.sale_id.as_uuid())
+    .bind(json(&request.basket)?)
+    .bind(status.status)
+    .bind(status.reservation_id)
+    .bind(status.rejection_reason)
+    .bind(micros(request.created_at))
+    .bind(micros(request.updated_at))
+    .execute(&mut *conn)
+    .await;
+    match inserted {
+        Ok(_) => return Ok(Insertion::Inserted),
+        Err(failure) if is_duplicate(&failure) => {}
+        Err(failure) => return Err(error(failure)),
+    }
+    let existing = sqlx::query_as::<_, PurchaseRequestRow>(sqlx::AssertSqlSafe(format!(
+        "SELECT {PURCHASE_REQUEST_COLUMNS} FROM purchase_requests WHERE id = ?"
+    )))
+    .bind(request.id.as_uuid())
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(error)?;
+    Ok(Insertion::Existing(existing.try_into()?))
+}
+
 #[async_trait]
 impl PurchaseStore for MySqlStore {
     async fn insert_purchase_request(
         &self,
         request: &PurchaseRequest,
     ) -> StoreResult<Insertion<PurchaseRequest>> {
-        let status = purchase_status(request.status);
-        let inserted = sqlx::query(
-            "INSERT INTO purchase_requests (id, account_id, sale_id, basket, status, reservation_id,
-                                            rejection_reason, lease_until, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)",
-        )
-        .bind(request.id.as_uuid())
-        .bind(request.account_id.as_uuid())
-        .bind(request.sale_id.as_uuid())
-        .bind(json(&request.basket)?)
-        .bind(status.status)
-        .bind(status.reservation_id)
-        .bind(status.rejection_reason)
-        .bind(micros(request.created_at))
-        .bind(micros(request.updated_at))
-        .execute(&self.pool)
-        .await;
-        match inserted {
-            Ok(_) => return Ok(Insertion::Inserted),
-            Err(failure) if is_duplicate(&failure) => {}
-            Err(failure) => return Err(error(failure)),
-        }
-        let existing = sqlx::query_as::<_, PurchaseRequestRow>(sqlx::AssertSqlSafe(format!(
-            "SELECT {PURCHASE_REQUEST_COLUMNS} FROM purchase_requests WHERE id = ?"
-        )))
-        .bind(request.id.as_uuid())
-        .fetch_one(&self.pool)
-        .await
-        .map_err(error)?;
-        Ok(Insertion::Existing(existing.try_into()?))
+        let mut conn = self.pool.acquire().await.map_err(error)?;
+        insert_request(&mut conn, request).await
     }
 
     async fn purchase_request(
@@ -276,14 +294,27 @@ impl PurchasesTx for MySqlTx {
         }
     }
 
+    async fn insert_purchase_request(
+        &mut self,
+        request: &PurchaseRequest,
+    ) -> StoreResult<Insertion<PurchaseRequest>> {
+        insert_request(&mut self.conn, request).await
+    }
+
     async fn queued_requests(
         &mut self,
         sale: SaleId,
         event: EventId,
         organization: OrganizationId,
+        invited_only: bool,
         now: Timestamp,
         limit: u32,
     ) -> StoreResult<Vec<QueuedRequest>> {
+        let invited = if invited_only {
+            INVITED
+        } else {
+            EVERYONE_INVITED
+        };
         // The sale's queue index must drive the scan: with a filesort MySQL would lock every
         // queued request of the sale before applying LIMIT. FOR UPDATE: a worker of the
         // previous release, which leases requests instead of holding the queue, may be serving
@@ -293,7 +324,8 @@ impl PurchasesTx for MySqlTx {
                     EXISTS (SELECT 1 FROM denials d
                             WHERE d.subject_id = r.account_id AND d.subject_kind = 'account'
                               AND d.organization_id = ?
-                              AND (d.event_id IS NULL OR d.event_id = ?)) AS account_denied
+                              AND (d.event_id IS NULL OR d.event_id = ?)) AS account_denied,
+                    {invited} AS account_invited
              FROM purchase_requests r FORCE INDEX (purchase_requests_sale_queue)
              WHERE r.sale_id = ? AND r.status = 'queued'
                AND (r.lease_until IS NULL OR r.lease_until <= ?)

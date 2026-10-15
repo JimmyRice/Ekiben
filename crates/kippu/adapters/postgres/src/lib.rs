@@ -8,6 +8,7 @@ mod denials;
 mod errors;
 mod housekeeping;
 mod images;
+mod invitations;
 mod outbox;
 mod payments;
 mod purchasing;

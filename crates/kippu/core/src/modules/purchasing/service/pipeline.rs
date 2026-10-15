@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use kippu_domain::catalog::{EventSummary, Sale, TicketType};
+use kippu_domain::catalog::{Audience, EventSummary, Sale, TicketType};
 use kippu_domain::outbox::IntegrationEvent;
 use kippu_domain::purchase::{Basket, PurchaseRequest, PurchaseStatus, RejectionReason};
 use kippu_domain::reservation::{Reservation, ReservationStatus, ReservedItem};
@@ -98,7 +98,8 @@ fn precheck(
     None
 }
 
-fn reserved_items(
+/// What a request reserves, at the prices of its ticket types, and what that costs.
+pub(super) fn reserved_items(
     request: &PurchaseRequest,
     ticket_types: &[TicketType],
 ) -> ApiResult<(Vec<ReservedItem>, Money)> {
@@ -209,14 +210,18 @@ async fn serve_run(
     Ok(())
 }
 
-/// Rejects a request on what the deny lists and the catalog say, or makes it a candidate.
+/// Rejects a request on what the deny lists, the invitation list and the catalog say, or
+/// makes it a candidate.
 fn check(queued: &QueuedRequest, catalog: &SaleCatalog) -> ApiResult<Decision> {
     let QueuedRequest {
         request,
         account_denied,
+        account_invited,
     } = queued;
     let rejection = if *account_denied {
         Some(RejectionReason::AccountDenied)
+    } else if !account_invited {
+        Some(RejectionReason::NotInvited)
     } else {
         precheck(
             request,
@@ -481,6 +486,7 @@ async fn take_turn(state: &AppState, catalog: &SaleCatalog, limit: u32) -> ApiRe
             catalog.sale.id,
             catalog.event.id,
             catalog.event.organization_id,
+            catalog.sale.audience == Audience::Invited,
             state.now(),
             limit,
         )
@@ -761,6 +767,7 @@ mod tests {
                     ..request(sale, i64::try_from(second).unwrap())
                 },
                 account_denied: false,
+                account_invited: true,
             })
             .collect();
         let mut decisions: Vec<_> = arrivals

@@ -16,6 +16,17 @@ pub struct PurchaseRequestBody {
     pub items: Vec<LineItem>,
 }
 
+/// Tickets to grant. Send it with an `Idempotency-Key` header; retrying with the same key is
+/// safe.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GrantRequest {
+    /// The account that gets the tickets, as its holder tells you.
+    pub account_id: AccountId,
+    /// Ticket types and quantities.
+    pub items: Vec<LineItem>,
+}
+
 /// Choose how to pay for a reservation.
 #[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct CheckoutRequest {

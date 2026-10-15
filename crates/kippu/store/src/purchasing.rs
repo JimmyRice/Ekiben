@@ -93,10 +93,24 @@ pub trait PurchasesTx: Send {
     /// return `true`.
     async fn lock_purchase_queue(&mut self, sale: SaleId) -> StoreResult<bool>;
 
+    /// Records a purchase request in whatever status it has: an organizer's grant is recorded
+    /// already decided, together with its reservation.
+    ///
+    /// **Contract:** as [`PurchaseStore::insert_purchase_request`]: if a request with the same
+    /// id exists, nothing is written, the transaction can go on, and the existing request is
+    /// returned.
+    async fn insert_purchase_request(
+        &mut self,
+        request: &PurchaseRequest,
+    ) -> StoreResult<Insertion<PurchaseRequest>>;
+
     /// The oldest queued requests of a sale that are due by `now`, at most `limit`, in arrival
     /// order (`created_at`, ties by id), each locked until the transaction ends, and whether
     /// each one's account is denied for `event` of `organization` (as
-    /// [`DenialStore::account_denied`](crate::DenialStore::account_denied) answers).
+    /// [`DenialStore::account_denied`](crate::DenialStore::account_denied) answers). With
+    /// `invited_only`, also whether each one's account is on the sale's invitation list (as
+    /// [`InvitationStore::is_invited`](crate::InvitationStore::is_invited) answers); without
+    /// it, the list is not read and every account counts as invited.
     ///
     /// **Contract:** read after [`PurchasesTx::lock_purchase_queue`], the requests are exactly
     /// those no transaction that held the queue before has served.
@@ -105,6 +119,7 @@ pub trait PurchasesTx: Send {
         sale: SaleId,
         event: EventId,
         organization: OrganizationId,
+        invited_only: bool,
         now: Timestamp,
         limit: u32,
     ) -> StoreResult<Vec<QueuedRequest>>;
@@ -134,6 +149,9 @@ pub struct QueuedRequest {
     pub request: PurchaseRequest,
     /// Whether its account is denied for the sale's event.
     pub account_denied: bool,
+    /// Whether its account is on the sale's invitation list; `true` for every request unless
+    /// the list was asked about.
+    pub account_invited: bool,
 }
 
 /// A per-account limit to respect while taking quota.

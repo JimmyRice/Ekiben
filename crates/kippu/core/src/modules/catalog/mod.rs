@@ -1,8 +1,10 @@
-//! What is on sale: the organizations running events, events, their sales and ticket types,
-//! and buyers' favourites.
+//! What is on sale: the organizations running events, events, their sales (with invitation
+//! lists) and ticket types, and buyers' favourites.
 //!
 //! Anyone may browse published events, and the organizations that have one. Organizers create
-//! and edit events of their own organizations; drafts are visible only to them.
+//! and edit events of their own organizations; drafts are visible only to them. A sale is
+//! public, open to the accounts invited to it, or private (its tickets are granted); a sale
+//! someone may not see does not exist for them.
 
 mod dto;
 mod routes;
@@ -68,6 +70,8 @@ impl Module for Catalog {
                 routes::update_sale,
                 routes::patch_sale
             ))
+            .routes(routes!(routes::list_invitations))
+            .routes(routes!(routes::invite, routes::uninvite))
             .routes(routes!(routes::create_ticket_type))
             .routes(routes!(
                 routes::get_ticket_type,
