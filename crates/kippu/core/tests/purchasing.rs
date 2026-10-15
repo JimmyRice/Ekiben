@@ -502,6 +502,119 @@ async fn the_waiting_room_admits_nobody_before_the_sale_opens() {
 }
 
 #[tokio::test]
+async fn a_sold_out_sale_admits_nobody_until_tickets_come_back() {
+    let app = TestApp::start().await;
+    // Two tickets, batches of ten.
+    let shop = app.shop(2, 1_000, json!({ "admission": { "mode": "waiting_room", "admit_per_tick": 10, "max_backlog": 100 } })).await;
+    let room = format!("/v1/sales/{}/waiting-room", shop.sale_id);
+    let admission = format!("/v1/sales/{}/admission", shop.sale_id);
+    let mut queue = Vec::new();
+    for _ in 0..5 {
+        let buyer = app.buyer().await;
+        let place = app.call(Method::POST, &room, Some(&buyer), None).await;
+        queue.push((buyer, place.body["queue_ticket"]["token"].clone()));
+    }
+    let admitted_through = async || {
+        app.call(Method::GET, &room, Some(&shop.organizer), None)
+            .await
+            .body["admitted_through"]
+            .clone()
+    };
+    app.drain("admission").await;
+    assert_eq!(admitted_through().await, 2, "no more people than tickets");
+
+    // The first two reserve the two tickets and do not pay.
+    for (buyer, ticket) in &queue[..2] {
+        let admitted = app
+            .call(
+                Method::POST,
+                &admission,
+                Some(buyer),
+                Some(json!({ "queue_ticket": ticket })),
+            )
+            .await;
+        let pass = admitted.body["admission_pass"]["token"].as_str().unwrap();
+        let reply = app
+            .call_with(
+                Method::POST,
+                &format!("/v1/sales/{}/purchase-requests", shop.sale_id),
+                Some(buyer),
+                Some(
+                    json!({ "items": [{ "ticket_type_id": shop.ticket_type_id, "quantity": 1 }] }),
+                ),
+                &[
+                    ("idempotency-key", &uuid_suffix()),
+                    ("kippu-admission-pass", pass),
+                ],
+            )
+            .await;
+        assert_eq!(reply.status, StatusCode::ACCEPTED, "{:?}", reply.body);
+    }
+    app.drain("purchases").await;
+    app.drain("admission").await;
+    assert_eq!(
+        admitted_through().await,
+        2,
+        "sold out: nobody more is let in"
+    );
+    let (third, ticket) = &queue[2];
+    let waiting = app
+        .call(
+            Method::POST,
+            &admission,
+            Some(third),
+            Some(json!({ "queue_ticket": ticket })),
+        )
+        .await;
+    assert_eq!(waiting.body["status"], "waiting");
+
+    // Unpaid, the reservations expire: their tickets go to the next two in line.
+    expire_everything(&app).await;
+    app.drain("admission").await;
+    assert_eq!(admitted_through().await, 4);
+}
+
+#[tokio::test]
+async fn a_closed_sale_turns_its_waiting_room_away() {
+    let app = TestApp::start().await;
+    // Within the access tokens' lifetime, so the clock can move to the closing.
+    let closes_at = app.now() + Duration::minutes(10);
+    let shop = app
+        .shop(
+            10,
+            1_000,
+            json!({
+                "closes_at": closes_at.to_string(),
+                "admission": { "mode": "waiting_room", "admit_per_tick": 2, "max_backlog": 100 },
+            }),
+        )
+        .await;
+    let room = format!("/v1/sales/{}/waiting-room", shop.sale_id);
+    let buyer = app.buyer().await;
+    let place = app.call(Method::POST, &room, Some(&buyer), None).await;
+    assert_eq!(place.status, StatusCode::OK, "{:?}", place.body);
+    let late = app.buyer().await;
+
+    app.clock.set(closes_at);
+    let asked = app
+        .call(
+            Method::POST,
+            &format!("/v1/sales/{}/admission", shop.sale_id),
+            Some(&buyer),
+            Some(json!({ "queue_ticket": place.body["queue_ticket"]["token"] })),
+        )
+        .await;
+    assert_eq!(asked.status, StatusCode::CONFLICT);
+    assert_eq!(
+        asked.body["type"], "urn:kippu:problem:sale-closed",
+        "nobody is left waiting for a sale that is over"
+    );
+    let joined = app.call(Method::POST, &room, Some(&late), None).await;
+    assert_eq!(joined.status, StatusCode::CONFLICT);
+    assert_eq!(joined.body["type"], "urn:kippu:problem:sale-closed");
+}
+
+#[tokio::test]
 async fn joining_the_waiting_room_again_keeps_the_place() {
     let app = TestApp::start().await;
     let shop = app.shop(10, 1_000, json!({ "admission": { "mode": "waiting_room", "admit_per_tick": 1, "max_backlog": 100 } })).await;

@@ -38,7 +38,7 @@ Keep the repository root uncluttered and do not add speculative `.gitignore` ent
 ## Commands
 
 ```bash
-cargo test --workspace --all-features                                   # 402 tests incl. e2e over TCP
+cargo test --workspace --all-features                                   # 405 tests incl. e2e over TCP
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets           # default features too
 cargo fmt --all
@@ -276,7 +276,10 @@ Do not change these unless the user explicitly asks.
 - **Waiting rooms:** buyers may join before the sale opens and keep the order they joined in;
   nobody is admitted before `opens_at` (with no purchases yet the backlog is empty and would
   let the whole room through), then one batch per tick while the backlog is below
-  `max_backlog`, until the sale closes (a closed sale's room is left as it stands). Buyers
+  `max_backlog`, of no more people than the tickets left beyond the requests queued: a
+  sold-out sale admits nobody, and tickets that come back (an unpaid reservation expiring or
+  cancelled, a refund) go to the next in line. Once the sale closes or its event is
+  cancelled, joining and polling answer `sale-closed` and the room is left as it stands. Buyers
   polling for admission read `admitted_through` alone, never the counters. An account holds
   one position per sale (`waiting_room_entries`): joining
   again returns it with a new queue ticket, so repeated joins neither crowd others out nor

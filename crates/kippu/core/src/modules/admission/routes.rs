@@ -43,7 +43,10 @@ pub(crate) async fn get_waiting_room(
     post, path = "/v1/sales/{sale_id}/waiting-room", tag = TAG,
     security(("bearer" = [])),
     params(("sale_id" = SaleId, Path)),
-    responses((status = 200, body = QueuePlace), (status = 409, description = "The sale has no waiting room", body = Problem))
+    responses(
+        (status = 200, body = QueuePlace),
+        (status = 409, description = "The sale has no waiting room, or it is closed (`sale-closed`)", body = Problem)
+    )
 )]
 pub(crate) async fn join_waiting_room(
     State(state): State<AppState>,
@@ -54,13 +57,20 @@ pub(crate) async fn join_waiting_room(
     Ok(Json(ticket.into()))
 }
 
-/// Ask whether it is your turn to buy. Sales without a waiting room admit everyone.
+/// Ask whether it is your turn to buy. Sales without a waiting room admit everyone. A sale that
+/// has nothing left to sell admits nobody until tickets come back (its ticket types'
+/// `available` in `GET /v1/sales/{sale_id}` say how many are left); once it closes, this answers
+/// `sale-closed`.
 #[utoipa::path(
     post, path = "/v1/sales/{sale_id}/admission", tag = TAG,
     security(("bearer" = [])),
     params(("sale_id" = SaleId, Path)),
     request_body = AdmissionRequest,
-    responses((status = 200, body = AdmissionView), (status = 403, body = Problem))
+    responses(
+        (status = 200, body = AdmissionView),
+        (status = 403, body = Problem),
+        (status = 409, description = "The sale is closed (`sale-closed`)", body = Problem)
+    )
 )]
 pub(crate) async fn request_admission(
     State(state): State<AppState>,
