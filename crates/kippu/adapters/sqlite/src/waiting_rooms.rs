@@ -4,11 +4,12 @@
 //! after another with none missing, and admission never has any to skip.
 
 use kippu_domain::admission::WaitingRoom;
-use kippu_domain::{AccountId, SaleId};
+use kippu_domain::{AccountId, SaleId, Timestamp};
 use kippu_store::{StoreError, StoreResult};
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
+use crate::convert::micros;
 use crate::error;
 
 /// Makes a sale's waiting room and its counter, unless they exist.
@@ -85,6 +86,17 @@ pub(crate) async fn join(
     Err(StoreError::backend("a waiting room has no counter"))
 }
 
+pub(crate) async fn admitted_through(reader: &SqlitePool, sale: SaleId) -> StoreResult<u64> {
+    let admitted = sqlx::query_scalar::<_, i64>(
+        "SELECT admitted_through FROM waiting_rooms WHERE sale_id = ?1",
+    )
+    .bind(sale.as_uuid())
+    .fetch_optional(reader)
+    .await
+    .map_err(error)?;
+    u64::try_from(admitted.unwrap_or(0)).map_err(StoreError::backend)
+}
+
 pub(crate) async fn room(reader: &SqlitePool, sale: SaleId) -> StoreResult<WaitingRoom> {
     let row = sqlx::query_as::<_, (i64, Option<i64>)>(
         "SELECT admitted_through,
@@ -104,13 +116,17 @@ pub(crate) async fn room(reader: &SqlitePool, sale: SaleId) -> StoreResult<Waiti
     })
 }
 
-pub(crate) async fn pending(reader: &SqlitePool) -> StoreResult<Vec<SaleId>> {
+pub(crate) async fn pending(reader: &SqlitePool, now: Timestamp) -> StoreResult<Vec<SaleId>> {
+    // Only open sales' rooms have their counters read: rooms of past sales add up, and this
+    // runs on every admission tick of every instance.
     let ids = sqlx::query_scalar::<_, Uuid>(
-        "SELECT sale_id FROM waiting_rooms r
-         WHERE admitted_through < (SELECT MAX(next_position - stride) FROM waiting_room_counters c
-                                   WHERE c.sale_id = r.sale_id)
-         ORDER BY sale_id",
+        "SELECT r.sale_id FROM waiting_rooms r JOIN sales s ON s.id = r.sale_id
+         WHERE s.closes_at > ?1
+           AND r.admitted_through < (SELECT MAX(next_position - stride)
+                                     FROM waiting_room_counters c WHERE c.sale_id = r.sale_id)
+         ORDER BY r.sale_id",
     )
+    .bind(micros(now))
     .fetch_all(reader)
     .await
     .map_err(error)?;

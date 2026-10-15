@@ -173,8 +173,15 @@ pub trait CatalogStore {
     async fn join_waiting_room(&self, sale: SaleId, account: AccountId) -> StoreResult<u64>;
     /// The waiting room's progress (all zeros if nobody joined yet).
     async fn waiting_room(&self, sale: SaleId) -> StoreResult<WaitingRoom>;
-    /// Sales whose waiting room still has people waiting (`admitted_through < last_position`).
-    async fn pending_waiting_rooms(&self) -> StoreResult<Vec<SaleId>>;
+    /// How far a sale's waiting room has admitted: [`CatalogStore::waiting_room`]'s
+    /// `admitted_through` (0 if nobody joined yet), read without the positions handed out.
+    /// It is all a buyer asking whether it is their turn needs, the read a waiting crowd
+    /// repeats most.
+    async fn admitted_through(&self, sale: SaleId) -> StoreResult<u64>;
+    /// Sales not closed at `now` whose waiting room still has people waiting
+    /// (`admitted_through < last_position`). A closed sale sells nothing more, so its room is
+    /// left as it stands, and the rooms of past sales are not looked over again.
+    async fn pending_waiting_rooms(&self, now: Timestamp) -> StoreResult<Vec<SaleId>>;
     /// Moves `admitted_through` from `from` towards `to` and returns where it now stands.
     ///
     /// It goes no further than the positions handed out with none missing below them, and it

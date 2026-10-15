@@ -276,7 +276,9 @@ Do not change these unless the user explicitly asks.
 - **Waiting rooms:** buyers may join before the sale opens and keep the order they joined in;
   nobody is admitted before `opens_at` (with no purchases yet the backlog is empty and would
   let the whole room through), then one batch per tick while the backlog is below
-  `max_backlog`. An account holds one position per sale (`waiting_room_entries`): joining
+  `max_backlog`, until the sale closes (a closed sale's room is left as it stands). Buyers
+  polling for admission read `admitted_through` alone, never the counters. An account holds
+  one position per sale (`waiting_room_entries`): joining
   again returns it with a new queue ticket, so repeated joins neither crowd others out nor
   improve anyone's place.
 - **External sign-in:** Kippu ships no OAuth client; forks write a `Module` that calls

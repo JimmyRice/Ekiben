@@ -514,8 +514,12 @@ impl CatalogStore for PostgresStore {
         waiting_rooms::room(&self.pool, sale).await
     }
 
-    async fn pending_waiting_rooms(&self) -> StoreResult<Vec<SaleId>> {
-        waiting_rooms::pending(&self.pool).await
+    async fn admitted_through(&self, sale: SaleId) -> StoreResult<u64> {
+        waiting_rooms::admitted_through(&self.pool, sale).await
+    }
+
+    async fn pending_waiting_rooms(&self, now: Timestamp) -> StoreResult<Vec<SaleId>> {
+        waiting_rooms::pending(&self.pool, now).await
     }
 
     async fn advance_waiting_room(

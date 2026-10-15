@@ -516,8 +516,12 @@ impl CatalogStore for SqliteStore {
         waiting_rooms::room(&self.reader, sale).await
     }
 
-    async fn pending_waiting_rooms(&self) -> StoreResult<Vec<SaleId>> {
-        waiting_rooms::pending(&self.reader).await
+    async fn admitted_through(&self, sale: SaleId) -> StoreResult<u64> {
+        waiting_rooms::admitted_through(&self.reader, sale).await
+    }
+
+    async fn pending_waiting_rooms(&self, now: Timestamp) -> StoreResult<Vec<SaleId>> {
+        waiting_rooms::pending(&self.reader, now).await
     }
 
     async fn advance_waiting_room(

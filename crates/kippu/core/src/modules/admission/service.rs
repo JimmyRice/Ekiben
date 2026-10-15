@@ -107,11 +107,13 @@ pub async fn request_admission(
         let position = state
             .tokens()
             .verify_queue_ticket(&ticket, account, sale.id, now)?;
-        let room = state.store().waiting_room(sale.id).await?;
-        if !room.admits(position) {
+        // Not the whole room: how far it has admitted is all this needs, and the read the
+        // waiting crowd repeats most stays a single row.
+        let admitted_through = state.store().admitted_through(sale.id).await?;
+        if position > admitted_through {
             return Ok(Admission::Waiting {
                 position,
-                admitted_through: room.admitted_through,
+                admitted_through,
             });
         }
     }
@@ -127,7 +129,7 @@ pub async fn request_admission(
 pub(crate) async fn admit_batches(state: AppState) -> Result<Progress, BoxError> {
     let store = state.store();
     let now = state.now();
-    for sale_id in store.pending_waiting_rooms().await? {
+    for sale_id in store.pending_waiting_rooms(now).await? {
         let Some(sale) = store.sale(sale_id).await? else {
             continue;
         };
@@ -139,8 +141,8 @@ pub(crate) async fn admit_batches(state: AppState) -> Result<Progress, BoxError>
             continue;
         };
         // Before the sale opens nobody can buy, so the backlog stays empty and the whole room
-        // would be let through before the first purchase. A closed sale keeps draining: its
-        // buyers are turned away by the purchase itself, and the room stops being pending.
+        // would be let through before the first purchase. (A closed sale is not pending: it
+        // sells nothing more.)
         if now < sale.opens_at {
             continue;
         }

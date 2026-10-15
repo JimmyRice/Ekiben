@@ -1196,6 +1196,11 @@ pub async fn an_account_keeps_its_waiting_room_position(store: Arc<dyn Store>) {
 
 pub async fn waiting_room_advances_once(store: Arc<dyn Store>) {
     let catalog = catalog(store.as_ref(), &[10]).await;
+    assert_eq!(
+        store.admitted_through(catalog.sale).await.unwrap(),
+        0,
+        "no room yet"
+    );
     for _ in 0..10 {
         let buyer = account(store.as_ref()).await;
         store.join_waiting_room(catalog.sale, buyer).await.unwrap();
@@ -1215,8 +1220,18 @@ pub async fn waiting_room_advances_once(store: Arc<dyn Store>) {
         None,
         "stale compare-and-set"
     );
-    let pending = store.pending_waiting_rooms().await.unwrap();
+    assert_eq!(store.admitted_through(catalog.sale).await.unwrap(), 5);
+    let pending = store.pending_waiting_rooms(now()).await.unwrap();
     assert!(pending.contains(&catalog.sale), "people are still waiting");
+    let closed = now() + Duration::days(1);
+    assert!(
+        !store
+            .pending_waiting_rooms(closed)
+            .await
+            .unwrap()
+            .contains(&catalog.sale),
+        "a closed sale's room is left as it stands"
+    );
     assert_eq!(
         store
             .advance_waiting_room(catalog.sale, 5, 11)
@@ -1241,7 +1256,8 @@ pub async fn waiting_room_advances_once(store: Arc<dyn Store>) {
             .admitted_through,
         10
     );
-    let pending = store.pending_waiting_rooms().await.unwrap();
+    assert_eq!(store.admitted_through(catalog.sale).await.unwrap(), 10);
+    let pending = store.pending_waiting_rooms(now()).await.unwrap();
     assert!(!pending.contains(&catalog.sale), "everyone was admitted");
 
     let late = account(store.as_ref()).await;
@@ -1250,7 +1266,7 @@ pub async fn waiting_room_advances_once(store: Arc<dyn Store>) {
         11,
         "a later join is not admitted"
     );
-    let pending = store.pending_waiting_rooms().await.unwrap();
+    let pending = store.pending_waiting_rooms(now()).await.unwrap();
     assert!(pending.contains(&catalog.sale), "someone is waiting again");
 }
 
