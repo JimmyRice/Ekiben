@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use kippu_domain::account::Organization;
 use kippu_domain::admission::AdmissionPolicy;
-use kippu_domain::catalog::{Address, EventStatus, Inventory, Sale, TicketType};
+use kippu_domain::catalog::{Address, Audience, EventStatus, Inventory, Sale, TicketType};
 use kippu_domain::payment::Environment;
 use kippu_domain::validation::CountryCode;
 use kippu_domain::validation::Slug;
@@ -263,9 +263,15 @@ pub struct SaleRequest {
     pub version: Option<i64>,
     /// Display name, e.g. "Early bird".
     pub name: String,
-    /// When purchase requests start being accepted.
+    /// Who sees the sale: `public` (everyone), `invited` (only the accounts on its invitation
+    /// list buy from it) or `private` (nobody buys; its organizers grant its free tickets).
+    /// Private is chosen when the sale is created and kept. Absent: `public` for a new sale,
+    /// unchanged when updating.
+    #[serde(default)]
+    pub audience: Option<Audience>,
+    /// When purchase requests start being accepted (for a private sale: grants).
     pub opens_at: Timestamp,
-    /// When purchase requests stop being accepted.
+    /// When purchase requests stop being accepted (for a private sale: grants).
     pub closes_at: Timestamp,
     /// `{"mode": "open"}` or `{"mode": "waiting_room", "admit_per_tick": 100, "max_backlog": 500}`.
     #[serde(default = "open_admission")]
@@ -370,6 +376,8 @@ pub struct SalePatch {
     pub version: i64,
     /// Display name.
     pub name: Option<String>,
+    /// `public` or `invited`; a private sale stays private.
+    pub audience: Option<Audience>,
     /// When purchase requests start being accepted.
     pub opens_at: Option<Timestamp>,
     /// When purchase requests stop being accepted.
@@ -487,6 +495,7 @@ impl From<SaleRequest> for SaleSettings {
     fn from(request: SaleRequest) -> Self {
         Self {
             name: request.name,
+            audience: request.audience,
             opens_at: request.opens_at,
             closes_at: request.closes_at,
             admission: request.admission,
@@ -502,6 +511,7 @@ impl From<SalePatch> for SaleChanges {
     fn from(patch: SalePatch) -> Self {
         Self {
             name: patch.name,
+            audience: patch.audience,
             opens_at: patch.opens_at,
             closes_at: patch.closes_at,
             admission: patch.admission,

@@ -10,9 +10,10 @@ use kippu_domain::reservation::Reservation;
 use kippu_domain::{AccountId, EventId, PurchaseRequestId, ReservationId, SaleId};
 
 use super::dto::{
-    BuyerView, CheckoutRequest, EventReservationsQuery, PollQuery, PurchaseRequestBody,
+    BuyerView, CheckoutRequest, EventReservationsQuery, GrantRequest, PollQuery,
+    PurchaseRequestBody,
 };
-use super::service::{self, PurchaseSubmission};
+use super::service::{self, Grant, PurchaseSubmission};
 use crate::app::AppState;
 use crate::auth::Principal;
 use crate::error::{ApiResult, Problem};
@@ -69,6 +70,56 @@ pub(crate) async fn create_purchase_request(
         location = format!("{location}?receipt={receipt}");
     }
     let mut response = (StatusCode::ACCEPTED, Json(submitted.request)).into_response();
+    if let Ok(location) = HeaderValue::from_str(&location) {
+        response.headers_mut().insert(LOCATION, location);
+    }
+    Ok(response)
+}
+
+/// Grant an account free tickets of a private sale, for guests, exhibitors and other people
+/// the organizers choose. The tickets are issued at once, under the same per-account limits,
+/// stock and deny lists as purchases; the reservation's holder sees and refunds them as any
+/// other.
+///
+/// Requires an `Idempotency-Key`: granting again with the same key and the same account
+/// answers 200 with the first grant and never grants twice.
+#[utoipa::path(
+    post, path = "/v1/sales/{sale_id}/grants", tag = TAG,
+    security(("bearer" = [])),
+    params(
+        ("sale_id" = SaleId, Path),
+        ("Idempotency-Key" = String, Header, description = "Client-chosen key that makes retries safe"),
+    ),
+    request_body = GrantRequest,
+    responses(
+        (status = 201, description = "Granted; the reservation is `issued`", body = Reservation),
+        (status = 200, description = "Granted before with this key", body = Reservation),
+        (status = 403, body = Problem),
+        (status = 404, body = Problem),
+        (status = 409, description = "Not a private sale, not open, sold out, over the limit, or the account denied or closed", body = Problem),
+        (status = 422, body = Problem),
+    )
+)]
+pub(crate) async fn grant_tickets(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(sale_id): Path<SaleId>,
+    headers: HeaderMap,
+    Json(body): Json<GrantRequest>,
+) -> ApiResult<Response> {
+    let grant = Grant {
+        idempotency_key: header(&headers, IDEMPOTENCY_KEY),
+        account_id: body.account_id,
+        items: body.items,
+    };
+    let granted = service::grant_tickets(&state, &principal, sale_id, grant).await?;
+    let status = if granted.created {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+    let location = format!("/v1/reservations/{}", granted.reservation.id);
+    let mut response = (status, Json(granted.reservation)).into_response();
     if let Ok(location) = HeaderValue::from_str(&location) {
         response.headers_mut().insert(LOCATION, location);
     }

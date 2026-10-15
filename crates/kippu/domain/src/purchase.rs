@@ -155,6 +155,8 @@ pub enum RejectionReason {
     UnknownTicketType,
     /// The buyer is on a deny list for the event.
     AccountDenied,
+    /// The sale is for invited accounts only, and the buyer is not (or no longer) invited.
+    NotInvited,
 }
 
 impl RejectionReason {
@@ -166,6 +168,7 @@ impl RejectionReason {
             Self::SaleClosed => "sale_closed",
             Self::UnknownTicketType => "unknown_ticket_type",
             Self::AccountDenied => "account_denied",
+            Self::NotInvited => "not_invited",
         }
     }
 }
@@ -180,6 +183,7 @@ impl std::str::FromStr for RejectionReason {
             Self::SaleClosed,
             Self::UnknownTicketType,
             Self::AccountDenied,
+            Self::NotInvited,
         ]
         .into_iter()
         .find(|reason| reason.as_str() == name)

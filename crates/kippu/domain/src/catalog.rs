@@ -247,6 +247,52 @@ impl From<Event> for EventSummary {
     }
 }
 
+/// Who sees a sale, and how its tickets reach people.
+///
+/// Whoever may edit the event sees every sale. Everyone else sees a sale that is not public
+/// only if invited to it, and is otherwise told it does not exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum Audience {
+    /// Everyone who may see the event sees the sale and may buy from it.
+    #[default]
+    Public,
+    /// Only the accounts invited to the sale see it and may buy from it, e.g. cosplayers who
+    /// passed a review buying a cheaper ticket. The list can be kept before the sale is
+    /// invited-only.
+    Invited,
+    /// Nobody buys from it: its organizers grant its tickets, free of charge, to the accounts
+    /// they choose (guests, exhibitors, staff of the convention's attractions). Chosen when the
+    /// sale is created, for good.
+    Private,
+}
+
+impl Audience {
+    /// The audience's name as stored and serialized.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Public => "public",
+            Self::Invited => "invited",
+            Self::Private => "private",
+        }
+    }
+}
+
+impl std::str::FromStr for Audience {
+    type Err = ValidationError;
+
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        [Self::Public, Self::Invited, Self::Private]
+            .into_iter()
+            .find(|audience| audience.as_str() == name)
+            .ok_or(ValidationError::new(
+                "audience",
+                "must be public, invited or private",
+            ))
+    }
+}
+
 /// A window in which some of an event's ticket types are sold.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -257,17 +303,20 @@ pub struct Sale {
     pub event_id: EventId,
     /// Display name, e.g. "Early bird".
     pub name: String,
-    /// When purchase requests start being accepted.
+    /// Who sees the sale, and whether its tickets are bought or granted.
+    pub audience: Audience,
+    /// When purchase requests start being accepted (for a private sale: grants).
     pub opens_at: Timestamp,
-    /// When purchase requests stop being accepted.
+    /// When purchase requests stop being accepted (for a private sale: grants).
     pub closes_at: Timestamp,
-    /// How buyers are let in when demand is high.
+    /// How buyers are let in when demand is high. Always open for a private sale.
     pub admission: AdmissionPolicy,
     /// How long a reservation holds inventory before it expires unpaid.
     pub reservation_ttl_seconds: u32,
-    /// Most tickets a single purchase request may ask for.
+    /// Most tickets a single purchase request (or grant) may ask for.
     pub max_tickets_per_request: u32,
-    /// Attestors whose payment attestations this sale accepts.
+    /// Attestors whose payment attestations this sale accepts. None for a private sale: its
+    /// tickets are free.
     pub accepted_attestors: Vec<AttestorId>,
     /// Whether the sale takes real money. Sandbox attestors can only settle sandbox sales.
     pub environment: Environment,
@@ -295,6 +344,20 @@ impl Sale {
                 "max_tickets_per_request",
                 "must be between 1 and 100",
             ));
+        }
+        if self.audience == Audience::Private {
+            if self.admission != AdmissionPolicy::Open {
+                return Err(ValidationError::new(
+                    "admission",
+                    "must be open for a private sale: nobody buys from it",
+                ));
+            }
+            if !self.accepted_attestors.is_empty() {
+                return Err(ValidationError::new(
+                    "accepted_attestors",
+                    "must be empty for a private sale: its tickets are free",
+                ));
+            }
         }
         self.admission.validate()
     }
@@ -471,5 +534,58 @@ mod tests {
         let lower = serde_json::json!({ "country": "jp", "street": "有明3-11-1" });
         let address: Address = serde_json::from_value(lower).unwrap();
         assert_eq!(address.country.as_str(), "JP");
+    }
+
+    fn private_sale() -> Sale {
+        Sale {
+            id: SaleId::generate(),
+            event_id: EventId::generate(),
+            name: "Guests".to_owned(),
+            audience: Audience::Private,
+            opens_at: Timestamp::from_unix_seconds(1_800_000_000),
+            closes_at: Timestamp::from_unix_seconds(1_800_086_400),
+            admission: AdmissionPolicy::Open,
+            reservation_ttl_seconds: 600,
+            max_tickets_per_request: 10,
+            accepted_attestors: Vec::new(),
+            environment: Environment::Live,
+            created_at: Timestamp::from_unix_seconds(1_800_000_000),
+            version: 1,
+        }
+    }
+
+    #[test]
+    fn private_sales_take_no_payments_and_have_no_waiting_room() {
+        assert_eq!(private_sale().validate(), Ok(()));
+        let paid = Sale {
+            accepted_attestors: vec![AttestorId::MANUAL],
+            ..private_sale()
+        };
+        assert_eq!(paid.validate().unwrap_err().field, "accepted_attestors");
+        let queued = Sale {
+            admission: AdmissionPolicy::WaitingRoom {
+                admit_per_tick: 10,
+                max_backlog: 100,
+            },
+            ..private_sale()
+        };
+        assert_eq!(queued.validate().unwrap_err().field, "admission");
+        let invited = Sale {
+            audience: Audience::Invited,
+            ..paid
+        };
+        assert_eq!(invited.validate(), Ok(()));
+    }
+
+    #[test]
+    fn audiences_round_trip_by_name() {
+        for audience in [Audience::Public, Audience::Invited, Audience::Private] {
+            assert_eq!(audience.as_str().parse::<Audience>(), Ok(audience));
+            assert_eq!(
+                serde_json::to_value(audience).unwrap(),
+                serde_json::json!(audience.as_str())
+            );
+        }
+        assert!("secret".parse::<Audience>().is_err());
     }
 }

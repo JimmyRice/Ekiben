@@ -26,10 +26,11 @@ use std::sync::Arc;
 use kippu_domain::account::{Account, Identity, Organization, Role};
 use kippu_domain::admission::{AdmissionPolicy, WaitingRoom};
 use kippu_domain::catalog::{
-    Address, Event, EventStatus, EventSummary, MAX_EVENT_CONTENT_BYTES, Sale, TicketType,
+    Address, Audience, Event, EventStatus, EventSummary, MAX_EVENT_CONTENT_BYTES, Sale, TicketType,
 };
 use kippu_domain::denial::{Denial, DenialSubject, DeniedBecause, DeniedTicket};
 use kippu_domain::image::{EventImage, ImageFormat};
+use kippu_domain::invitation::Invitation;
 use kippu_domain::outbox::IntegrationEvent;
 use kippu_domain::payment::{Environment, PaymentAttestation, PaymentDisposition};
 use kippu_domain::purchase::{Basket, LineItem, PurchaseRequest, PurchaseStatus, RejectionReason};
@@ -96,6 +97,8 @@ macro_rules! conformance_tests {
             dropped_transactions_roll_back,
             a_purchase_queue_is_held_by_one_transaction,
             queued_requests_are_read_in_arrival_order_with_their_denials,
+            queued_requests_say_whether_their_accounts_are_invited,
+            decided_purchase_requests_are_recorded_in_a_transaction,
             attestations_are_recorded_once,
             one_reservation_per_purchase_request,
             waiting_room_positions_are_distinct,
@@ -128,6 +131,8 @@ macro_rules! conformance_tests {
             refunds_are_recorded_once_and_completed_once,
             denials_are_idempotent_and_versioned,
             denial_listings_resume_exactly,
+            sales_keep_their_audience,
+            invitations_are_idempotent_and_resume_exactly,
             denied_tickets_join_every_cause,
             organizations_are_versioned,
             public_organizations_have_a_public_event,
@@ -223,6 +228,7 @@ fn sale_record(event: EventId, admission: AdmissionPolicy) -> Sale {
         id: SaleId::generate(),
         event_id: event,
         name: "General".to_owned(),
+        audience: Audience::Public,
         opens_at: now(),
         closes_at: now() + Duration::days(1),
         admission,
@@ -999,7 +1005,7 @@ pub async fn queued_requests_are_read_in_arrival_order_with_their_denials(store:
         );
         let queued = tx
             .purchases()
-            .queued_requests(catalog.sale, catalog.event, organization, now, limit)
+            .queued_requests(catalog.sale, catalog.event, organization, false, now, limit)
             .await
             .unwrap()
             .into_iter()
@@ -1046,6 +1052,183 @@ pub async fn queued_requests_are_read_in_arrival_order_with_their_denials(store:
         read(at(10), 1).await,
         [(second.id, false)],
         "served requests are gone from the queue"
+    );
+}
+
+pub async fn queued_requests_say_whether_their_accounts_are_invited(store: Arc<dyn Store>) {
+    let organization = organization(store.as_ref()).await;
+    let catalog = catalog_in(store.as_ref(), organization, &[10]).await;
+    let elsewhere = catalog_in(store.as_ref(), organization, &[10]).await;
+    let mut queued = Vec::new();
+    for seconds in 0..3 {
+        let buyer = account(store.as_ref()).await;
+        let request = PurchaseRequest {
+            created_at: now() + Duration::seconds(seconds),
+            ..purchase_request(buyer, &catalog, &unique_suffix())
+        };
+        store.insert_purchase_request(&request).await.unwrap();
+        queued.push(request);
+    }
+    let invite = |sale, account| Invitation {
+        sale_id: sale,
+        account_id: account,
+        created_at: now(),
+    };
+    // The first buyer is invited, the second to another sale only, the third nowhere.
+    store
+        .insert_invitation(&invite(catalog.sale, queued[0].account_id))
+        .await
+        .unwrap();
+    store
+        .insert_invitation(&invite(elsewhere.sale, queued[1].account_id))
+        .await
+        .unwrap();
+
+    let read = async |invited_only| {
+        let mut tx = store.begin().await.unwrap();
+        assert!(
+            tx.purchases()
+                .lock_purchase_queue(catalog.sale)
+                .await
+                .unwrap()
+        );
+        let read = tx
+            .purchases()
+            .queued_requests(
+                catalog.sale,
+                catalog.event,
+                organization,
+                invited_only,
+                now() + Duration::seconds(10),
+                10,
+            )
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|queued| (queued.request.id, queued.account_invited))
+            .collect::<Vec<_>>();
+        tx.commit().await.unwrap();
+        read
+    };
+    assert_eq!(
+        read(true).await,
+        [
+            (queued[0].id, true),
+            (queued[1].id, false),
+            (queued[2].id, false)
+        ],
+        "only the sale's own list counts"
+    );
+    assert_eq!(
+        read(false).await,
+        [
+            (queued[0].id, true),
+            (queued[1].id, true),
+            (queued[2].id, true)
+        ],
+        "without asking, everyone counts as invited"
+    );
+}
+
+pub async fn decided_purchase_requests_are_recorded_in_a_transaction(store: Arc<dyn Store>) {
+    let catalog = catalog(store.as_ref(), &[10]).await;
+    let recipient = account(store.as_ref()).await;
+    let reservation_id = ReservationId::generate();
+    let granted = PurchaseRequest {
+        status: PurchaseStatus::Reserved { reservation_id },
+        ..purchase_request(recipient, &catalog, "grant")
+    };
+    let price = Money::new(0, Currency::JPY).unwrap();
+    let reservation = Reservation {
+        id: reservation_id,
+        purchase_request_id: granted.id,
+        account_id: recipient,
+        sale_id: catalog.sale,
+        event_id: catalog.event,
+        items: vec![ReservedItem {
+            ticket_type_id: catalog.ticket_types[0],
+            quantity: 1,
+            unit_price: price,
+        }],
+        total: price,
+        environment: Environment::Live,
+        status: ReservationStatus::Reserved,
+        attestor_id: None,
+        expires_at: now() + Duration::minutes(10),
+        created_at: now(),
+        updated_at: now(),
+    };
+
+    // Dropped, nothing of it remains.
+    let mut tx = store.begin().await.unwrap();
+    assert_eq!(
+        tx.purchases()
+            .insert_purchase_request(&granted)
+            .await
+            .unwrap(),
+        Insertion::Inserted
+    );
+    drop(tx);
+    assert_eq!(store.purchase_request(granted.id).await.unwrap(), None);
+
+    let mut tx = store.begin().await.unwrap();
+    assert_eq!(
+        tx.purchases()
+            .insert_purchase_request(&granted)
+            .await
+            .unwrap(),
+        Insertion::Inserted
+    );
+    tx.reservations()
+        .insert_reservation(&reservation)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        store.purchase_request(granted.id).await.unwrap(),
+        Some(granted.clone())
+    );
+    assert_eq!(
+        store.reservation(reservation_id).await.unwrap(),
+        Some(reservation)
+    );
+    assert_eq!(
+        store
+            .sales_with_queued_requests(now() + Duration::days(1), 100)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|(sale, _)| *sale == catalog.sale)
+            .count(),
+        0,
+        "a decided request is never queued"
+    );
+
+    // Recorded again, the stored request comes back and the transaction carries on.
+    let mut tx = store.begin().await.unwrap();
+    let again = PurchaseRequest {
+        status: PurchaseStatus::Queued,
+        ..granted.clone()
+    };
+    assert_eq!(
+        tx.purchases()
+            .insert_purchase_request(&again)
+            .await
+            .unwrap(),
+        Insertion::Existing(granted)
+    );
+    let queued = purchase_request(recipient, &catalog, "after");
+    assert_eq!(
+        tx.purchases()
+            .insert_purchase_request(&queued)
+            .await
+            .unwrap(),
+        Insertion::Inserted
+    );
+    tx.commit().await.unwrap();
+    assert_eq!(
+        store.purchase_request(queued.id).await.unwrap(),
+        Some(queued)
     );
 }
 
@@ -2708,6 +2891,101 @@ pub async fn denials_are_idempotent_and_versioned(store: Arc<dyn Store>) {
     assert_eq!(
         store.insert_denial(&denied).await.unwrap(),
         Insertion::Inserted
+    );
+}
+
+pub async fn sales_keep_their_audience(store: Arc<dyn Store>) {
+    let event = event_record(organization(store.as_ref()).await);
+    store.insert_event(&event).await.unwrap();
+    for audience in [Audience::Public, Audience::Invited, Audience::Private] {
+        let sale = Sale {
+            audience,
+            accepted_attestors: Vec::new(),
+            ..sale_record(event.id, AdmissionPolicy::Open)
+        };
+        store.insert_sale(&sale).await.unwrap();
+        assert_eq!(store.sale(sale.id).await.unwrap(), Some(sale));
+    }
+    let sale = sale_record(event.id, AdmissionPolicy::Open);
+    store.insert_sale(&sale).await.unwrap();
+    let invited = Sale {
+        audience: Audience::Invited,
+        version: 2,
+        ..sale.clone()
+    };
+    store.update_sale(&invited, 1).await.unwrap();
+    assert_eq!(store.sale(sale.id).await.unwrap(), Some(invited.clone()));
+    let listed = store.list_sales(event.id).await.unwrap();
+    assert_eq!(listed.len(), 4);
+    assert!(listed.contains(&invited));
+}
+
+pub async fn invitations_are_idempotent_and_resume_exactly(store: Arc<dyn Store>) {
+    let catalog = catalog(store.as_ref(), &[10]).await;
+    let other = catalog_in(store.as_ref(), organization(store.as_ref()).await, &[10]).await;
+    let first = account(store.as_ref()).await;
+    let invitation = Invitation {
+        sale_id: catalog.sale,
+        account_id: first,
+        created_at: now(),
+    };
+    assert_eq!(
+        store.insert_invitation(&invitation).await.unwrap(),
+        Insertion::Inserted
+    );
+    let later = Invitation {
+        created_at: now() + Duration::hours(1),
+        ..invitation
+    };
+    assert_eq!(
+        store.insert_invitation(&later).await.unwrap(),
+        Insertion::Existing(invitation),
+        "invited once, at the first time"
+    );
+    assert!(store.is_invited(catalog.sale, first).await.unwrap());
+    assert!(!store.is_invited(other.sale, first).await.unwrap());
+
+    let mut listed = vec![invitation];
+    for i in 0..5_i64 {
+        // Pairs share a time, so ties are broken by account id.
+        let invited = Invitation {
+            sale_id: catalog.sale,
+            account_id: account(store.as_ref()).await,
+            created_at: now() + Duration::seconds(i / 2),
+        };
+        store.insert_invitation(&invited).await.unwrap();
+        listed.push(invited);
+        let elsewhere = Invitation {
+            sale_id: other.sale,
+            ..invited
+        };
+        store.insert_invitation(&elsewhere).await.unwrap();
+    }
+    listed.sort_by_key(|invitation| {
+        (
+            std::cmp::Reverse(invitation.created_at),
+            invitation.account_id,
+        )
+    });
+    let position = |invitation: &Invitation| Keyset {
+        at: invitation.created_at,
+        id: invitation.account_id.as_uuid(),
+    };
+    for size in [1, 2, 100] {
+        let read = walk(size, position, async |page| {
+            store.invitations(catalog.sale, page).await.unwrap()
+        })
+        .await;
+        assert_eq!(read, listed, "invitations in pages of {size}");
+    }
+
+    assert!(store.delete_invitation(catalog.sale, first).await.unwrap());
+    assert!(!store.delete_invitation(catalog.sale, first).await.unwrap());
+    assert!(!store.is_invited(catalog.sale, first).await.unwrap());
+    assert_eq!(
+        store.insert_invitation(&later).await.unwrap(),
+        Insertion::Inserted,
+        "taken off the list, an account can be invited again"
     );
 }
 

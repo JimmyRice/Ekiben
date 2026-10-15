@@ -34,7 +34,7 @@ const fn event_order(order: EventOrder) -> (&'static str, &'static str, &'static
     }
 }
 
-const SALE_COLUMNS: &str = "SELECT id, event_id, name, opens_at, closes_at, admission, \
+const SALE_COLUMNS: &str = "SELECT id, event_id, name, audience, opens_at, closes_at, admission, \
      reservation_ttl_seconds, max_tickets_per_request, accepted_attestors, environment, \
      created_at, version FROM sales";
 
@@ -236,8 +236,8 @@ impl CatalogStore for SqliteStore {
         sqlx::query(
             "INSERT INTO sales (id, event_id, name, opens_at, closes_at, admission,
                                 reservation_ttl_seconds, max_tickets_per_request,
-                                accepted_attestors, environment, created_at, version)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                                accepted_attestors, environment, created_at, version, audience)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         )
         .bind(sale.id.as_uuid())
         .bind(sale.event_id.as_uuid())
@@ -251,6 +251,7 @@ impl CatalogStore for SqliteStore {
         .bind(sale.environment.as_str())
         .bind(micros(sale.created_at))
         .bind(sale.version)
+        .bind(sale.audience.as_str())
         .execute(&mut *tx)
         .await
         .map_err(error)?;
@@ -264,7 +265,8 @@ impl CatalogStore for SqliteStore {
         let result = sqlx::query(
             "UPDATE sales SET name = ?2, opens_at = ?3, closes_at = ?4, admission = ?5,
                               reservation_ttl_seconds = ?6, max_tickets_per_request = ?7,
-                              accepted_attestors = ?8, environment = ?9, version = ?10
+                              accepted_attestors = ?8, environment = ?9, version = ?10,
+                              audience = ?12
              WHERE id = ?1 AND version = ?11",
         )
         .bind(sale.id.as_uuid())
@@ -278,6 +280,7 @@ impl CatalogStore for SqliteStore {
         .bind(sale.environment.as_str())
         .bind(sale.version)
         .bind(expected_version)
+        .bind(sale.audience.as_str())
         .execute(&self.writer)
         .await
         .map_err(error)?;

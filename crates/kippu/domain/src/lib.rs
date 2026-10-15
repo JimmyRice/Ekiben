@@ -7,6 +7,7 @@ pub mod catalog;
 pub mod denial;
 pub mod id;
 pub mod image;
+pub mod invitation;
 pub mod money;
 pub mod outbox;
 pub mod payment;

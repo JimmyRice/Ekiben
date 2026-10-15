@@ -1,11 +1,11 @@
 //! Sales: the windows in which an event's tickets are sold.
 
 use kippu_domain::admission::AdmissionPolicy;
-use kippu_domain::catalog::{EventSummary, Inventory, Sale, TicketType};
+use kippu_domain::catalog::{Audience, EventSummary, Inventory, Sale, TicketType};
 use kippu_domain::payment::Environment;
-use kippu_domain::{AttestorId, EventId, SaleId, Timestamp};
+use kippu_domain::{AttestorId, EventId, SaleId, Timestamp, ValidationError};
 
-use super::{check_version, visible_event, writable_event};
+use super::{can_write, check_version, visible_event, writable_event};
 use crate::app::AppState;
 use crate::auth::Principal;
 use crate::error::{ApiError, ApiResult};
@@ -15,6 +15,9 @@ use crate::error::{ApiError, ApiResult};
 pub struct SaleSettings {
     /// Display name, e.g. "Early bird".
     pub name: String,
+    /// Who sees the sale. `None`: public for a new sale, unchanged for an existing one, so a
+    /// client that does not know the field never widens who sees a sale.
+    pub audience: Option<Audience>,
     /// When purchase requests start being accepted.
     pub opens_at: Timestamp,
     /// When purchase requests stop being accepted.
@@ -36,6 +39,8 @@ pub struct SaleSettings {
 pub struct SaleChanges {
     /// Display name.
     pub name: Option<String>,
+    /// Who sees the sale: public or invited. A private sale stays private.
+    pub audience: Option<Audience>,
     /// When purchase requests start being accepted.
     pub opens_at: Option<Timestamp>,
     /// When purchase requests stop being accepted.
@@ -57,6 +62,7 @@ impl From<SaleSettings> for SaleChanges {
     fn from(settings: SaleSettings) -> Self {
         Self {
             name: Some(settings.name),
+            audience: settings.audience,
             opens_at: Some(settings.opens_at),
             closes_at: Some(settings.closes_at),
             admission: Some(settings.admission),
@@ -86,7 +92,28 @@ pub struct TicketTypeAvailability {
     pub available: u32,
 }
 
-/// A sale whose event the caller may see.
+/// Whether the caller sees `sale` of `event`, an event it sees: a public sale, any sale of
+/// an event it may edit, or a sale for invited accounts with it on the list. Only an
+/// invited-only sale costs a read, and only for those who cannot edit it.
+async fn can_see_sale(
+    state: &AppState,
+    principal: Option<&Principal>,
+    sale: &Sale,
+    event: &EventSummary,
+) -> ApiResult<bool> {
+    if sale.audience == Audience::Public || can_write(state, principal, event.organization_id) {
+        return Ok(true);
+    }
+    match (sale.audience, principal.and_then(Principal::account_id)) {
+        (Audience::Invited, Some(account)) => {
+            Ok(state.store().is_invited(sale.id, account).await?)
+        }
+        _ => Ok(false),
+    }
+}
+
+/// A sale the caller may see: of an event it sees, and public, invited to, or one it may
+/// edit. Hidden sales are reported as missing rather than forbidden.
 #[tracing::instrument(skip_all)]
 pub async fn visible_sale(
     state: &AppState,
@@ -99,7 +126,11 @@ pub async fn visible_sale(
         .await?
         .ok_or_else(|| ApiError::not_found("sale"))?;
     let event = visible_event(state, principal, sale.event_id).await?;
-    Ok((sale, event))
+    if can_see_sale(state, principal, &sale, &event).await? {
+        Ok((sale, event))
+    } else {
+        Err(ApiError::not_found("sale"))
+    }
 }
 
 /// A sale the caller may edit.
@@ -150,7 +181,9 @@ pub async fn event_sales(
     let event = visible_event(state, principal, event_id).await?;
     let mut sales = Vec::new();
     for sale in state.store().list_sales(event.id).await? {
-        sales.push(offer(state, sale).await?);
+        if can_see_sale(state, principal, &sale, &event).await? {
+            sales.push(offer(state, sale).await?);
+        }
     }
     Ok(sales)
 }
@@ -191,6 +224,7 @@ pub async fn create_sale(
         id: SaleId::generate(),
         event_id: event.id,
         name: settings.name,
+        audience: settings.audience.unwrap_or_default(),
         opens_at: settings.opens_at,
         closes_at: settings.closes_at,
         admission: settings.admission,
@@ -217,8 +251,18 @@ pub async fn update_sale(
 ) -> ApiResult<Sale> {
     let (current, _) = writable_sale(state, principal, id).await?;
     check_version(current.version, expected_version)?;
+    let audience = changes.audience.unwrap_or(current.audience);
+    if (audience == Audience::Private) != (current.audience == Audience::Private) {
+        return Err(ValidationError::new(
+            "audience",
+            "is chosen for good when a sale is private: a private sale stays private, and no \
+             other sale becomes private",
+        )
+        .into());
+    }
     let sale = Sale {
         name: changes.name.unwrap_or(current.name),
+        audience,
         opens_at: changes.opens_at.unwrap_or(current.opens_at),
         closes_at: changes.closes_at.unwrap_or(current.closes_at),
         admission: changes.admission.unwrap_or(current.admission),

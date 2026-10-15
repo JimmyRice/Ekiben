@@ -9,6 +9,7 @@ mod denials;
 mod error;
 mod housekeeping;
 mod images;
+mod invitations;
 #[cfg(feature = "conformance")]
 pub mod object_conformance;
 mod objects;
@@ -27,6 +28,7 @@ pub use denials::DenialStore;
 pub use error::{BoxError, StoreError, StoreResult};
 pub use housekeeping::{AuditEntry, AuditRecord, HousekeepingStore, IdempotencyRecord};
 pub use images::ImageStore;
+pub use invitations::InvitationStore;
 pub use objects::{ObjectError, ObjectStorage, StoredObject};
 pub use outbox::{OutboxRecord, OutboxStore, OutboxTx};
 pub use payments::{PaymentStore, PaymentsTx};
