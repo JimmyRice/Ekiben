@@ -8,7 +8,7 @@ use std::sync::Arc;
 use axum::http::{Method, StatusCode};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use kippu_domain::Duration;
+use kippu_domain::{Duration, SaleId};
 use serde_json::{Value, json};
 use support::{TestApp, uuid_suffix};
 
@@ -445,6 +445,214 @@ async fn the_waiting_room_admits_in_batches() {
 }
 
 #[tokio::test]
+async fn the_waiting_room_admits_nobody_before_the_sale_opens() {
+    let app = TestApp::start().await;
+    // Within the access tokens' lifetime, so the clock can move to the opening.
+    let opens_at = app.now() + Duration::minutes(10);
+    let shop = app
+        .shop(
+            10,
+            1_000,
+            json!({
+                "opens_at": opens_at.to_string(),
+                "admission": { "mode": "waiting_room", "admit_per_tick": 2, "max_backlog": 100 },
+            }),
+        )
+        .await;
+    let path = format!("/v1/sales/{}/waiting-room", shop.sale_id);
+    let first = app.buyer().await;
+    let place = app.call(Method::POST, &path, Some(&first), None).await;
+    assert_eq!(place.status, StatusCode::OK, "{:?}", place.body);
+    for _ in 0..4 {
+        app.call(Method::POST, &path, Some(&app.buyer().await), None)
+            .await;
+    }
+    let progress = async || {
+        app.call(Method::GET, &path, Some(&shop.organizer), None)
+            .await
+            .body
+    };
+    let ask = async || {
+        app.call(
+            Method::POST,
+            &format!("/v1/sales/{}/admission", shop.sale_id),
+            Some(&first),
+            Some(json!({ "queue_ticket": place.body["queue_ticket"]["token"] })),
+        )
+        .await
+        .body
+    };
+
+    app.drain("admission").await;
+    assert_eq!(
+        progress().await,
+        json!({ "last_position": 5, "admitted_through": 0 }),
+        "an empty backlog before the opening admits nobody"
+    );
+    assert_eq!(ask().await["status"], "waiting");
+
+    app.clock.set(opens_at);
+    app.drain("admission").await;
+    assert_eq!(
+        progress().await,
+        json!({ "last_position": 5, "admitted_through": 2 }),
+        "the opening admits one batch, not the whole room"
+    );
+    assert_eq!(ask().await["status"], "admitted");
+}
+
+#[tokio::test]
+async fn a_sold_out_sale_admits_nobody_until_tickets_come_back() {
+    let app = TestApp::start().await;
+    // Two tickets, batches of ten.
+    let shop = app.shop(2, 1_000, json!({ "admission": { "mode": "waiting_room", "admit_per_tick": 10, "max_backlog": 100 } })).await;
+    let room = format!("/v1/sales/{}/waiting-room", shop.sale_id);
+    let admission = format!("/v1/sales/{}/admission", shop.sale_id);
+    let mut queue = Vec::new();
+    for _ in 0..5 {
+        let buyer = app.buyer().await;
+        let place = app.call(Method::POST, &room, Some(&buyer), None).await;
+        queue.push((buyer, place.body["queue_ticket"]["token"].clone()));
+    }
+    let admitted_through = async || {
+        app.call(Method::GET, &room, Some(&shop.organizer), None)
+            .await
+            .body["admitted_through"]
+            .clone()
+    };
+    app.drain("admission").await;
+    assert_eq!(admitted_through().await, 2, "no more people than tickets");
+
+    // The first two reserve the two tickets and do not pay.
+    for (buyer, ticket) in &queue[..2] {
+        let admitted = app
+            .call(
+                Method::POST,
+                &admission,
+                Some(buyer),
+                Some(json!({ "queue_ticket": ticket })),
+            )
+            .await;
+        let pass = admitted.body["admission_pass"]["token"].as_str().unwrap();
+        let reply = app
+            .call_with(
+                Method::POST,
+                &format!("/v1/sales/{}/purchase-requests", shop.sale_id),
+                Some(buyer),
+                Some(
+                    json!({ "items": [{ "ticket_type_id": shop.ticket_type_id, "quantity": 1 }] }),
+                ),
+                &[
+                    ("idempotency-key", &uuid_suffix()),
+                    ("kippu-admission-pass", pass),
+                ],
+            )
+            .await;
+        assert_eq!(reply.status, StatusCode::ACCEPTED, "{:?}", reply.body);
+    }
+    app.drain("purchases").await;
+    app.drain("admission").await;
+    assert_eq!(
+        admitted_through().await,
+        2,
+        "sold out: nobody more is let in"
+    );
+    let (third, ticket) = &queue[2];
+    let waiting = app
+        .call(
+            Method::POST,
+            &admission,
+            Some(third),
+            Some(json!({ "queue_ticket": ticket })),
+        )
+        .await;
+    assert_eq!(waiting.body["status"], "waiting");
+
+    // Unpaid, the reservations expire: their tickets go to the next two in line.
+    expire_everything(&app).await;
+    app.drain("admission").await;
+    assert_eq!(admitted_through().await, 4);
+}
+
+#[tokio::test]
+async fn a_closed_sale_turns_its_waiting_room_away() {
+    let app = TestApp::start().await;
+    // Within the access tokens' lifetime, so the clock can move to the closing.
+    let closes_at = app.now() + Duration::minutes(10);
+    let shop = app
+        .shop(
+            10,
+            1_000,
+            json!({
+                "closes_at": closes_at.to_string(),
+                "admission": { "mode": "waiting_room", "admit_per_tick": 2, "max_backlog": 100 },
+            }),
+        )
+        .await;
+    let room = format!("/v1/sales/{}/waiting-room", shop.sale_id);
+    let buyer = app.buyer().await;
+    let place = app.call(Method::POST, &room, Some(&buyer), None).await;
+    assert_eq!(place.status, StatusCode::OK, "{:?}", place.body);
+    let late = app.buyer().await;
+
+    app.clock.set(closes_at);
+    let asked = app
+        .call(
+            Method::POST,
+            &format!("/v1/sales/{}/admission", shop.sale_id),
+            Some(&buyer),
+            Some(json!({ "queue_ticket": place.body["queue_ticket"]["token"] })),
+        )
+        .await;
+    assert_eq!(asked.status, StatusCode::CONFLICT);
+    assert_eq!(
+        asked.body["type"], "urn:kippu:problem:sale-closed",
+        "nobody is left waiting for a sale that is over"
+    );
+    let joined = app.call(Method::POST, &room, Some(&late), None).await;
+    assert_eq!(joined.status, StatusCode::CONFLICT);
+    assert_eq!(joined.body["type"], "urn:kippu:problem:sale-closed");
+}
+
+#[tokio::test]
+async fn joining_the_waiting_room_again_keeps_the_place() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({ "admission": { "mode": "waiting_room", "admit_per_tick": 1, "max_backlog": 100 } })).await;
+    let path = format!("/v1/sales/{}/waiting-room", shop.sale_id);
+    let (first, second) = (app.buyer().await, app.buyer().await);
+    let join = async |buyer: &str| app.call(Method::POST, &path, Some(buyer), None).await.body;
+
+    let place = join(&first).await;
+    assert_eq!(join(&second).await["position"], 2);
+    let again = join(&first).await;
+    assert_eq!(
+        again["position"], place["position"],
+        "one place per account"
+    );
+    assert_eq!(
+        app.call(Method::GET, &path, Some(&shop.organizer), None)
+            .await
+            .body,
+        json!({ "last_position": 2, "admitted_through": 0 }),
+        "joining again hands out no new position"
+    );
+
+    app.drain("admission").await;
+    let admitted = app
+        .call(
+            Method::POST,
+            &format!("/v1/sales/{}/admission", shop.sale_id),
+            Some(&first),
+            Some(json!({ "queue_ticket": again["queue_ticket"]["token"] })),
+        )
+        .await;
+    assert_eq!(
+        admitted.body["status"], "admitted",
+        "the new queue ticket holds the old place"
+    );
+}
+
+#[tokio::test]
 async fn free_tickets_are_issued_at_checkout() {
     let app = TestApp::start().await;
     let shop = app.shop(10, 0, json!({})).await;
@@ -623,7 +831,7 @@ async fn a_batch_of_buyers_is_served_in_arrival_order() {
         buyers.push(app.buyer().await);
     }
     // Six buyers for three tickets, then the first buyer again, beyond its limit of two: one
-    // batch, processed together except where an account repeats.
+    // batch, processed together.
     let mut submitted = Vec::new();
     for (buyer, quantity) in buyers
         .iter()
@@ -664,6 +872,221 @@ async fn a_batch_of_buyers_is_served_in_arrival_order() {
             "limit_exceeded"
         ]
     );
+}
+
+#[tokio::test]
+async fn a_run_decides_each_request_as_serving_them_one_by_one_would() {
+    let app = TestApp::start().await;
+    let shop = app.shop(5, 1_000, json!({})).await;
+    let first = app.buyer().await;
+    app.reserve(&first, &shop, 2).await; // its limit of two; three tickets are left
+    let mut buyers = vec![first];
+    for _ in 0..4 {
+        buyers.push(app.buyer().await);
+    }
+    // One run of five accounts: the first is over its limit, and a pair that no longer fits
+    // does not keep a single ticket from the buyer behind it.
+    let mut submitted = Vec::new();
+    for (buyer, quantity) in buyers.iter().zip([1, 2, 2, 1, 1]) {
+        app.clock.advance(Duration::milliseconds(1));
+        let reply = app.purchase(buyer, &shop, quantity, &uuid_suffix()).await;
+        assert_eq!(reply.status, StatusCode::ACCEPTED, "{:?}", reply.body);
+        submitted.push((buyer, reply.body["id"].as_str().unwrap().to_owned()));
+    }
+    app.drain("purchases").await;
+
+    let mut outcomes = Vec::new();
+    let mut reservations = Vec::new();
+    for (buyer, id) in &submitted {
+        let request = app
+            .call(
+                Method::GET,
+                &format!("/v1/purchase-requests/{id}"),
+                Some(buyer),
+                None,
+            )
+            .await;
+        reservations.push(request.body["reservation_id"].as_str().map(str::to_owned));
+        outcomes.push(match request.body["status"].as_str().unwrap() {
+            "rejected" => request.body["reason"].as_str().unwrap().to_owned(),
+            status => status.to_owned(),
+        });
+    }
+    assert_eq!(
+        outcomes,
+        [
+            "limit_exceeded",
+            "reserved",
+            "sold_out",
+            "reserved",
+            "sold_out"
+        ]
+    );
+
+    // Requests turned away took no quota: once the pair before it is cancelled, the buyer
+    // whose pair did not fit gets two tickets, its whole limit.
+    let cancelled = app
+        .call(
+            Method::POST,
+            &format!(
+                "/v1/reservations/{}/cancel",
+                reservations[1].as_deref().unwrap()
+            ),
+            Some(&buyers[1]),
+            None,
+        )
+        .await;
+    assert_eq!(cancelled.body["status"], "cancelled");
+    app.reserve(&buyers[2], &shop, 2).await;
+}
+
+#[tokio::test]
+async fn an_accounts_requests_in_one_batch_are_decided_as_one_by_one() {
+    let app = TestApp::start().await;
+    let shop = app.shop(5, 1_000, json!({})).await;
+    let (a, b, c) = (app.buyer().await, app.buyer().await, app.buyer().await);
+    app.reserve(&c, &shop, 2).await; // its limit of two; three tickets are left
+    // One batch in which `a` asks three times.
+    let mut submitted = Vec::new();
+    for (buyer, quantity) in [(&b, 2), (&a, 2), (&a, 1), (&a, 2), (&c, 1)] {
+        app.clock.advance(Duration::milliseconds(1));
+        let reply = app.purchase(buyer, &shop, quantity, &uuid_suffix()).await;
+        assert_eq!(reply.status, StatusCode::ACCEPTED, "{:?}", reply.body);
+        submitted.push((buyer, reply.body["id"].as_str().unwrap().to_owned()));
+    }
+    app.drain("purchases").await;
+
+    let mut outcomes = Vec::new();
+    let mut reservations = Vec::new();
+    for (buyer, id) in &submitted {
+        let request = app
+            .call(
+                Method::GET,
+                &format!("/v1/purchase-requests/{id}"),
+                Some(buyer),
+                None,
+            )
+            .await;
+        reservations.push(request.body["reservation_id"].as_str().map(str::to_owned));
+        outcomes.push(match request.body["status"].as_str().unwrap() {
+            "rejected" => request.body["reason"].as_str().unwrap().to_owned(),
+            status => status.to_owned(),
+        });
+    }
+    assert_eq!(
+        outcomes,
+        [
+            "reserved",
+            // A pair no longer fits and takes no quota, so `a`'s single gets the last ticket.
+            "sold_out",
+            "reserved",
+            // Then `a` is over its limit, judged before stock, as is `c`.
+            "limit_exceeded",
+            "limit_exceeded"
+        ]
+    );
+
+    // `a` holds one ticket of its two: once `b` cancels, it gets a second.
+    let cancelled = app
+        .call(
+            Method::POST,
+            &format!(
+                "/v1/reservations/{}/cancel",
+                reservations[0].as_deref().unwrap()
+            ),
+            Some(&b),
+            None,
+        )
+        .await;
+    assert_eq!(cancelled.body["status"], "cancelled");
+    app.reserve(&a, &shop, 1).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_workers_serve_a_sale_in_arrival_order() {
+    // Small batches, so that four workers at once (as on four instances) take turns on one
+    // sale's queue.
+    let app = TestApp::start_with(Vec::new(), |config| {
+        config.workers.purchase_batch_size = 3.try_into().unwrap();
+    })
+    .await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let mut submitted = Vec::new();
+    for _ in 0..30 {
+        let buyer = app.buyer().await;
+        app.clock.advance(Duration::milliseconds(1));
+        let reply = app.purchase(&buyer, &shop, 1, &uuid_suffix()).await;
+        assert_eq!(reply.status, StatusCode::ACCEPTED, "{:?}", reply.body);
+        submitted.push((buyer, reply.body["id"].as_str().unwrap().to_owned()));
+    }
+    tokio::join!(
+        app.drain("purchases"),
+        app.drain("purchases"),
+        app.drain("purchases"),
+        app.drain("purchases"),
+    );
+
+    let mut served = Vec::new();
+    for (arrival, (buyer, id)) in submitted.iter().enumerate() {
+        let request = app
+            .call(
+                Method::GET,
+                &format!("/v1/purchase-requests/{id}"),
+                Some(buyer),
+                None,
+            )
+            .await;
+        if request.body["status"] == "reserved" {
+            served.push(arrival);
+        }
+    }
+    assert_eq!(
+        served,
+        (0..10).collect::<Vec<_>>(),
+        "the first ten buyers get the ten tickets"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_worker_that_dies_holds_up_nobody() {
+    let app = TestApp::start().await;
+    let store = app.app.state().store();
+    if !store.capabilities().concurrent_writers {
+        // One write transaction at a time: there is no other worker to hold anything up.
+        return;
+    }
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let buyer = app.buyer().await;
+    let reply = app.purchase(&buyer, &shop, 1, "k").await;
+    let path = format!(
+        "/v1/purchase-requests/{}",
+        reply.body["id"].as_str().unwrap()
+    );
+    let status = async || {
+        app.call(Method::GET, &path, Some(&buyer), None).await.body["status"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+
+    // A worker takes the sale's queue and dies in the middle of its transaction.
+    let sale: SaleId = shop.sale_id.parse().unwrap();
+    let mut dying = store.begin().await.unwrap();
+    assert!(dying.purchases().lock_purchase_queue(sale).await.unwrap());
+    app.drain("purchases").await;
+    assert_eq!(status().await, "queued", "the queue is held");
+    drop(dying);
+
+    // No lease to run out: once its transaction is gone, the next worker serves the sale,
+    // without the clock moving.
+    for _ in 0..50 {
+        app.drain("purchases").await;
+        if status().await != "queued" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(status().await, "reserved");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -205,7 +205,8 @@ pub struct PurchaseRequest {
     /// Where the request stands. Flattened: `{"status": "rejected", "reason": "sold_out"}`.
     #[serde(flatten)]
     pub status: PurchaseStatus,
-    /// When the request was first accepted.
+    /// When the request was first accepted, by the clock of the instance that accepted it:
+    /// requests of a sale are served in this order.
     pub created_at: Timestamp,
     /// When the status last changed.
     pub updated_at: Timestamp,

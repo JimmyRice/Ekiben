@@ -14,13 +14,35 @@ use tracing::Subscriber;
 use tracing_subscriber::Layer;
 use tracing_subscriber::layer::{Context, SubscriberExt as _};
 
-/// Counts the statements sqlx runs, on any thread.
+/// Counts the statements sqlx runs, on any thread, except those that set up a new pool
+/// connection (SQLite's `PRAGMA`s, MySQL's session `SET`s). Opening a connection is the
+/// pool's work, not the path's: a pool opens one whenever the connection a call just released
+/// is still on its way back, which a busy machine makes likely at any moment.
 #[derive(Clone, Default)]
 struct Statements(Arc<AtomicU32>);
 
+/// The first words of a statement, as sqlx's event summarizes it.
+#[derive(Default)]
+struct Summary(String);
+
+impl tracing::field::Visit for Summary {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "summary" {
+            value.clone_into(&mut self.0);
+        }
+    }
+
+    fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+}
+
 impl<S: Subscriber> Layer<S> for Statements {
     fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
-        if event.metadata().target() == "sqlx::query" {
+        if event.metadata().target() != "sqlx::query" {
+            return;
+        }
+        let mut summary = Summary::default();
+        event.record(&mut summary);
+        if !(summary.0.starts_with("PRAGMA ") || summary.0.starts_with("SET ")) {
             self.0.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -100,13 +122,12 @@ async fn hot_paths_run_a_fixed_number_of_statements() {
     assert_eq!(offer.body["ticket_types"].as_array().unwrap().len(), 3);
 
     let buyer = app.buyer().await;
-    let place = app
-        .call(
-            Method::POST,
-            &format!("/v1/sales/{}/waiting-room", shop.sale_id),
-            Some(&buyer),
-            None,
-        )
+    let waiting_room = format!("/v1/sales/{}/waiting-room", shop.sale_id);
+    let (place, join_statements) = statements
+        .of(app.call(Method::POST, &waiting_room, Some(&buyer), None))
+        .await;
+    let (_, rejoin_statements) = statements
+        .of(app.call(Method::POST, &waiting_room, Some(&buyer), None))
         .await;
     app.drain("admission").await;
     let (admitted, admission_statements) = statements
@@ -126,17 +147,47 @@ async fn hot_paths_run_a_fixed_number_of_statements() {
     }
     let ((), three_requests) = statements.of(app.drain("purchases")).await;
 
-    // MySQL has neither RETURNING nor ON CONFLICT, so its writes take more statements.
-    let (worker_one, worker_three) = match std::env::var("EKIBEN_TEST_BACKEND").as_deref() {
-        Ok("mysql") => (17, 31),
-        _ => (12, 24),
-    };
+    // Ten buyers in one batch, served together: what each request costs shows here.
+    let mut tickets = Vec::new();
+    for _ in 0..10 {
+        let buyer = app.buyer().await;
+        let place = app
+            .call(Method::POST, &waiting_room, Some(&buyer), None)
+            .await;
+        tickets.push((buyer, place.body["queue_ticket"]["token"].clone()));
+    }
+    app.drain("admission").await;
+    for (buyer, ticket) in &tickets {
+        let admitted = app
+            .call(
+                Method::POST,
+                &format!("/v1/sales/{}/admission", shop.sale_id),
+                Some(buyer),
+                Some(json!({ "queue_ticket": ticket })),
+            )
+            .await;
+        let pass = admitted.body["admission_pass"]["token"].as_str().unwrap();
+        purchase(&app, &shop, buyer, pass).await;
+    }
+    let ((), ten_buyers) = statements.of(app.drain("purchases")).await;
+
+    // MySQL has neither RETURNING nor ON CONFLICT, so its writes take more statements, and it
+    // enters a first join in a transaction of its own, locking the counter it takes before it
+    // moves it.
+    let (join, worker_one, worker_three, worker_ten) =
+        match std::env::var("EKIBEN_TEST_BACKEND").as_deref() {
+            Ok("mysql") => (8, 13, 15, 15),
+            _ => (5, 12, 13, 13),
+        };
     let counts = [
         ("sale offer", offer_statements, 4),
+        ("join waiting room", join_statements, join),
+        ("join again", rejoin_statements, 3),
         ("admission", admission_statements, 3),
         ("purchase", purchase_statements, 3),
         ("worker, one request", one_request, worker_one),
         ("worker, three requests", three_requests, worker_three),
+        ("worker, ten buyers", ten_buyers, worker_ten),
     ];
     for (path, measured, most) in counts {
         eprintln!("{path}: {measured} statements");

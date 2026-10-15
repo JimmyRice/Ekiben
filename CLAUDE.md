@@ -38,7 +38,7 @@ Keep the repository root uncluttered and do not add speculative `.gitignore` ent
 ## Commands
 
 ```bash
-cargo test --workspace --all-features                                   # 375 tests incl. e2e over TCP
+cargo test --workspace --all-features                                   # 405 tests incl. e2e over TCP
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets           # default features too
 cargo fmt --all
@@ -80,7 +80,8 @@ as `shop`, `attestor`, `reserve`, `drain`); the full journey over real TCP is
 
 - **Stateless.** No in-process state shared between requests. Everything mutable lives in the
   store; tokens are signed and verified without lookups. Background tasks must be safe on any
-  number of instances (leases, compare-and-set, conditional updates).
+  number of instances (leases, compare-and-set, conditional updates, locks held for one
+  transaction).
 - **Business logic lives once, in `kippu-core` services.** Adapters only implement the store
   primitives. A new guarantee the logic relies on goes into the store's rustdoc contract *and*
   a new case in `crates/kippu/store/src/conformance.rs`; every adapter runs the suite via
@@ -272,6 +273,17 @@ Do not change these unless the user explicitly asks.
 - **Event status and sales:** only a published event sells (front door and worker; a request
   queued before a cancellation is rejected). An event someone ordered for (a reservation not
   expired or cancelled) can be cancelled but not withdrawn to a draft.
+- **Waiting rooms:** buyers may join before the sale opens and keep the order they joined in;
+  nobody is admitted before `opens_at` (with no purchases yet the backlog is empty and would
+  let the whole room through), then one batch per tick while the backlog is below
+  `max_backlog`, of no more people than the tickets left beyond the requests queued: a
+  sold-out sale admits nobody, and tickets that come back (an unpaid reservation expiring or
+  cancelled, a refund) go to the next in line. Once the sale closes or its event is
+  cancelled, joining and polling answer `sale-closed` and the room is left as it stands. Buyers
+  polling for admission read `admitted_through` alone, never the counters. An account holds
+  one position per sale (`waiting_room_entries`): joining
+  again returns it with a new queue ticket, so repeated joins neither crowd others out nor
+  improve anyone's place.
 - **External sign-in:** Kippu ships no OAuth client; forks write a `Module` that calls
   `auth::external::link_or_create` and `auth::sessions::issue` (`docs/external-login.md`).
   Accounts may have no password and no email; merging by email requires a verified email and is
@@ -307,15 +319,42 @@ Do not change these unless the user explicitly asks.
   (`account_denied`) by the worker, not the front door; a reservation held before the denial
   can still be paid (its tickets are refused at the gate). Webhooks are not the channel for gates
   (they need an inbound public endpoint and give no snapshot).
-- **Purchase worker commits in groups:** a sale's requests are processed in runs without a
-  repeated account, one transaction per run: quotas first (account order), then
-  `InventoryTx::lock_stock` on every type the run needs (type order), then stock in arrival
-  order. Outcomes equal one-by-one processing; a run that fails is redone one request at a
-  time. Any transaction that changes several requests' stock must lock it up front the same
-  way (`stock_locked_up_front_never_deadlocks`).
-- **PostgreSQL queue numbers** come from a per-sale counter row (`INSERT … ON CONFLICT DO
-  UPDATE`), not a sequence: an admission batch means "the next N people" and needs consecutive
-  numbers.
+- **Purchase workers hold a sale's queue for one transaction:** each transaction takes the
+  sale's row in `purchase_queues` (`PurchasesTx::lock_purchase_queue`, `FOR UPDATE SKIP
+  LOCKED`; SQLite needs none) and only then reads its oldest queued requests
+  (`queued_requests`, `created_at` then id, with each account's denial), so every sale is
+  served in arrival order however many workers and instances run, and a worker that dies holds
+  nothing once its transaction is gone (no leases to run out; PostgreSQL also ends a
+  transaction holding a queue after 10 s without a statement). Workers skip a held queue and
+  serve other sales.
+- **Purchase worker commits in groups:** the oldest due requests of a sale, up to a batch, are
+  served as one run in one transaction: the queue, then the run's quotas
+  (`InventoryTx::lock_quotas`, account order), then its stock (`InventoryTx::lock_stock`, type
+  order), each locked and read. Every request is then decided in memory in arrival order, as
+  one-by-one processing would (an account's later requests see what its earlier ones took;
+  one rejected for stock takes no quota), and the run is written in a few multi-row statements
+  (`take_quotas`, one `try_hold`, `insert_reservations`, `set_purchase_statuses`), so a run
+  costs about as many statements however long it is; a lone request skips the reads and is
+  decided by its conditional writes. A run that fails is redone one request at a time, and a
+  request that fails on its own is postponed (`lease_until`, by
+  `workers.purchase_lease_seconds`) instead of holding up the queue. Any transaction that
+  changes several requests' stock must lock it up front the same way
+  (`stock_locked_up_front_never_deadlocks`, `quotas_locked_together_never_exceed_a_limit`).
+- **Waiting-room positions** come from counter rows, not a sequence: an admission batch means
+  "the next N people" and needs all but consecutive numbers. A room has 128 counters on
+  PostgreSQL and MySQL (counter `c` hands out `c + 1`, `c + 129`, …; `waiting_room_counters`)
+  and one on SQLite. A join takes the lowest position of a counter no other join holds (`FOR
+  UPDATE SKIP LOCKED`; on PostgreSQL picked in a CTE, since a subquery in `WHERE` is re-run on
+  re-check and often updates nothing) and enters the account in the same statement (MySQL: one
+  transaction), so joins do not wait for each other and only positions handed out at the same
+  moment come out of order. An advance goes no further than the positions handed out with none
+  missing below them and never waits for a join; only when admission has caught up and the
+  next position stays free (nobody joined since the last tick) does it seal the counters behind
+  it, skipping their positions and stopping below any counter a join holds, so a join that
+  starts after an advance is never admitted by it (`joins_after_an_advance_are_never_admitted`).
+  A sale created with a waiting room gets its room and counters with it, any other on its first
+  join. Numbers are lost only to seals and to one account's simultaneous joins racing each other
+  on PostgreSQL and SQLite.
 
 ## Open tasks
 
@@ -341,6 +380,24 @@ Do not change these unless the user explicitly asks.
 
 ## Known limitations
 
+- One sale is served by one transaction at a time, so a single sale's purchase throughput does
+  not grow with workers or instances (other sales are served in parallel): about 7,500–8,500
+  requests/s on PostgreSQL and MySQL in local containers, with a run as long as the default
+  `workers.purchase_batch_size` (50). Beyond that the options are longer runs (a larger batch
+  size), or inventory buckets (Open tasks), which would relax strict arrival order.
+- On MySQL, a purchase worker whose machine freezes or vanishes without closing its connection
+  holds its transaction, and so its sale's queue, until the server drops the connection: set
+  `wait_timeout` (seconds) low enough on the server. PostgreSQL ends such a transaction after
+  10 s by itself. The same holds for a waiting-room join, whose transaction holds one counter:
+  admission to that sale stops below the counter's position until the connection is dropped
+  (other sales and joins carry on; a PostgreSQL join is one statement and holds nothing).
+- A waiting room hands out about 7,300 first positions/s on PostgreSQL (where writing the WAL
+  is the limit) and 4,200/s on MySQL in local containers, with 64 joins at once.
+- Arrival order (who gets the last tickets) is the `created_at` the front-door instance gave a
+  request by its own clock, not the database's: instances need NTP, and clock skew between
+  them shifts the order by as much (milliseconds in practice). With an inbox, a request still
+  on its way into the database can be overtaken by one accepted after it that is already
+  there; the window is the inbox's persisting delay.
 - Access tokens are not looked up: a closed account's tokens, and an organizer's membership
   in them, work until they expire (`auth.access_token_ttl_seconds`, 15 minutes by default).
 - Withdrawing an event checks for orders, then updates it; a purchase the worker commits in

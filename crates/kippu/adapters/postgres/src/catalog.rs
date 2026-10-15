@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use kippu_domain::admission::WaitingRoom;
+use kippu_domain::admission::{AdmissionPolicy, WaitingRoom};
 use kippu_domain::catalog::{Event, EventSummary, Inventory, Sale, TicketType};
 use kippu_domain::validation::{CountryCode, Slug};
 use kippu_domain::{AccountId, EventId, SaleId, TicketTypeId, Timestamp};
@@ -14,7 +14,7 @@ use crate::convert::{
     AddressValues, EventRow, EventSummaryRow, InventoryRow, SaleRow, TicketTypeRow, all, at, count,
     event_status, extensions_json, instant, optional,
 };
-use crate::{PostgresStore, error, unique};
+use crate::{PostgresStore, error, unique, waiting_rooms};
 
 const EVENT_SUMMARY_COLUMNS: &str = "SELECT id, organization_id, slug, title, description, venue, \
      address_country, address_region, address_locality, address_postal_code, address_street, \
@@ -224,11 +224,24 @@ impl CatalogStore for PostgresStore {
     }
 
     async fn insert_sale(&self, sale: &Sale) -> StoreResult<()> {
+        // The sale's purchase queue comes with it, in the same statement, and so does its
+        // waiting room if it has one; a sale that takes one later gets it on the first join.
         sqlx::query(
-            "INSERT INTO sales (id, event_id, name, opens_at, closes_at, admission,
-                                reservation_ttl_seconds, max_tickets_per_request,
-                                accepted_attestors, environment, created_at, version)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+            "WITH sale AS (
+                 INSERT INTO sales (id, event_id, name, opens_at, closes_at, admission,
+                                    reservation_ttl_seconds, max_tickets_per_request,
+                                    accepted_attestors, environment, created_at, version)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                 RETURNING id
+             ), queue AS (
+                 INSERT INTO purchase_queues (sale_id) SELECT id FROM sale
+             ), room AS (
+                 INSERT INTO waiting_rooms (sale_id, admitted_through)
+                 SELECT id, 0 FROM sale WHERE $13
+             )
+             INSERT INTO waiting_room_counters (sale_id, counter, next_position, stride)
+             SELECT id, counter, counter + 1, $14
+             FROM sale CROSS JOIN generate_series(0, $14 - 1) AS counter WHERE $13",
         )
         .bind(sale.id.as_uuid())
         .bind(sale.event_id.as_uuid())
@@ -242,6 +255,11 @@ impl CatalogStore for PostgresStore {
         .bind(sale.environment.as_str())
         .bind(at(sale.created_at))
         .bind(sale.version)
+        .bind(matches!(
+            sale.admission,
+            AdmissionPolicy::WaitingRoom { .. }
+        ))
+        .bind(waiting_rooms::COUNTERS)
         .execute(&self.pool)
         .await
         .map_err(error)?;
@@ -488,61 +506,28 @@ impl CatalogStore for PostgresStore {
             .collect())
     }
 
-    async fn join_waiting_room(&self, sale: SaleId) -> StoreResult<u64> {
-        let position = sqlx::query_scalar::<_, i64>(
-            "INSERT INTO waiting_rooms (sale_id, last_position, admitted_through) VALUES ($1, 1, 0)
-             ON CONFLICT (sale_id) DO UPDATE SET last_position = waiting_rooms.last_position + 1
-             RETURNING last_position",
-        )
-        .bind(sale.as_uuid())
-        .fetch_one(&self.pool)
-        .await
-        .map_err(error)?;
-        u64::try_from(position).map_err(StoreError::backend)
+    async fn join_waiting_room(&self, sale: SaleId, account: AccountId) -> StoreResult<u64> {
+        waiting_rooms::join(&self.pool, sale, account).await
     }
 
     async fn waiting_room(&self, sale: SaleId) -> StoreResult<WaitingRoom> {
-        let row = sqlx::query_as::<_, (i64, i64)>(
-            "SELECT last_position, admitted_through FROM waiting_rooms WHERE sale_id = $1",
-        )
-        .bind(sale.as_uuid())
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(error)?;
-        let Some((last_position, admitted_through)) = row else {
-            return Ok(WaitingRoom::default());
-        };
-        Ok(WaitingRoom {
-            last_position: u64::try_from(last_position).map_err(StoreError::backend)?,
-            admitted_through: u64::try_from(admitted_through).map_err(StoreError::backend)?,
-        })
+        waiting_rooms::room(&self.pool, sale).await
     }
 
-    async fn pending_waiting_rooms(&self) -> StoreResult<Vec<SaleId>> {
-        let ids = sqlx::query_scalar::<_, Uuid>(
-            "SELECT sale_id FROM waiting_rooms WHERE admitted_through < last_position ORDER BY sale_id",
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(error)?;
-        Ok(ids.into_iter().map(Into::into).collect())
+    async fn admitted_through(&self, sale: SaleId) -> StoreResult<u64> {
+        waiting_rooms::admitted_through(&self.pool, sale).await
     }
 
-    async fn advance_waiting_room(&self, sale: SaleId, from: u64, to: u64) -> StoreResult<bool> {
-        let (from, to) = (
-            i64::try_from(from).map_err(StoreError::backend)?,
-            i64::try_from(to).map_err(StoreError::backend)?,
-        );
-        let result = sqlx::query(
-            "UPDATE waiting_rooms SET admitted_through = $3
-             WHERE sale_id = $1 AND admitted_through = $2 AND $3 <= last_position",
-        )
-        .bind(sale.as_uuid())
-        .bind(from)
-        .bind(to)
-        .execute(&self.pool)
-        .await
-        .map_err(error)?;
-        Ok(result.rows_affected() == 1)
+    async fn pending_waiting_rooms(&self, now: Timestamp) -> StoreResult<Vec<SaleId>> {
+        waiting_rooms::pending(&self.pool, now).await
+    }
+
+    async fn advance_waiting_room(
+        &self,
+        sale: SaleId,
+        from: u64,
+        to: u64,
+    ) -> StoreResult<Option<u64>> {
+        waiting_rooms::advance(&self.pool, sale, from, to).await
     }
 }

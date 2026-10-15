@@ -1,16 +1,22 @@
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use kippu_domain::purchase::{LineItem, PurchaseRequest, PurchaseStatus};
-use kippu_domain::reservation::{Reservation, ReservationStatus};
-use kippu_domain::{AccountId, EventId, PurchaseRequestId, ReservationId, SaleId, Timestamp};
+use kippu_domain::reservation::{Reservation, ReservationStatus, ReservedItem};
+use kippu_domain::{
+    AccountId, EventId, OrganizationId, PurchaseRequestId, ReservationId, SaleId, Timestamp,
+};
 use kippu_store::{
-    Hold, Holds, Insertion, InventoryTx, Keyset, Lease, LineItems, PageRequest, PurchaseStore,
-    PurchasesTx, ReservationsTx, StoreError, StoreResult,
+    Hold, Holds, Insertion, InventoryTx, Keyset, LineItems, PageRequest, PurchaseStore,
+    PurchasesTx, QueuedRequest, QuotaLines, ReservationsTx, StoreError, StoreResult,
 };
 use sqlx::types::Json;
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::convert::{
-    PurchaseRequestRow, ReservationRow, all, at, count, optional, purchase_status,
+    PurchaseRequestRow, QueuedRequestRow, ReservationRow, all, at, count, optional,
+    purchase_status, uncount,
 };
 use crate::tx::PostgresTx;
 use crate::{PostgresStore, error, unique};
@@ -76,28 +82,48 @@ impl PurchaseStore for PostgresStore {
         optional(row)
     }
 
-    async fn claim_purchase_requests(
+    async fn sales_with_queued_requests(
         &self,
-        lease: Lease,
+        now: Timestamp,
         limit: u32,
-    ) -> StoreResult<Vec<PurchaseRequest>> {
-        let rows = sqlx::query_as::<_, PurchaseRequestRow>(sqlx::AssertSqlSafe(format!(
-            "UPDATE purchase_requests SET lease_until = $1
-             WHERE id IN (SELECT id FROM purchase_requests
-                          WHERE status = 'queued' AND (lease_until IS NULL OR lease_until <= $2)
-                          ORDER BY created_at LIMIT $3
-                          FOR UPDATE SKIP LOCKED)
-             RETURNING {PURCHASE_REQUEST_COLUMNS}"
-        )))
-        .bind(at(lease.until))
-        .bind(at(lease.now))
+    ) -> StoreResult<Vec<(SaleId, u32)>> {
+        let sales = sqlx::query_as::<_, (Uuid, i64)>(
+            "SELECT sale_id, COUNT(*) FROM (SELECT sale_id, created_at FROM purchase_requests
+                                  WHERE status = 'queued'
+                                    AND (lease_until IS NULL OR lease_until <= $1)
+                                  ORDER BY created_at LIMIT $2) AS oldest
+             GROUP BY sale_id ORDER BY MIN(created_at), sale_id",
+        )
+        .bind(at(now))
         .bind(i64::from(limit))
         .fetch_all(&self.pool)
         .await
         .map_err(error)?;
-        let mut requests: Vec<PurchaseRequest> = all(rows)?;
-        requests.sort_by_key(|request| request.created_at);
-        Ok(requests)
+        sales
+            .into_iter()
+            .map(|(sale, queued)| {
+                Ok((
+                    sale.into(),
+                    u32::try_from(queued).map_err(StoreError::backend)?,
+                ))
+            })
+            .collect()
+    }
+
+    async fn postpone_purchase_request(
+        &self,
+        id: PurchaseRequestId,
+        until: Timestamp,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "UPDATE purchase_requests SET lease_until = $2 WHERE id = $1 AND status = 'queued'",
+        )
+        .bind(id.as_uuid())
+        .bind(at(until))
+        .execute(&self.pool)
+        .await
+        .map_err(error)?;
+        Ok(())
     }
 
     async fn queued_purchase_count(&self, sale: SaleId, cap: u32) -> StoreResult<u64> {
@@ -200,18 +226,67 @@ impl PurchaseStore for PostgresStore {
 
 #[async_trait]
 impl PurchasesTx for PostgresTx {
-    async fn lock_purchase_request(
-        &mut self,
-        id: PurchaseRequestId,
-    ) -> StoreResult<Option<PurchaseRequest>> {
-        let row = sqlx::query_as::<_, PurchaseRequestRow>(sqlx::AssertSqlSafe(format!(
-            "SELECT {PURCHASE_REQUEST_COLUMNS} FROM purchase_requests WHERE id = $1 FOR UPDATE"
-        )))
-        .bind(id.as_uuid())
+    async fn lock_purchase_queue(&mut self, sale: SaleId) -> StoreResult<bool> {
+        // A worker sends its statements back to back. One whose machine froze or vanished
+        // without closing the connection would hold the queue until TCP gave up on it (hours by
+        // default), so a transaction holding a queue ends after 10 seconds without a statement.
+        let taken = sqlx::query_scalar::<_, String>(
+            "SELECT set_config('idle_in_transaction_session_timeout', '10s', true)
+             FROM purchase_queues WHERE sale_id = $1 FOR UPDATE SKIP LOCKED",
+        )
+        .bind(sale.as_uuid())
         .fetch_optional(&mut *self.conn)
         .await
         .map_err(error)?;
-        optional(row)
+        if taken.is_some() {
+            return Ok(true);
+        }
+        // Skipped because another transaction holds it, or missing because an instance older
+        // than the queues created the sale. Creating the row takes it; an existing one, held
+        // or not, makes this insert do nothing without waiting.
+        let created = sqlx::query_scalar::<_, String>(
+            "INSERT INTO purchase_queues (sale_id) VALUES ($1) ON CONFLICT (sale_id) DO NOTHING
+             RETURNING set_config('idle_in_transaction_session_timeout', '10s', true)",
+        )
+        .bind(sale.as_uuid())
+        .fetch_optional(&mut *self.conn)
+        .await
+        .map_err(error)?;
+        Ok(created.is_some())
+    }
+
+    async fn queued_requests(
+        &mut self,
+        sale: SaleId,
+        event: EventId,
+        organization: OrganizationId,
+        now: Timestamp,
+        limit: u32,
+    ) -> StoreResult<Vec<QueuedRequest>> {
+        // FOR UPDATE: a worker of the previous release, which leases requests instead of
+        // holding the queue, may be serving some; they are left out once it commits.
+        let rows = sqlx::query_as::<_, QueuedRequestRow>(sqlx::AssertSqlSafe(format!(
+            "SELECT {PURCHASE_REQUEST_COLUMNS},
+                    EXISTS (SELECT 1 FROM denials d
+                            WHERE d.subject_id = r.account_id AND d.subject_kind = 'account'
+                              AND d.organization_id = $2
+                              AND (d.event_id IS NULL OR d.event_id = $3)) AS account_denied
+             FROM purchase_requests r
+             WHERE r.sale_id = $1 AND r.status = 'queued'
+               AND (r.lease_until IS NULL OR r.lease_until <= $4)
+             ORDER BY r.created_at, r.id
+             LIMIT $5
+             FOR UPDATE OF r"
+        )))
+        .bind(sale.as_uuid())
+        .bind(organization.as_uuid())
+        .bind(event.as_uuid())
+        .bind(at(now))
+        .bind(i64::from(limit))
+        .fetch_all(&mut *self.conn)
+        .await
+        .map_err(error)?;
+        all(rows)
     }
 
     async fn set_purchase_status(
@@ -231,6 +306,41 @@ impl PurchasesTx for PostgresTx {
         .bind(columns.status)
         .bind(columns.reservation_id)
         .bind(columns.rejection_reason)
+        .bind(at(now))
+        .execute(&mut *self.conn)
+        .await
+        .map_err(error)?;
+        Ok(())
+    }
+
+    async fn set_purchase_statuses(
+        &mut self,
+        outcomes: &[(PurchaseRequestId, PurchaseStatus)],
+        now: Timestamp,
+    ) -> StoreResult<()> {
+        let mut ids = Vec::with_capacity(outcomes.len());
+        let mut statuses = Vec::with_capacity(outcomes.len());
+        let mut reservations = Vec::with_capacity(outcomes.len());
+        let mut reasons = Vec::with_capacity(outcomes.len());
+        for &(id, status) in outcomes {
+            let columns = purchase_status(status);
+            ids.push(id.as_uuid());
+            statuses.push(columns.status);
+            reservations.push(columns.reservation_id);
+            reasons.push(columns.rejection_reason);
+        }
+        sqlx::query(
+            "UPDATE purchase_requests r
+             SET status = o.status, reservation_id = o.reservation_id,
+                 rejection_reason = o.rejection_reason, lease_until = NULL, updated_at = $5
+             FROM unnest($1::uuid[], $2::text[], $3::uuid[], $4::text[])
+                  AS o (id, status, reservation_id, rejection_reason)
+             WHERE r.id = o.id",
+        )
+        .bind(ids)
+        .bind(statuses)
+        .bind(reservations)
+        .bind(reasons)
         .bind(at(now))
         .execute(&mut *self.conn)
         .await
@@ -292,16 +402,20 @@ fn bind_item(query: PgQuery<'_>, item: LineItem) -> PgQuery<'_> {
 
 #[async_trait]
 impl InventoryTx for PostgresTx {
-    async fn lock_stock(&mut self, items: &LineItems) -> StoreResult<()> {
+    async fn lock_stock(&mut self, items: &LineItems) -> StoreResult<Vec<u32>> {
         // One row per statement, so the locks are taken exactly in the items' order.
+        let mut available = Vec::with_capacity(items.len());
         for item in items {
-            sqlx::query("SELECT 1 FROM inventory WHERE ticket_type_id = $1 FOR UPDATE")
-                .bind(item.ticket_type_id.as_uuid())
-                .execute(&mut *self.conn)
-                .await
-                .map_err(error)?;
+            let left = sqlx::query_scalar::<_, i64>(
+                "SELECT capacity - held - sold FROM inventory WHERE ticket_type_id = $1 FOR UPDATE",
+            )
+            .bind(item.ticket_type_id.as_uuid())
+            .fetch_optional(&mut *self.conn)
+            .await
+            .map_err(error)?;
+            available.push(left.map_or(Ok(0), uncount)?);
         }
-        Ok(())
+        Ok(available)
     }
 
     async fn try_hold(&mut self, items: &LineItems) -> StoreResult<bool> {
@@ -394,6 +508,67 @@ impl InventoryTx for PostgresTx {
         }
         Ok(())
     }
+
+    async fn lock_quotas(&mut self, lines: &QuotaLines) -> StoreResult<Vec<u32>> {
+        let (accounts, ticket_types): (Vec<Uuid>, Vec<Uuid>) = lines
+            .iter()
+            .map(|line| (line.account_id.as_uuid(), line.ticket_type_id.as_uuid()))
+            .unzip();
+        // Every row is inserted or updated in the lines' order, which locks it, quotas never
+        // taken included; the update changes nothing and returns what was taken.
+        let rows = sqlx::query_as::<_, (Uuid, Uuid, i64)>(
+            "INSERT INTO quotas (account_id, ticket_type_id, taken)
+             SELECT account_id, ticket_type_id, 0
+             FROM unnest($1::uuid[], $2::uuid[]) WITH ORDINALITY
+                  AS line (account_id, ticket_type_id, position)
+             ORDER BY position
+             ON CONFLICT (account_id, ticket_type_id) DO UPDATE SET taken = quotas.taken
+             RETURNING account_id, ticket_type_id, taken",
+        )
+        .bind(accounts)
+        .bind(ticket_types)
+        .fetch_all(&mut *self.conn)
+        .await
+        .map_err(error)?;
+        let taken: HashMap<(Uuid, Uuid), i64> = rows
+            .into_iter()
+            .map(|(account, ticket_type, taken)| ((account, ticket_type), taken))
+            .collect();
+        lines
+            .iter()
+            .map(|line| {
+                taken
+                    .get(&(line.account_id.as_uuid(), line.ticket_type_id.as_uuid()))
+                    .copied()
+                    .ok_or(StoreError::NotFound("quota"))
+                    .and_then(uncount)
+            })
+            .collect()
+    }
+
+    async fn take_quotas(&mut self, lines: &QuotaLines) -> StoreResult<()> {
+        let mut accounts = Vec::with_capacity(lines.len());
+        let mut ticket_types = Vec::with_capacity(lines.len());
+        let mut quantities = Vec::with_capacity(lines.len());
+        for line in lines {
+            accounts.push(line.account_id.as_uuid());
+            ticket_types.push(line.ticket_type_id.as_uuid());
+            quantities.push(count(line.quantity));
+        }
+        sqlx::query(
+            "INSERT INTO quotas (account_id, ticket_type_id, taken)
+             SELECT * FROM unnest($1::uuid[], $2::uuid[], $3::bigint[])
+             ON CONFLICT (account_id, ticket_type_id)
+             DO UPDATE SET taken = quotas.taken + EXCLUDED.taken",
+        )
+        .bind(accounts)
+        .bind(ticket_types)
+        .bind(quantities)
+        .execute(&mut *self.conn)
+        .await
+        .map_err(error)?;
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -419,6 +594,37 @@ impl ReservationsTx for PostgresTx {
         .bind(at(reservation.expires_at))
         .bind(at(reservation.created_at))
         .bind(at(reservation.updated_at))
+        .execute(&mut *self.conn)
+        .await
+        .map_err(unique("purchase_request_id"))?;
+        Ok(())
+    }
+
+    async fn insert_reservations(&mut self, reservations: &[Reservation]) -> StoreResult<()> {
+        let columns = ReservationColumns::new(reservations);
+        sqlx::query(
+            "INSERT INTO reservations (id, purchase_request_id, account_id, sale_id, event_id, items,
+                                       total_minor, currency, environment, status, attestor_id,
+                                       expires_at, created_at, updated_at)
+             SELECT * FROM unnest($1::uuid[], $2::uuid[], $3::uuid[], $4::uuid[], $5::uuid[],
+                                  $6::jsonb[], $7::bigint[], $8::text[], $9::text[], $10::text[],
+                                  $11::uuid[], $12::timestamptz[], $13::timestamptz[],
+                                  $14::timestamptz[])",
+        )
+        .bind(columns.ids)
+        .bind(columns.purchase_requests)
+        .bind(columns.accounts)
+        .bind(columns.sales)
+        .bind(columns.events)
+        .bind(columns.items)
+        .bind(columns.totals)
+        .bind(columns.currencies)
+        .bind(columns.environments)
+        .bind(columns.statuses)
+        .bind(columns.attestors)
+        .bind(columns.expiries)
+        .bind(columns.created)
+        .bind(columns.updated)
         .execute(&mut *self.conn)
         .await
         .map_err(unique("purchase_request_id"))?;
@@ -454,5 +660,68 @@ impl ReservationsTx for PostgresTx {
         } else {
             Err(StoreError::NotFound("reservation"))
         }
+    }
+}
+
+/// Reservations as one array per column, for inserting them with `unnest`.
+struct ReservationColumns<'a> {
+    ids: Vec<Uuid>,
+    purchase_requests: Vec<Uuid>,
+    accounts: Vec<Uuid>,
+    sales: Vec<Uuid>,
+    events: Vec<Uuid>,
+    items: Vec<Json<&'a [ReservedItem]>>,
+    totals: Vec<i64>,
+    currencies: Vec<String>,
+    environments: Vec<&'static str>,
+    statuses: Vec<&'static str>,
+    attestors: Vec<Option<Uuid>>,
+    expiries: Vec<OffsetDateTime>,
+    created: Vec<OffsetDateTime>,
+    updated: Vec<OffsetDateTime>,
+}
+
+impl<'a> ReservationColumns<'a> {
+    fn new(reservations: &'a [Reservation]) -> Self {
+        let rows = reservations.len();
+        let mut columns = Self {
+            ids: Vec::with_capacity(rows),
+            purchase_requests: Vec::with_capacity(rows),
+            accounts: Vec::with_capacity(rows),
+            sales: Vec::with_capacity(rows),
+            events: Vec::with_capacity(rows),
+            items: Vec::with_capacity(rows),
+            totals: Vec::with_capacity(rows),
+            currencies: Vec::with_capacity(rows),
+            environments: Vec::with_capacity(rows),
+            statuses: Vec::with_capacity(rows),
+            attestors: Vec::with_capacity(rows),
+            expiries: Vec::with_capacity(rows),
+            created: Vec::with_capacity(rows),
+            updated: Vec::with_capacity(rows),
+        };
+        for reservation in reservations {
+            columns.ids.push(reservation.id.as_uuid());
+            columns
+                .purchase_requests
+                .push(reservation.purchase_request_id.as_uuid());
+            columns.accounts.push(reservation.account_id.as_uuid());
+            columns.sales.push(reservation.sale_id.as_uuid());
+            columns.events.push(reservation.event_id.as_uuid());
+            columns.items.push(Json(reservation.items.as_slice()));
+            columns.totals.push(reservation.total.amount_minor());
+            columns
+                .currencies
+                .push(reservation.total.currency().as_str().to_owned());
+            columns.environments.push(reservation.environment.as_str());
+            columns.statuses.push(reservation.status.as_str());
+            columns
+                .attestors
+                .push(reservation.attestor_id.map(|id| id.as_uuid()));
+            columns.expiries.push(at(reservation.expires_at));
+            columns.created.push(at(reservation.created_at));
+            columns.updated.push(at(reservation.updated_at));
+        }
+        columns
     }
 }

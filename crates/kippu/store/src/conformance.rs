@@ -24,7 +24,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use kippu_domain::account::{Account, Identity, Organization, Role};
-use kippu_domain::admission::AdmissionPolicy;
+use kippu_domain::admission::{AdmissionPolicy, WaitingRoom};
 use kippu_domain::catalog::{
     Address, Event, EventStatus, EventSummary, MAX_EVENT_CONTENT_BYTES, Sale, TicketType,
 };
@@ -32,7 +32,7 @@ use kippu_domain::denial::{Denial, DenialSubject, DeniedBecause, DeniedTicket};
 use kippu_domain::image::{EventImage, ImageFormat};
 use kippu_domain::outbox::IntegrationEvent;
 use kippu_domain::payment::{Environment, PaymentAttestation, PaymentDisposition};
-use kippu_domain::purchase::{Basket, LineItem, PurchaseRequest, PurchaseStatus};
+use kippu_domain::purchase::{Basket, LineItem, PurchaseRequest, PurchaseStatus, RejectionReason};
 use kippu_domain::refund::{Refund, RefundReason, RefundStatus};
 use kippu_domain::reservation::{Reservation, ReservationStatus, ReservedItem};
 use kippu_domain::ticket::{Ticket, TicketStatus};
@@ -46,7 +46,8 @@ use kippu_domain::{
 
 use crate::{
     AccountFilter, AuditEntry, EventFilter, EventOrder, Holds, Insertion, Keyset, Lease, LineItems,
-    PageRequest, Session, SessionRenewal, Store, StoreError, Unlink, WebhookRun,
+    PageRequest, QuotaLine, QuotaLines, Session, SessionRenewal, Store, StoreError, Unlink,
+    WebhookRun,
 };
 
 /// A store under test, plus whatever must outlive it (e.g. a temporary directory).
@@ -89,12 +90,19 @@ macro_rules! conformance_tests {
             sale_inventory_reads_every_type_at_once,
             stock_locked_up_front_never_deadlocks,
             quotas_are_enforced_and_all_or_nothing,
+            quotas_locked_together_never_exceed_a_limit,
+            locked_stock_reads_what_is_left,
+            requests_are_settled_together,
             dropped_transactions_roll_back,
-            claims_are_exclusive_until_the_lease_lapses,
+            a_purchase_queue_is_held_by_one_transaction,
+            queued_requests_are_read_in_arrival_order_with_their_denials,
             attestations_are_recorded_once,
             one_reservation_per_purchase_request,
             waiting_room_positions_are_distinct,
+            waiting_room_positions_follow_one_another,
+            an_account_keeps_its_waiting_room_position,
             waiting_room_advances_once,
+            joins_after_an_advance_are_never_admitted,
             outbox_is_transactional_and_ordered,
             outbox_readers_never_skip_late_commits,
             sessions_rotate_once,
@@ -210,6 +218,39 @@ fn event_record(organization: OrganizationId) -> Event {
     }
 }
 
+fn sale_record(event: EventId, admission: AdmissionPolicy) -> Sale {
+    Sale {
+        id: SaleId::generate(),
+        event_id: event,
+        name: "General".to_owned(),
+        opens_at: now(),
+        closes_at: now() + Duration::days(1),
+        admission,
+        reservation_ttl_seconds: 600,
+        max_tickets_per_request: 10,
+        accepted_attestors: vec![AttestorId::MANUAL],
+        environment: Environment::Live,
+        created_at: now(),
+        version: 1,
+    }
+}
+
+/// A sale created with a waiting room; [`catalog`]'s sales are open, and get their waiting
+/// room on the first join.
+async fn waiting_room_sale(store: &dyn Store) -> SaleId {
+    let event = event_record(organization(store).await);
+    store.insert_event(&event).await.unwrap();
+    let sale = sale_record(
+        event.id,
+        AdmissionPolicy::WaitingRoom {
+            admit_per_tick: 100,
+            max_backlog: 1_000,
+        },
+    );
+    store.insert_sale(&sale).await.unwrap();
+    sale.id
+}
+
 /// A sale with one ticket type per capacity in `capacities`.
 struct Catalog {
     event: EventId,
@@ -229,20 +270,7 @@ async fn catalog_in(
 ) -> Catalog {
     let event = event_record(organization);
     store.insert_event(&event).await.unwrap();
-    let sale = Sale {
-        id: SaleId::generate(),
-        event_id: event.id,
-        name: "General".to_owned(),
-        opens_at: now(),
-        closes_at: now() + Duration::days(1),
-        admission: AdmissionPolicy::Open,
-        reservation_ttl_seconds: 600,
-        max_tickets_per_request: 10,
-        accepted_attestors: vec![AttestorId::MANUAL],
-        environment: Environment::Live,
-        created_at: now(),
-        version: 1,
-    };
+    let sale = sale_record(event.id, AdmissionPolicy::Open);
     store.insert_sale(&sale).await.unwrap();
     let mut ticket_types = Vec::new();
     for &capacity in capacities {
@@ -619,6 +647,215 @@ pub async fn quotas_are_enforced_and_all_or_nothing(store: Arc<dyn Store>) {
     tx.commit().await.unwrap();
 }
 
+pub async fn quotas_locked_together_never_exceed_a_limit(store: Arc<dyn Store>) {
+    let catalog = catalog(store.as_ref(), &[100, 100]).await;
+    let (first, second) = (catalog.ticket_types[0], catalog.ticket_types[1]);
+    let (buyer, other) = (account(store.as_ref()).await, account(store.as_ref()).await);
+    let quota = |claims: &[(AccountId, TicketTypeId, u32)]| {
+        QuotaLines::new(
+            claims
+                .iter()
+                .map(|&(account_id, ticket_type_id, quantity)| QuotaLine {
+                    account_id,
+                    ticket_type_id,
+                    quantity,
+                }),
+        )
+    };
+    // Every type allows four tickets per account.
+    let limit_four = |items: &LineItems| Holds::new(items, |_| Some(4)).unwrap();
+    let mut tx = store.begin().await.unwrap();
+    assert!(
+        tx.inventory()
+            .try_take_quota(buyer, &limit_four(&lines([line(first, 3)])))
+            .await
+            .unwrap()
+    );
+    tx.commit().await.unwrap();
+
+    // What each line's account has taken, in the lines' order; a quota never taken reads 0.
+    let claims = quota(&[(other, first, 1), (buyer, second, 2), (buyer, first, 1)]);
+    let expected = |taken: &dyn Fn(AccountId, TicketTypeId) -> u32| {
+        claims
+            .iter()
+            .map(|line| taken(line.account_id, line.ticket_type_id))
+            .collect::<Vec<_>>()
+    };
+    let mut tx = store.begin().await.unwrap();
+    assert_eq!(
+        tx.inventory().lock_quotas(&claims).await.unwrap(),
+        expected(&|account, ticket_type| u32::from((account, ticket_type) == (buyer, first)) * 3)
+    );
+    tx.inventory().take_quotas(&claims).await.unwrap();
+    tx.commit().await.unwrap();
+    let mut tx = store.begin().await.unwrap();
+    assert_eq!(
+        tx.inventory().lock_quotas(&claims).await.unwrap(),
+        expected(
+            &|account, ticket_type| match (account == buyer, ticket_type == first) {
+                (true, true) => 4,
+                (true, false) => 2,
+                (false, _) => 1,
+            }
+        )
+    );
+    assert!(
+        !tx.inventory()
+            .try_take_quota(buyer, &limit_four(&lines([line(first, 1)])))
+            .await
+            .unwrap(),
+        "quotas taken together count for single takes too"
+    );
+    drop(tx);
+
+    // Transactions deciding at once on what they read never exceed a limit of four, also for
+    // quotas no one has taken yet.
+    let late = account(store.as_ref()).await;
+    let claims = quota(&[(late, first, 1), (late, second, 1)]);
+    let deciding = (0..20).map(|_| {
+        let (store, claims) = (store.clone(), claims.clone());
+        tokio::spawn(async move {
+            let mut tx = store.begin().await?;
+            let taken = tx.inventory().lock_quotas(&claims).await?;
+            tokio::task::yield_now().await;
+            let granted = taken.iter().all(|&taken| taken < 4);
+            if granted {
+                tx.inventory().take_quotas(&claims).await?;
+            }
+            tx.commit().await?;
+            Ok::<_, StoreError>(granted)
+        })
+    });
+    let mut granted = 0;
+    for decision in deciding.collect::<Vec<_>>() {
+        if decision.await.unwrap().unwrap() {
+            granted += 1;
+        }
+    }
+    assert_eq!(granted, 4);
+    let mut tx = store.begin().await.unwrap();
+    assert_eq!(tx.inventory().lock_quotas(&claims).await.unwrap(), [4, 4]);
+}
+
+pub async fn locked_stock_reads_what_is_left(store: Arc<dyn Store>) {
+    let catalog = catalog(store.as_ref(), &[5, 1]).await;
+    let (first, second) = (catalog.ticket_types[0], catalog.ticket_types[1]);
+
+    // In the items' order; a type without stock has none.
+    let mut tx = store.begin().await.unwrap();
+    assert!(
+        tx.inventory()
+            .try_hold(&lines([line(first, 2), line(second, 1)]))
+            .await
+            .unwrap()
+    );
+    let unknown = TicketTypeId::generate();
+    let items = lines([line(first, 1), line(second, 1), line(unknown, 1)]);
+    let available = tx.inventory().lock_stock(&items).await.unwrap();
+    let expected: Vec<u32> = items
+        .iter()
+        .map(|item| match item.ticket_type_id {
+            id if id == first => 3,
+            _ => 0,
+        })
+        .collect();
+    assert_eq!(available, expected);
+    tx.commit().await.unwrap();
+}
+
+pub async fn requests_are_settled_together(store: Arc<dyn Store>) {
+    let catalog = catalog(store.as_ref(), &[5]).await;
+    let first = catalog.ticket_types[0];
+    let at = |second: i64| now() + Duration::seconds(second);
+
+    // Two requests get reservations and one is rejected, all recorded at once.
+    let mut requests = Vec::new();
+    for _ in 0..3 {
+        let request = purchase_request(account(store.as_ref()).await, &catalog, "together");
+        store.insert_purchase_request(&request).await.unwrap();
+        requests.push(request);
+    }
+    let price = Money::new(1_000, Currency::JPY).unwrap();
+    let reservation_for = |request: &PurchaseRequest| Reservation {
+        id: ReservationId::generate(),
+        purchase_request_id: request.id,
+        account_id: request.account_id,
+        sale_id: catalog.sale,
+        event_id: catalog.event,
+        items: vec![ReservedItem {
+            ticket_type_id: first,
+            quantity: 1,
+            unit_price: price,
+        }],
+        total: price,
+        environment: Environment::Live,
+        status: ReservationStatus::Reserved,
+        attestor_id: None,
+        expires_at: at(600),
+        created_at: at(5),
+        updated_at: at(5),
+    };
+    let reservations = [reservation_for(&requests[0]), reservation_for(&requests[1])];
+    let outcomes = [
+        (
+            requests[0].id,
+            PurchaseStatus::Reserved {
+                reservation_id: reservations[0].id,
+            },
+        ),
+        (
+            requests[1].id,
+            PurchaseStatus::Reserved {
+                reservation_id: reservations[1].id,
+            },
+        ),
+        (
+            requests[2].id,
+            PurchaseStatus::Rejected {
+                reason: RejectionReason::SoldOut,
+            },
+        ),
+    ];
+    let mut tx = store.begin().await.unwrap();
+    tx.reservations()
+        .insert_reservations(&reservations)
+        .await
+        .unwrap();
+    tx.purchases()
+        .set_purchase_statuses(&outcomes, at(5))
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    for reservation in &reservations {
+        assert_eq!(
+            store.reservation(reservation.id).await.unwrap().as_ref(),
+            Some(reservation)
+        );
+    }
+    for (id, status) in outcomes {
+        let request = store.purchase_request(id).await.unwrap().unwrap();
+        assert_eq!((request.status, request.updated_at), (status, at(5)));
+    }
+
+    // One reservation for a request that has one already fails them all.
+    let fresh = reservation_for(&requests[2]);
+    let again = Reservation {
+        id: ReservationId::generate(),
+        ..reservations[1].clone()
+    };
+    let mut tx = store.begin().await.unwrap();
+    let result = tx
+        .reservations()
+        .insert_reservations(&[fresh.clone(), again])
+        .await;
+    assert!(matches!(
+        result,
+        Err(StoreError::Conflict("purchase_request_id"))
+    ));
+    drop(tx);
+    assert_eq!(store.reservation(fresh.id).await.unwrap(), None);
+}
+
 pub async fn dropped_transactions_roll_back(store: Arc<dyn Store>) {
     let catalog = catalog(store.as_ref(), &[10]).await;
     let ticket_type = catalog.ticket_types[0];
@@ -639,57 +876,176 @@ pub async fn dropped_transactions_roll_back(store: Arc<dyn Store>) {
     assert_eq!(store.inventory(ticket_type).await.unwrap().unwrap().held, 0);
 }
 
-pub async fn claims_are_exclusive_until_the_lease_lapses(store: Arc<dyn Store>) {
+pub async fn a_purchase_queue_is_held_by_one_transaction(store: Arc<dyn Store>) {
+    let other = catalog(store.as_ref(), &[10]).await;
     let catalog = catalog(store.as_ref(), &[10]).await;
-    let buyer = account(store.as_ref()).await;
-    let mut expected = HashSet::new();
-    for index in 0..40 {
-        let request = purchase_request(buyer, &catalog, &format!("claim-{index}"));
-        store.insert_purchase_request(&request).await.unwrap();
-        expected.insert(request.id);
-    }
-    let lease = Lease {
-        now: now(),
-        until: now() + Duration::seconds(30),
-    };
-
-    let claimers = (0..8).map(|_| {
-        let store = store.clone();
-        tokio::spawn(async move { store.claim_purchase_requests(lease, 10).await.unwrap() })
-    });
-    let mut claimed = Vec::new();
-    for claimer in claimers.collect::<Vec<_>>() {
-        claimed.extend(claimer.await.unwrap().into_iter().map(|request| request.id));
-    }
-    let distinct: HashSet<_> = claimed.iter().copied().collect();
-    assert_eq!(distinct.len(), claimed.len(), "a request was claimed twice");
-    assert!(expected.is_subset(&distinct), "every request was claimed");
-
-    let early = Lease {
-        now: now() + Duration::seconds(29),
-        until: now() + Duration::seconds(59),
-    };
-    let reclaimed = store.claim_purchase_requests(early, 100).await.unwrap();
+    let mut first = store.begin().await.unwrap();
     assert!(
-        reclaimed
-            .iter()
-            .all(|request| !expected.contains(&request.id))
+        first
+            .purchases()
+            .lock_purchase_queue(catalog.sale)
+            .await
+            .unwrap()
+    );
+    if !store.capabilities().concurrent_writers {
+        // Write transactions never overlap: the queue is the transaction's anyway.
+        first.commit().await.unwrap();
+        return;
+    }
+
+    let mut second = store.begin().await.unwrap();
+    let held = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        second.purchases().lock_purchase_queue(catalog.sale),
+    )
+    .await
+    .expect("a held queue is refused at once, not waited for")
+    .unwrap();
+    assert!(!held, "one transaction at a time");
+    assert!(
+        second
+            .purchases()
+            .lock_purchase_queue(other.sale)
+            .await
+            .unwrap(),
+        "other sales' queues are free"
     );
 
-    let late = Lease {
-        now: now() + Duration::seconds(30),
-        until: now() + Duration::seconds(60),
-    };
-    let reclaimed: HashSet<_> = store
-        .claim_purchase_requests(late, 100)
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|request| request.id)
-        .collect();
+    first.commit().await.unwrap();
+    let mut third = store.begin().await.unwrap();
     assert!(
-        expected.is_subset(&reclaimed),
-        "lapsed leases can be claimed again"
+        third
+            .purchases()
+            .lock_purchase_queue(catalog.sale)
+            .await
+            .unwrap(),
+        "a commit lets the queue go"
+    );
+    drop(third);
+    // A dropped transaction rolls back as its connection goes back to the pool.
+    let mut taken = false;
+    for _ in 0..50 {
+        let mut fourth = store.begin().await.unwrap();
+        if fourth
+            .purchases()
+            .lock_purchase_queue(catalog.sale)
+            .await
+            .unwrap()
+        {
+            taken = true;
+            break;
+        }
+        drop(fourth);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(taken, "a dropped transaction lets the queue go");
+    drop(second);
+}
+
+pub async fn queued_requests_are_read_in_arrival_order_with_their_denials(store: Arc<dyn Store>) {
+    let organization = organization(store.as_ref()).await;
+    let elsewhere = catalog(store.as_ref(), &[10]).await;
+    let catalog = catalog_in(store.as_ref(), organization, &[10]).await;
+    let mut buyers = Vec::new();
+    for _ in 0..5 {
+        buyers.push(account(store.as_ref()).await);
+    }
+    let at = |seconds| now() + Duration::seconds(seconds);
+    let queue = |buyer, catalog: &Catalog, seconds| PurchaseRequest {
+        created_at: at(seconds),
+        updated_at: at(seconds),
+        ..purchase_request(buyer, catalog, &unique_suffix())
+    };
+    let postponed = queue(buyers[4], &catalog, 0);
+    let first = queue(buyers[0], &catalog, 1);
+    let second = queue(buyers[1], &catalog, 2);
+    let mut tied = [queue(buyers[2], &catalog, 3), queue(buyers[3], &catalog, 3)];
+    tied.sort_by_key(|request| request.id);
+    let other_sale = queue(buyers[0], &elsewhere, 0);
+    for request in [&postponed, &first, &second, &tied[0], &tied[1], &other_sale] {
+        store.insert_purchase_request(request).await.unwrap();
+    }
+    store
+        .postpone_purchase_request(postponed.id, at(60))
+        .await
+        .unwrap();
+    // One account denied for the event, another across the organization.
+    for (event, buyer) in [
+        (Some(catalog.event), first.account_id),
+        (None, tied[1].account_id),
+    ] {
+        let denied = denial(organization, event, DenialSubject::Account(buyer));
+        store.insert_denial(&denied).await.unwrap();
+    }
+
+    assert_eq!(
+        store.sales_with_queued_requests(at(10), 100).await.unwrap(),
+        vec![(elsewhere.sale, 1), (catalog.sale, 4)],
+        "by their oldest due request"
+    );
+    assert_eq!(
+        store.sales_with_queued_requests(at(10), 1).await.unwrap(),
+        vec![(elsewhere.sale, 1)],
+        "looking at no more requests than asked"
+    );
+
+    let read = async |now, limit| {
+        let mut tx = store.begin().await.unwrap();
+        assert!(
+            tx.purchases()
+                .lock_purchase_queue(catalog.sale)
+                .await
+                .unwrap()
+        );
+        let queued = tx
+            .purchases()
+            .queued_requests(catalog.sale, catalog.event, organization, now, limit)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|queued| (queued.request.id, queued.account_denied))
+            .collect::<Vec<_>>();
+        // Committed, not dropped: a dropped transaction rolls back only as its connection goes
+        // back to the pool, so the next read could still find the queue held.
+        tx.commit().await.unwrap();
+        queued
+    };
+    assert_eq!(
+        read(at(10), 10).await,
+        [
+            (first.id, true),
+            (second.id, false),
+            (tied[0].id, false),
+            (tied[1].id, true)
+        ],
+        "arrival order, ties by id, postponed requests and other sales left out"
+    );
+    assert_eq!(
+        read(at(10), 2).await,
+        [(first.id, true), (second.id, false)]
+    );
+    assert_eq!(
+        read(at(60), 1).await,
+        [(postponed.id, false)],
+        "a postponed request is due again when its time comes"
+    );
+
+    let mut tx = store.begin().await.unwrap();
+    tx.purchases()
+        .set_purchase_status(
+            first.id,
+            PurchaseStatus::Rejected {
+                reason: RejectionReason::AccountDenied,
+            },
+            at(10),
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        read(at(10), 1).await,
+        [(second.id, false)],
+        "served requests are gone from the queue"
     );
 }
 
@@ -761,51 +1117,136 @@ pub async fn one_reservation_per_purchase_request(store: Arc<dyn Store>) {
 
 pub async fn waiting_room_positions_are_distinct(store: Arc<dyn Store>) {
     let catalog = catalog(store.as_ref(), &[10]).await;
-    let joins = (0..100).map(|_| {
+    let mut buyers = Vec::new();
+    for _ in 0..100 {
+        buyers.push(account(store.as_ref()).await);
+    }
+    let joins = buyers.into_iter().map(|buyer| {
         let store = store.clone();
         let sale = catalog.sale;
-        tokio::spawn(async move { store.join_waiting_room(sale).await.unwrap() })
+        tokio::spawn(async move { store.join_waiting_room(sale, buyer).await.unwrap() })
     });
     let mut positions = Vec::new();
     for join in joins.collect::<Vec<_>>() {
         positions.push(join.await.unwrap());
     }
     positions.sort_unstable();
-    assert_eq!(positions, (1..=100).collect::<Vec<_>>());
+    positions.dedup();
+    assert_eq!(positions.len(), 100, "a position was handed out twice");
+    let room = store.waiting_room(catalog.sale).await.unwrap();
+    assert!(
+        positions
+            .iter()
+            .all(|&position| position <= room.last_position)
+    );
+}
+
+pub async fn waiting_room_positions_follow_one_another(store: Arc<dyn Store>) {
+    let sale = waiting_room_sale(store.as_ref()).await;
+    let mut positions = Vec::new();
+    for _ in 0..10 {
+        let buyer = account(store.as_ref()).await;
+        positions.push(store.join_waiting_room(sale, buyer).await.unwrap());
+    }
+    assert_eq!(positions, (1..=10).collect::<Vec<_>>());
+    assert_eq!(
+        store.waiting_room(sale).await.unwrap(),
+        WaitingRoom {
+            last_position: 10,
+            admitted_through: 0
+        }
+    );
+}
+
+pub async fn an_account_keeps_its_waiting_room_position(store: Arc<dyn Store>) {
+    let other_sale = catalog(store.as_ref(), &[10]).await;
+    let catalog = catalog(store.as_ref(), &[10]).await;
+    let (buyer, other) = (account(store.as_ref()).await, account(store.as_ref()).await);
+
+    let joins = (0..8).map(|_| {
+        let store = store.clone();
+        let sale = catalog.sale;
+        tokio::spawn(async move { store.join_waiting_room(sale, buyer).await.unwrap() })
+    });
+    let mut positions = HashSet::new();
+    for join in joins.collect::<Vec<_>>() {
+        positions.insert(join.await.unwrap());
+    }
+    assert_eq!(positions.len(), 1, "simultaneous joins share one position");
+    let position = positions.into_iter().next().unwrap();
+    assert_eq!(
+        store.join_waiting_room(catalog.sale, buyer).await.unwrap(),
+        position,
+        "joining again returns the same position"
+    );
+
+    let others = store.join_waiting_room(catalog.sale, other).await.unwrap();
+    assert_ne!(others, position, "another account gets another position");
+    let room = store.waiting_room(catalog.sale).await.unwrap();
+    assert!(others <= room.last_position && position <= room.last_position);
     assert_eq!(
         store
-            .waiting_room(catalog.sale)
+            .join_waiting_room(other_sale.sale, buyer)
             .await
-            .unwrap()
-            .last_position,
-        100
+            .unwrap(),
+        1,
+        "each sale has a queue of its own"
     );
 }
 
 pub async fn waiting_room_advances_once(store: Arc<dyn Store>) {
     let catalog = catalog(store.as_ref(), &[10]).await;
+    assert_eq!(
+        store.admitted_through(catalog.sale).await.unwrap(),
+        0,
+        "no room yet"
+    );
     for _ in 0..10 {
-        store.join_waiting_room(catalog.sale).await.unwrap();
+        let buyer = account(store.as_ref()).await;
+        store.join_waiting_room(catalog.sale, buyer).await.unwrap();
     }
-    assert!(
+    assert_eq!(
         store
             .advance_waiting_room(catalog.sale, 0, 5)
             .await
-            .unwrap()
+            .unwrap(),
+        Some(5)
     );
-    assert!(
-        !store
+    assert_eq!(
+        store
             .advance_waiting_room(catalog.sale, 0, 5)
             .await
             .unwrap(),
+        None,
         "stale compare-and-set"
     );
+    assert_eq!(store.admitted_through(catalog.sale).await.unwrap(), 5);
+    let pending = store.pending_waiting_rooms(now()).await.unwrap();
+    assert!(pending.contains(&catalog.sale), "people are still waiting");
+    let closed = now() + Duration::days(1);
     assert!(
         !store
+            .pending_waiting_rooms(closed)
+            .await
+            .unwrap()
+            .contains(&catalog.sale),
+        "a closed sale's room is left as it stands"
+    );
+    assert_eq!(
+        store
             .advance_waiting_room(catalog.sale, 5, 11)
             .await
             .unwrap(),
-        "beyond last position"
+        Some(10),
+        "no further than the positions handed out"
+    );
+    assert_eq!(
+        store
+            .advance_waiting_room(catalog.sale, 10, 11)
+            .await
+            .unwrap(),
+        None,
+        "nobody left to admit"
     );
     assert_eq!(
         store
@@ -813,18 +1254,103 @@ pub async fn waiting_room_advances_once(store: Arc<dyn Store>) {
             .await
             .unwrap()
             .admitted_through,
-        5
+        10
     );
-    let pending = store.pending_waiting_rooms().await.unwrap();
-    assert!(pending.contains(&catalog.sale), "people are still waiting");
-    assert!(
-        store
-            .advance_waiting_room(catalog.sale, 5, 10)
-            .await
-            .unwrap()
-    );
-    let pending = store.pending_waiting_rooms().await.unwrap();
+    assert_eq!(store.admitted_through(catalog.sale).await.unwrap(), 10);
+    let pending = store.pending_waiting_rooms(now()).await.unwrap();
     assert!(!pending.contains(&catalog.sale), "everyone was admitted");
+
+    let late = account(store.as_ref()).await;
+    assert_eq!(
+        store.join_waiting_room(catalog.sale, late).await.unwrap(),
+        11,
+        "a later join is not admitted"
+    );
+    let pending = store.pending_waiting_rooms(now()).await.unwrap();
+    assert!(pending.contains(&catalog.sale), "someone is waiting again");
+}
+
+pub async fn joins_after_an_advance_are_never_admitted(store: Arc<dyn Store>) {
+    let sale = waiting_room_sale(store.as_ref()).await;
+    let mut buyers = Vec::new();
+    for _ in 0..300 {
+        buyers.push(account(store.as_ref()).await);
+    }
+    let started = std::time::Instant::now();
+    let joining = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    // Admits everyone handed out a position as fast as it can, so admission keeps catching up
+    // with the joins and has to pass positions they are taking or nobody took.
+    let admitter = {
+        let (store, joining) = (store.clone(), joining.clone());
+        tokio::spawn(async move {
+            let mut advances = Vec::new();
+            loop {
+                let still_joining = joining.load(std::sync::atomic::Ordering::Relaxed);
+                let room = store.waiting_room(sale).await.unwrap();
+                if room.last_position > room.admitted_through {
+                    let moved = store
+                        .advance_waiting_room(sale, room.admitted_through, room.last_position)
+                        .await
+                        .unwrap();
+                    if let Some(admitted_through) = moved {
+                        advances.push((started.elapsed(), admitted_through));
+                    }
+                } else if !still_joining {
+                    return advances;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+    };
+    let next = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let buyers = Arc::new(buyers);
+    let joiners = (0..16).map(|_| {
+        let (store, buyers, next) = (store.clone(), buyers.clone(), next.clone());
+        tokio::spawn(async move {
+            let mut joins = Vec::new();
+            while let Some(&buyer) =
+                buyers.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+            {
+                let at = started.elapsed();
+                joins.push((at, store.join_waiting_room(sale, buyer).await.unwrap()));
+            }
+            joins
+        })
+    });
+    let mut joins = Vec::new();
+    for joiner in joiners.collect::<Vec<_>>() {
+        joins.extend(joiner.await.unwrap());
+    }
+    joining.store(false, std::sync::atomic::Ordering::Relaxed);
+    let advances = tokio::time::timeout(std::time::Duration::from_secs(10), admitter)
+        .await
+        .expect("admission reaches everyone")
+        .unwrap();
+
+    for &(at, position) in &joins {
+        let admitted_before = advances
+            .iter()
+            .filter(|&&(returned, _)| returned < at)
+            .map(|&(_, admitted_through)| admitted_through)
+            .max()
+            .unwrap_or(0);
+        assert!(
+            position > admitted_before,
+            "a join that started after admission reached {admitted_before} got {position}"
+        );
+    }
+    let mut positions: Vec<u64> = joins.iter().map(|&(_, position)| position).collect();
+    positions.sort_unstable();
+    positions.dedup();
+    assert_eq!(positions.len(), 300, "a position was handed out twice");
+    let room = store.waiting_room(sale).await.unwrap();
+    assert_eq!(room.admitted_through, room.last_position);
+    assert!(
+        positions
+            .iter()
+            .all(|&position| position <= room.admitted_through),
+        "nobody is left behind"
+    );
 }
 
 pub async fn outbox_is_transactional_and_ordered(store: Arc<dyn Store>) {

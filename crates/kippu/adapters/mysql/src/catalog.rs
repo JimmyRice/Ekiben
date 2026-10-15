@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use kippu_domain::admission::WaitingRoom;
+use kippu_domain::admission::{AdmissionPolicy, WaitingRoom};
 use kippu_domain::catalog::{Event, EventSummary, Inventory, Sale, TicketType};
 use kippu_domain::validation::{CountryCode, Slug};
 use kippu_domain::{AccountId, EventId, SaleId, TicketTypeId, Timestamp};
@@ -12,7 +12,7 @@ use crate::convert::{
     AddressValues, EventRow, EventSummaryRow, InventoryRow, SaleRow, TicketTypeRow, all,
     event_status, extensions_json, instant, json, micros, optional,
 };
-use crate::{MySqlStore, error, unique};
+use crate::{MySqlStore, error, unique, waiting_rooms};
 
 const EVENT_SUMMARY_COLUMNS: &str = "SELECT id, organization_id, slug, title, description, venue, \
      address_country, address_region, address_locality, address_postal_code, address_street, \
@@ -239,6 +239,9 @@ impl CatalogStore for MySqlStore {
     }
 
     async fn insert_sale(&self, sale: &Sale) -> StoreResult<()> {
+        // The sale's purchase queue comes with it, in the same transaction, and so does its
+        // waiting room if it has one; a sale that takes one later gets it on the first join.
+        let mut tx = self.pool.begin().await.map_err(error)?;
         sqlx::query(
             "INSERT INTO sales (id, event_id, name, opens_at, closes_at, admission,
                                 reservation_ttl_seconds, max_tickets_per_request,
@@ -257,10 +260,18 @@ impl CatalogStore for MySqlStore {
         .bind(sale.environment.as_str())
         .bind(micros(sale.created_at))
         .bind(sale.version)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(error)?;
-        Ok(())
+        sqlx::query("INSERT INTO purchase_queues (sale_id) VALUES (?)")
+            .bind(sale.id.as_uuid())
+            .execute(&mut *tx)
+            .await
+            .map_err(error)?;
+        if matches!(sale.admission, AdmissionPolicy::WaitingRoom { .. }) {
+            waiting_rooms::create(&mut tx, sale.id).await?;
+        }
+        tx.commit().await.map_err(error)
     }
 
     async fn update_sale(&self, sale: &Sale, expected_version: i64) -> StoreResult<()> {
@@ -507,64 +518,28 @@ impl CatalogStore for MySqlStore {
             .collect())
     }
 
-    async fn join_waiting_room(&self, sale: SaleId) -> StoreResult<u64> {
-        // LAST_INSERT_ID(expr) hands the new position back on this connection, atomically
-        // with the increment.
-        let result = sqlx::query(
-            "INSERT INTO waiting_rooms (sale_id, last_position, admitted_through)
-             VALUES (?, LAST_INSERT_ID(1), 0)
-             ON DUPLICATE KEY UPDATE last_position = LAST_INSERT_ID(last_position + 1)",
-        )
-        .bind(sale.as_uuid())
-        .execute(&self.pool)
-        .await
-        .map_err(error)?;
-        Ok(result.last_insert_id())
+    async fn join_waiting_room(&self, sale: SaleId, account: AccountId) -> StoreResult<u64> {
+        waiting_rooms::join(&self.pool, sale, account).await
     }
 
     async fn waiting_room(&self, sale: SaleId) -> StoreResult<WaitingRoom> {
-        let row = sqlx::query_as::<_, (i64, i64)>(
-            "SELECT last_position, admitted_through FROM waiting_rooms WHERE sale_id = ?",
-        )
-        .bind(sale.as_uuid())
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(error)?;
-        let Some((last_position, admitted_through)) = row else {
-            return Ok(WaitingRoom::default());
-        };
-        Ok(WaitingRoom {
-            last_position: u64::try_from(last_position).map_err(StoreError::backend)?,
-            admitted_through: u64::try_from(admitted_through).map_err(StoreError::backend)?,
-        })
+        waiting_rooms::room(&self.pool, sale).await
     }
 
-    async fn pending_waiting_rooms(&self) -> StoreResult<Vec<SaleId>> {
-        let ids = sqlx::query_scalar::<_, Uuid>(
-            "SELECT sale_id FROM waiting_rooms WHERE admitted_through < last_position ORDER BY sale_id",
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(error)?;
-        Ok(ids.into_iter().map(Into::into).collect())
+    async fn admitted_through(&self, sale: SaleId) -> StoreResult<u64> {
+        waiting_rooms::admitted_through(&self.pool, sale).await
     }
 
-    async fn advance_waiting_room(&self, sale: SaleId, from: u64, to: u64) -> StoreResult<bool> {
-        let (from, to) = (
-            i64::try_from(from).map_err(StoreError::backend)?,
-            i64::try_from(to).map_err(StoreError::backend)?,
-        );
-        let result = sqlx::query(
-            "UPDATE waiting_rooms SET admitted_through = ?
-             WHERE sale_id = ? AND admitted_through = ? AND ? <= last_position",
-        )
-        .bind(to)
-        .bind(sale.as_uuid())
-        .bind(from)
-        .bind(to)
-        .execute(&self.pool)
-        .await
-        .map_err(error)?;
-        Ok(result.rows_affected() == 1)
+    async fn pending_waiting_rooms(&self, now: Timestamp) -> StoreResult<Vec<SaleId>> {
+        waiting_rooms::pending(&self.pool, now).await
+    }
+
+    async fn advance_waiting_room(
+        &self,
+        sale: SaleId,
+        from: u64,
+        to: u64,
+    ) -> StoreResult<Option<u64>> {
+        waiting_rooms::advance(&self.pool, sale, from, to).await
     }
 }
