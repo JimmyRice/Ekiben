@@ -14,6 +14,7 @@ mod purchasing;
 mod store;
 mod ticketing;
 mod tx;
+mod waiting_rooms;
 mod webhooks;
 
 pub use store::MySqlStore;

@@ -38,7 +38,7 @@ Keep the repository root uncluttered and do not add speculative `.gitignore` ent
 ## Commands
 
 ```bash
-cargo test --workspace --all-features                                   # 396 tests incl. e2e over TCP
+cargo test --workspace --all-features                                   # 402 tests incl. e2e over TCP
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets           # default features too
 cargo fmt --all
@@ -335,11 +335,21 @@ Do not change these unless the user explicitly asks.
   `workers.purchase_lease_seconds`) instead of holding up the queue. Any transaction that
   changes several requests' stock must lock it up front the same way
   (`stock_locked_up_front_never_deadlocks`, `quotas_locked_together_never_exceed_a_limit`).
-- **PostgreSQL queue numbers** come from a per-sale counter row (`INSERT … ON CONFLICT DO
-  UPDATE`), not a sequence: an admission batch means "the next N people" and needs consecutive
-  numbers. The increment and the account's entry are one statement (MySQL: one transaction),
-  so the row is locked no longer than for the increment alone; the only numbers lost are those
-  of one account's simultaneous joins racing each other on PostgreSQL and SQLite.
+- **Waiting-room positions** come from counter rows, not a sequence: an admission batch means
+  "the next N people" and needs all but consecutive numbers. A room has 128 counters on
+  PostgreSQL and MySQL (counter `c` hands out `c + 1`, `c + 129`, …; `waiting_room_counters`)
+  and one on SQLite. A join takes the lowest position of a counter no other join holds (`FOR
+  UPDATE SKIP LOCKED`; on PostgreSQL picked in a CTE, since a subquery in `WHERE` is re-run on
+  re-check and often updates nothing) and enters the account in the same statement (MySQL: one
+  transaction), so joins do not wait for each other and only positions handed out at the same
+  moment come out of order. An advance goes no further than the positions handed out with none
+  missing below them and never waits for a join; only when admission has caught up and the
+  next position stays free (nobody joined since the last tick) does it seal the counters behind
+  it, skipping their positions and stopping below any counter a join holds, so a join that
+  starts after an advance is never admitted by it (`joins_after_an_advance_are_never_admitted`).
+  A sale created with a waiting room gets its room and counters with it, any other on its first
+  join. Numbers are lost only to seals and to one account's simultaneous joins racing each other
+  on PostgreSQL and SQLite.
 
 ## Open tasks
 
@@ -373,7 +383,11 @@ Do not change these unless the user explicitly asks.
 - On MySQL, a purchase worker whose machine freezes or vanishes without closing its connection
   holds its transaction, and so its sale's queue, until the server drops the connection: set
   `wait_timeout` (seconds) low enough on the server. PostgreSQL ends such a transaction after
-  10 s by itself.
+  10 s by itself. The same holds for a waiting-room join, whose transaction holds one counter:
+  admission to that sale stops below the counter's position until the connection is dropped
+  (other sales and joins carry on; a PostgreSQL join is one statement and holds nothing).
+- A waiting room hands out about 7,300 first positions/s on PostgreSQL (where writing the WAL
+  is the limit) and 4,200/s on MySQL in local containers, with 64 joins at once.
 - Arrival order (who gets the last tickets) is the `created_at` the front-door instance gave a
   request by its own clock, not the database's: instances need NTP, and clock skew between
   them shifts the order by as much (milliseconds in practice). With an inbox, a request still

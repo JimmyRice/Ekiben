@@ -24,7 +24,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use kippu_domain::account::{Account, Identity, Organization, Role};
-use kippu_domain::admission::AdmissionPolicy;
+use kippu_domain::admission::{AdmissionPolicy, WaitingRoom};
 use kippu_domain::catalog::{
     Address, Event, EventStatus, EventSummary, MAX_EVENT_CONTENT_BYTES, Sale, TicketType,
 };
@@ -99,8 +99,10 @@ macro_rules! conformance_tests {
             attestations_are_recorded_once,
             one_reservation_per_purchase_request,
             waiting_room_positions_are_distinct,
+            waiting_room_positions_follow_one_another,
             an_account_keeps_its_waiting_room_position,
             waiting_room_advances_once,
+            joins_after_an_advance_are_never_admitted,
             outbox_is_transactional_and_ordered,
             outbox_readers_never_skip_late_commits,
             sessions_rotate_once,
@@ -216,6 +218,39 @@ fn event_record(organization: OrganizationId) -> Event {
     }
 }
 
+fn sale_record(event: EventId, admission: AdmissionPolicy) -> Sale {
+    Sale {
+        id: SaleId::generate(),
+        event_id: event,
+        name: "General".to_owned(),
+        opens_at: now(),
+        closes_at: now() + Duration::days(1),
+        admission,
+        reservation_ttl_seconds: 600,
+        max_tickets_per_request: 10,
+        accepted_attestors: vec![AttestorId::MANUAL],
+        environment: Environment::Live,
+        created_at: now(),
+        version: 1,
+    }
+}
+
+/// A sale created with a waiting room; [`catalog`]'s sales are open, and get their waiting
+/// room on the first join.
+async fn waiting_room_sale(store: &dyn Store) -> SaleId {
+    let event = event_record(organization(store).await);
+    store.insert_event(&event).await.unwrap();
+    let sale = sale_record(
+        event.id,
+        AdmissionPolicy::WaitingRoom {
+            admit_per_tick: 100,
+            max_backlog: 1_000,
+        },
+    );
+    store.insert_sale(&sale).await.unwrap();
+    sale.id
+}
+
 /// A sale with one ticket type per capacity in `capacities`.
 struct Catalog {
     event: EventId,
@@ -235,20 +270,7 @@ async fn catalog_in(
 ) -> Catalog {
     let event = event_record(organization);
     store.insert_event(&event).await.unwrap();
-    let sale = Sale {
-        id: SaleId::generate(),
-        event_id: event.id,
-        name: "General".to_owned(),
-        opens_at: now(),
-        closes_at: now() + Duration::days(1),
-        admission: AdmissionPolicy::Open,
-        reservation_ttl_seconds: 600,
-        max_tickets_per_request: 10,
-        accepted_attestors: vec![AttestorId::MANUAL],
-        environment: Environment::Live,
-        created_at: now(),
-        version: 1,
-    };
+    let sale = sale_record(event.id, AdmissionPolicy::Open);
     store.insert_sale(&sale).await.unwrap();
     let mut ticket_types = Vec::new();
     for &capacity in capacities {
@@ -1109,14 +1131,30 @@ pub async fn waiting_room_positions_are_distinct(store: Arc<dyn Store>) {
         positions.push(join.await.unwrap());
     }
     positions.sort_unstable();
-    assert_eq!(positions, (1..=100).collect::<Vec<_>>());
+    positions.dedup();
+    assert_eq!(positions.len(), 100, "a position was handed out twice");
+    let room = store.waiting_room(catalog.sale).await.unwrap();
+    assert!(
+        positions
+            .iter()
+            .all(|&position| position <= room.last_position)
+    );
+}
+
+pub async fn waiting_room_positions_follow_one_another(store: Arc<dyn Store>) {
+    let sale = waiting_room_sale(store.as_ref()).await;
+    let mut positions = Vec::new();
+    for _ in 0..10 {
+        let buyer = account(store.as_ref()).await;
+        positions.push(store.join_waiting_room(sale, buyer).await.unwrap());
+    }
+    assert_eq!(positions, (1..=10).collect::<Vec<_>>());
     assert_eq!(
-        store
-            .waiting_room(catalog.sale)
-            .await
-            .unwrap()
-            .last_position,
-        100
+        store.waiting_room(sale).await.unwrap(),
+        WaitingRoom {
+            last_position: 10,
+            admitted_through: 0
+        }
     );
 }
 
@@ -1162,25 +1200,38 @@ pub async fn waiting_room_advances_once(store: Arc<dyn Store>) {
         let buyer = account(store.as_ref()).await;
         store.join_waiting_room(catalog.sale, buyer).await.unwrap();
     }
-    assert!(
+    assert_eq!(
         store
             .advance_waiting_room(catalog.sale, 0, 5)
             .await
-            .unwrap()
+            .unwrap(),
+        Some(5)
     );
-    assert!(
-        !store
+    assert_eq!(
+        store
             .advance_waiting_room(catalog.sale, 0, 5)
             .await
             .unwrap(),
+        None,
         "stale compare-and-set"
     );
-    assert!(
-        !store
+    let pending = store.pending_waiting_rooms().await.unwrap();
+    assert!(pending.contains(&catalog.sale), "people are still waiting");
+    assert_eq!(
+        store
             .advance_waiting_room(catalog.sale, 5, 11)
             .await
             .unwrap(),
-        "beyond last position"
+        Some(10),
+        "no further than the positions handed out"
+    );
+    assert_eq!(
+        store
+            .advance_waiting_room(catalog.sale, 10, 11)
+            .await
+            .unwrap(),
+        None,
+        "nobody left to admit"
     );
     assert_eq!(
         store
@@ -1188,18 +1239,102 @@ pub async fn waiting_room_advances_once(store: Arc<dyn Store>) {
             .await
             .unwrap()
             .admitted_through,
-        5
-    );
-    let pending = store.pending_waiting_rooms().await.unwrap();
-    assert!(pending.contains(&catalog.sale), "people are still waiting");
-    assert!(
-        store
-            .advance_waiting_room(catalog.sale, 5, 10)
-            .await
-            .unwrap()
+        10
     );
     let pending = store.pending_waiting_rooms().await.unwrap();
     assert!(!pending.contains(&catalog.sale), "everyone was admitted");
+
+    let late = account(store.as_ref()).await;
+    assert_eq!(
+        store.join_waiting_room(catalog.sale, late).await.unwrap(),
+        11,
+        "a later join is not admitted"
+    );
+    let pending = store.pending_waiting_rooms().await.unwrap();
+    assert!(pending.contains(&catalog.sale), "someone is waiting again");
+}
+
+pub async fn joins_after_an_advance_are_never_admitted(store: Arc<dyn Store>) {
+    let sale = waiting_room_sale(store.as_ref()).await;
+    let mut buyers = Vec::new();
+    for _ in 0..300 {
+        buyers.push(account(store.as_ref()).await);
+    }
+    let started = std::time::Instant::now();
+    let joining = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    // Admits everyone handed out a position as fast as it can, so admission keeps catching up
+    // with the joins and has to pass positions they are taking or nobody took.
+    let admitter = {
+        let (store, joining) = (store.clone(), joining.clone());
+        tokio::spawn(async move {
+            let mut advances = Vec::new();
+            loop {
+                let still_joining = joining.load(std::sync::atomic::Ordering::Relaxed);
+                let room = store.waiting_room(sale).await.unwrap();
+                if room.last_position > room.admitted_through {
+                    let moved = store
+                        .advance_waiting_room(sale, room.admitted_through, room.last_position)
+                        .await
+                        .unwrap();
+                    if let Some(admitted_through) = moved {
+                        advances.push((started.elapsed(), admitted_through));
+                    }
+                } else if !still_joining {
+                    return advances;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+    };
+    let next = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let buyers = Arc::new(buyers);
+    let joiners = (0..16).map(|_| {
+        let (store, buyers, next) = (store.clone(), buyers.clone(), next.clone());
+        tokio::spawn(async move {
+            let mut joins = Vec::new();
+            while let Some(&buyer) =
+                buyers.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+            {
+                let at = started.elapsed();
+                joins.push((at, store.join_waiting_room(sale, buyer).await.unwrap()));
+            }
+            joins
+        })
+    });
+    let mut joins = Vec::new();
+    for joiner in joiners.collect::<Vec<_>>() {
+        joins.extend(joiner.await.unwrap());
+    }
+    joining.store(false, std::sync::atomic::Ordering::Relaxed);
+    let advances = tokio::time::timeout(std::time::Duration::from_secs(10), admitter)
+        .await
+        .expect("admission reaches everyone")
+        .unwrap();
+
+    for &(at, position) in &joins {
+        let admitted_before = advances
+            .iter()
+            .filter(|&&(returned, _)| returned < at)
+            .map(|&(_, admitted_through)| admitted_through)
+            .max()
+            .unwrap_or(0);
+        assert!(
+            position > admitted_before,
+            "a join that started after admission reached {admitted_before} got {position}"
+        );
+    }
+    let mut positions: Vec<u64> = joins.iter().map(|&(_, position)| position).collect();
+    positions.sort_unstable();
+    positions.dedup();
+    assert_eq!(positions.len(), 300, "a position was handed out twice");
+    let room = store.waiting_room(sale).await.unwrap();
+    assert_eq!(room.admitted_through, room.last_position);
+    assert!(
+        positions
+            .iter()
+            .all(|&position| position <= room.admitted_through),
+        "nobody is left behind"
+    );
 }
 
 pub async fn outbox_is_transactional_and_ordered(store: Arc<dyn Store>) {

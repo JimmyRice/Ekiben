@@ -148,12 +148,13 @@ pub(crate) async fn admit_batches(state: AppState) -> Result<Progress, BoxError>
         // Only whether the backlog reached the limit matters, so counting stops there.
         let backlog = store.queued_purchase_count(sale_id, max_backlog).await?;
         let next = room.next_admitted_through(admit_per_tick, max_backlog, backlog);
+        // The store may stop short of `next`, below positions still being handed out.
         if next > room.admitted_through
-            && store
+            && let Some(admitted_through) = store
                 .advance_waiting_room(sale_id, room.admitted_through, next)
                 .await?
         {
-            tracing::info!(sale = %sale_id, admitted_through = next, backlog, "admitted a batch");
+            tracing::info!(sale = %sale_id, admitted_through, backlog, "admitted a batch");
         }
     }
     Ok(Progress::Idle)

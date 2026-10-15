@@ -172,10 +172,11 @@ async fn hot_paths_run_a_fixed_number_of_statements() {
     let ((), ten_buyers) = statements.of(app.drain("purchases")).await;
 
     // MySQL has neither RETURNING nor ON CONFLICT, so its writes take more statements, and it
-    // enters a first join in a transaction of its own.
+    // enters a first join in a transaction of its own, locking the counter it takes before it
+    // moves it.
     let (join, worker_one, worker_three, worker_ten) =
         match std::env::var("EKIBEN_TEST_BACKEND").as_deref() {
-            Ok("mysql") => (7, 13, 15, 15),
+            Ok("mysql") => (8, 13, 15, 15),
             _ => (5, 12, 13, 13),
         };
     let counts = [

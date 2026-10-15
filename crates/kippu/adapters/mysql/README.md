@@ -14,7 +14,9 @@ MySQL adapter for [`kippu-store`](../../store). MySQL 8.0.16 or newer, InnoDB.
   `AUTO_INCREMENT` sequence numbers follow commit order.
 - **No `RETURNING`, no `ON CONFLICT DO NOTHING`.** Inserts that may collide run plainly and
   treat a duplicate-key error as "already there"; claims lock, update and re-read in one
-  transaction; waiting-room positions come back through `LAST_INSERT_ID(expr)`.
+  transaction, and so does a waiting-room join, which locks the lowest of its room's 128
+  counters no other join holds (`FOR UPDATE SKIP LOCKED` on the forced `next_position`
+  index).
 - **Schema** in `migrations/`: `BINARY(16)` UUIDs and `BIGINT` microseconds (MySQL's
   `TIMESTAMP` ends in 2038 and `DATETIME` has no zone), JSON as text.
 - **Conformance:** `EKIBEN_TEST_MYSQL_URL=mysql://… cargo test -p kippu-store-mysql` runs the

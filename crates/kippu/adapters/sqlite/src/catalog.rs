@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use kippu_domain::admission::WaitingRoom;
+use kippu_domain::admission::{AdmissionPolicy, WaitingRoom};
 use kippu_domain::catalog::{Event, EventSummary, Inventory, Sale, TicketType};
 use kippu_domain::validation::{CountryCode, Slug};
 use kippu_domain::{AccountId, EventId, SaleId, TicketTypeId, Timestamp};
@@ -12,7 +12,7 @@ use crate::convert::{
     AddressValues, EventRow, EventSummaryRow, InventoryRow, SaleRow, TicketTypeRow, all,
     event_status, extensions_json, instant, json, micros, optional,
 };
-use crate::{SqliteStore, error, unique};
+use crate::{SqliteStore, error, unique, waiting_rooms};
 
 const EVENT_SUMMARY_COLUMNS: &str = "SELECT id, organization_id, slug, title, description, venue, \
      address_country, address_region, address_locality, address_postal_code, address_street, \
@@ -226,6 +226,13 @@ impl CatalogStore for SqliteStore {
     }
 
     async fn insert_sale(&self, sale: &Sale) -> StoreResult<()> {
+        // A sale's waiting room, if it has one, comes with it in the same transaction; a sale
+        // that takes one later gets it on the first join.
+        let mut tx = self
+            .writer
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(error)?;
         sqlx::query(
             "INSERT INTO sales (id, event_id, name, opens_at, closes_at, admission,
                                 reservation_ttl_seconds, max_tickets_per_request,
@@ -244,10 +251,13 @@ impl CatalogStore for SqliteStore {
         .bind(sale.environment.as_str())
         .bind(micros(sale.created_at))
         .bind(sale.version)
-        .execute(&self.writer)
+        .execute(&mut *tx)
         .await
         .map_err(error)?;
-        Ok(())
+        if matches!(sale.admission, AdmissionPolicy::WaitingRoom { .. }) {
+            waiting_rooms::create(&mut tx, sale.id).await?;
+        }
+        tx.commit().await.map_err(error)
     }
 
     async fn update_sale(&self, sale: &Sale, expected_version: i64) -> StoreResult<()> {
@@ -499,101 +509,23 @@ impl CatalogStore for SqliteStore {
     }
 
     async fn join_waiting_room(&self, sale: SaleId, account: AccountId) -> StoreResult<u64> {
-        if let Some(position) = waiting_room_entry(&self.reader, sale, account).await? {
-            return Ok(position);
-        }
-        let position = sqlx::query_scalar::<_, i64>(
-            "INSERT INTO waiting_rooms (sale_id, last_position, admitted_through) VALUES (?1, 1, 0)
-             ON CONFLICT (sale_id) DO UPDATE SET last_position = last_position + 1
-             RETURNING last_position",
-        )
-        .bind(sale.as_uuid())
-        .fetch_one(&self.writer)
-        .await
-        .map_err(error)?;
-        // The same account joining at the same moment may have entered first: its position
-        // stands, and this one is left unused.
-        let entered = sqlx::query(
-            "INSERT INTO waiting_room_entries (sale_id, account_id, position) VALUES (?1, ?2, ?3)
-             ON CONFLICT (sale_id, account_id) DO NOTHING",
-        )
-        .bind(sale.as_uuid())
-        .bind(account.as_uuid())
-        .bind(position)
-        .execute(&self.writer)
-        .await
-        .map_err(error)?
-        .rows_affected()
-            == 1;
-        if entered {
-            return u64::try_from(position).map_err(StoreError::backend);
-        }
-        waiting_room_entry(&self.writer, sale, account)
-            .await?
-            .ok_or_else(|| StoreError::backend("a waiting room entry vanished"))
+        waiting_rooms::join(&self.reader, &self.writer, sale, account).await
     }
 
     async fn waiting_room(&self, sale: SaleId) -> StoreResult<WaitingRoom> {
-        let row = sqlx::query_as::<_, (i64, i64)>(
-            "SELECT last_position, admitted_through FROM waiting_rooms WHERE sale_id = ?1",
-        )
-        .bind(sale.as_uuid())
-        .fetch_optional(&self.reader)
-        .await
-        .map_err(error)?;
-        let Some((last_position, admitted_through)) = row else {
-            return Ok(WaitingRoom::default());
-        };
-        Ok(WaitingRoom {
-            last_position: u64::try_from(last_position).map_err(StoreError::backend)?,
-            admitted_through: u64::try_from(admitted_through).map_err(StoreError::backend)?,
-        })
+        waiting_rooms::room(&self.reader, sale).await
     }
 
     async fn pending_waiting_rooms(&self) -> StoreResult<Vec<SaleId>> {
-        let ids = sqlx::query_scalar::<_, Uuid>(
-            "SELECT sale_id FROM waiting_rooms WHERE admitted_through < last_position ORDER BY sale_id",
-        )
-        .fetch_all(&self.reader)
-        .await
-        .map_err(error)?;
-        Ok(ids.into_iter().map(Into::into).collect())
+        waiting_rooms::pending(&self.reader).await
     }
 
-    async fn advance_waiting_room(&self, sale: SaleId, from: u64, to: u64) -> StoreResult<bool> {
-        let (from, to) = (
-            i64::try_from(from).map_err(StoreError::backend)?,
-            i64::try_from(to).map_err(StoreError::backend)?,
-        );
-        let result = sqlx::query(
-            "UPDATE waiting_rooms SET admitted_through = ?3
-             WHERE sale_id = ?1 AND admitted_through = ?2 AND ?3 <= last_position",
-        )
-        .bind(sale.as_uuid())
-        .bind(from)
-        .bind(to)
-        .execute(&self.writer)
-        .await
-        .map_err(error)?;
-        Ok(result.rows_affected() == 1)
+    async fn advance_waiting_room(
+        &self,
+        sale: SaleId,
+        from: u64,
+        to: u64,
+    ) -> StoreResult<Option<u64>> {
+        waiting_rooms::advance(&self.writer, sale, from, to).await
     }
-}
-
-/// The position `account` holds in a sale's waiting room, if it joined.
-async fn waiting_room_entry(
-    pool: &sqlx::SqlitePool,
-    sale: SaleId,
-    account: AccountId,
-) -> StoreResult<Option<u64>> {
-    let position = sqlx::query_scalar::<_, i64>(
-        "SELECT position FROM waiting_room_entries WHERE sale_id = ?1 AND account_id = ?2",
-    )
-    .bind(sale.as_uuid())
-    .bind(account.as_uuid())
-    .fetch_optional(pool)
-    .await
-    .map_err(error)?;
-    position
-        .map(|position| u64::try_from(position).map_err(StoreError::backend))
-        .transpose()
 }

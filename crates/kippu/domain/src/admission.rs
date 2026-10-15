@@ -61,7 +61,7 @@ impl AdmissionPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct WaitingRoom {
-    /// Highest queue position handed out so far (positions start at 1).
+    /// Highest queue position handed out (or skipped) so far; positions start at 1.
     pub last_position: u64,
     /// Every position up to and including this one has been admitted.
     pub admitted_through: u64,

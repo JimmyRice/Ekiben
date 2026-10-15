@@ -160,19 +160,36 @@ pub trait CatalogStore {
     ) -> StoreResult<Vec<Favorite>>;
 
     /// The queue position of `account` in a sale's waiting room: the one it got when it first
-    /// joined, or else the next one (starting at 1).
+    /// joined, or else the lowest one no other join is taking at the moment (starting at 1), so
+    /// joins that do not overlap get consecutive positions.
     ///
     /// **Contract:** an account keeps one position per sale, also when it joins several times
-    /// at once, and different accounts always receive different positions. A position may be
-    /// skipped (when one account's simultaneous joins race each other), never handed out twice.
+    /// at once, and different accounts always receive different positions. Joins running at the
+    /// same time do not wait for each other (until more run at once than an adapter has
+    /// counters). A join that starts after [`CatalogStore::advance_waiting_room`] moved
+    /// `admitted_through` to `n` receives a position above `n`: nobody joins into the admitted
+    /// part of the queue. A position may be skipped (when one account's simultaneous joins race
+    /// each other, or when an advance passes positions nobody took), never handed out twice.
     async fn join_waiting_room(&self, sale: SaleId, account: AccountId) -> StoreResult<u64>;
     /// The waiting room's progress (all zeros if nobody joined yet).
     async fn waiting_room(&self, sale: SaleId) -> StoreResult<WaitingRoom>;
     /// Sales whose waiting room still has people waiting (`admitted_through < last_position`).
     async fn pending_waiting_rooms(&self) -> StoreResult<Vec<SaleId>>;
-    /// Moves `admitted_through` from `from` to `to`.
+    /// Moves `admitted_through` from `from` towards `to` and returns where it now stands.
     ///
-    /// **Contract:** a compare-and-set: returns `false` without changes if another instance
-    /// already moved it, so concurrent tickers never admit a batch twice.
-    async fn advance_waiting_room(&self, sale: SaleId, from: u64, to: u64) -> StoreResult<bool>;
+    /// It goes no further than the positions handed out with none missing below them, and it
+    /// never waits for a join. Only when admission has caught up with those and the next
+    /// position is still free (nobody joined since) does it pass positions nobody took, which
+    /// are then skipped for good; positions a join is taking at that moment stop it.
+    ///
+    /// **Contract:** a compare-and-set: returns `None` without changes if another instance
+    /// already moved it, or if nothing up to `to` can be admitted yet, so concurrent tickers
+    /// never admit a batch twice. Whatever it returns, no join that starts afterwards receives
+    /// a position at or below it.
+    async fn advance_waiting_room(
+        &self,
+        sale: SaleId,
+        from: u64,
+        to: u64,
+    ) -> StoreResult<Option<u64>>;
 }
