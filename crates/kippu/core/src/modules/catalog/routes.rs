@@ -174,13 +174,14 @@ pub(crate) async fn get_event(
     ))
 }
 
-/// Edit an event, including publishing or cancelling it.
+/// Edit an event, including publishing or cancelling it. Cancelling is final: a cancelled
+/// event keeps its status (409 `illegal-transition`), though its other fields stay editable.
 #[utoipa::path(
     put, path = "/v1/events/{event_id}", tag = TAG,
     security(("bearer" = [])),
     params(("event_id" = EventId, Path)),
     request_body = UpdateEventRequest,
-    responses((status = 200, body = Event), (status = 412, description = "Edited concurrently", body = Problem))
+    responses((status = 200, body = Event), (status = 409, description = "Not a transition the event can make: withdrawing an event people ordered for, or reviving a cancelled one", body = Problem), (status = 412, description = "Edited concurrently", body = Problem))
 )]
 pub(crate) async fn update_event(
     State(state): State<AppState>,
@@ -194,13 +195,14 @@ pub(crate) async fn update_event(
     ))
 }
 
-/// Change some of an event's fields, including publishing or cancelling it.
+/// Change some of an event's fields, including publishing or cancelling it. Cancelling is
+/// final: a cancelled event keeps its status (409 `illegal-transition`).
 #[utoipa::path(
     patch, path = "/v1/events/{event_id}", tag = TAG,
     security(("bearer" = [])),
     params(("event_id" = EventId, Path)),
     request_body(content((EventPatch = "application/merge-patch+json"), (EventPatch = "application/json"))),
-    responses((status = 200, body = Event), (status = 412, description = "Edited concurrently", body = Problem))
+    responses((status = 200, body = Event), (status = 409, description = "Not a transition the event can make: withdrawing an event people ordered for, or reviving a cancelled one", body = Problem), (status = 412, description = "Edited concurrently", body = Problem))
 )]
 pub(crate) async fn patch_event(
     State(state): State<AppState>,

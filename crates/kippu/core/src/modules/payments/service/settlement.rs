@@ -4,7 +4,7 @@
 //! the inventory, the reservation, the tickets and the outbox event. Either all of it happens
 //! or none of it does, so money can never be recorded without its tickets (or its refund).
 
-use kippu_domain::catalog::TicketType;
+use kippu_domain::catalog::{EventSummary, Sale, TicketType};
 use kippu_domain::outbox::IntegrationEvent;
 use kippu_domain::payment::{
     Attestor, Environment, PaymentAttestation, PaymentDisposition, validate_attestation_id,
@@ -22,6 +22,7 @@ use crate::app::AppState;
 use crate::auth::{Principal, Scope};
 use crate::error::{ApiError, ApiResult, ProblemKind, StatusCode};
 use crate::modules::payments::permissions::PAYMENTS_MANUAL;
+use crate::modules::purchasing::service::release;
 use crate::modules::ticketing::service::issue_tickets;
 
 /// What an attestor reports.
@@ -217,31 +218,12 @@ pub async fn settle(
         .sale(reservation.sale_id)
         .await?
         .ok_or_else(|| ApiError::not_found("sale"))?;
-    if !attestor.id.is_builtin() && !sale.accepts(attestor.id) {
-        return Err(ApiError::new(
-            StatusCode::FORBIDDEN,
-            ProblemKind::ATTESTOR_NOT_ACCEPTED,
-            "this sale does not accept payments from this attestor",
-        ));
-    }
-    if attestor.environment == Environment::Sandbox && reservation.environment == Environment::Live
-    {
-        return Err(ApiError::new(
-            StatusCode::FORBIDDEN,
-            ProblemKind::ENVIRONMENT_MISMATCH,
-            "a sandbox attestor cannot settle a live sale",
-        ));
-    }
-    if payment.amount != reservation.total {
-        return Err(ApiError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            ProblemKind::AMOUNT_MISMATCH,
-            format!(
-                "the reservation costs {}, not {}",
-                reservation.total, payment.amount
-            ),
-        ));
-    }
+    // Read outside the transaction, like the purchase worker's catalog checks.
+    let event = store
+        .event_summary(reservation.event_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("event"))?;
+    check_payment(attestor, &sale, &reservation, &payment)?;
     let ticket_types = store.list_ticket_types(reservation.sale_id).await?;
 
     let now = state.now();
@@ -267,16 +249,25 @@ pub async fn settle(
 
     let items = line_items(&reservation);
     let view = match reservation.status.settle() {
-        Settlement::Issue => {
+        Settlement::Issue if event.is_on_sale() => {
             tx.inventory().sell_held(&items).await?;
             issue(state, &mut *tx, reservation, &ticket_types, now).await?
         }
+        // Called off while the money was on its way: give back the hold, return the money.
+        Settlement::Issue => {
+            let mut reservation = reservation;
+            reservation.status = reservation.status.require_refund()?;
+            reservation.updated_at = now;
+            release(&mut *tx, &reservation).await?;
+            require_refund(&mut *tx, &attestation, reservation, now).await?
+        }
         Settlement::Reacquire => {
             let account = reservation.account_id;
-            let quota = tx
-                .inventory()
-                .try_take_quota(account, &holds(&items, &ticket_types)?)
-                .await?;
+            let quota = may_reacquire(state, &event, &reservation).await?
+                && tx
+                    .inventory()
+                    .try_take_quota(account, &holds(&items, &ticket_types)?)
+                    .await?;
             if quota && tx.inventory().try_sell(&items).await? {
                 issue(state, &mut *tx, reservation, &ticket_types, now).await?
             } else {
@@ -297,6 +288,66 @@ pub async fn settle(
     tx.commit().await?;
     log_settlement(attestor, &view);
     Ok(view)
+}
+
+/// Refuses a payment Kippu must not record: from an attestor the sale does not accept, from a
+/// sandbox for a live sale, or of the wrong amount.
+fn check_payment(
+    attestor: &Attestor,
+    sale: &Sale,
+    reservation: &Reservation,
+    payment: &IncomingPayment,
+) -> ApiResult<()> {
+    if !attestor.id.is_builtin() && !sale.accepts(attestor.id) {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            ProblemKind::ATTESTOR_NOT_ACCEPTED,
+            "this sale does not accept payments from this attestor",
+        ));
+    }
+    if attestor.environment == Environment::Sandbox && reservation.environment == Environment::Live
+    {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            ProblemKind::ENVIRONMENT_MISMATCH,
+            "a sandbox attestor cannot settle a live sale",
+        ));
+    }
+    if payment.amount != reservation.total {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ProblemKind::AMOUNT_MISMATCH,
+            format!(
+                "the reservation costs {}, not {}",
+                reservation.total, payment.amount
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Whether a lapsed reservation may take its tickets again for a payment that arrived late:
+/// as a purchase would, only while its event is on sale and for an account that is open and
+/// not denied entry. The sale's window is not checked: the buyer checked out while it was
+/// open. Read outside the payment's transaction, like the worker's catalog checks; only late
+/// payments pay for the account reads.
+async fn may_reacquire(
+    state: &AppState,
+    event: &EventSummary,
+    reservation: &Reservation,
+) -> ApiResult<bool> {
+    let store = state.store();
+    if !event.is_on_sale() {
+        return Ok(false);
+    }
+    let open = store
+        .account(reservation.account_id)
+        .await?
+        .is_some_and(|account| !account.is_closed());
+    Ok(open
+        && !store
+            .account_denied(event.organization_id, event.id, reservation.account_id)
+            .await?)
 }
 
 fn log_settlement(attestor: &Attestor, view: &PaymentResult) {

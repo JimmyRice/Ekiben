@@ -10,7 +10,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use kippu_domain::{Duration, SaleId};
 use serde_json::{Value, json};
-use support::{TestApp, uuid_suffix};
+use support::{Attestor, Shop, TestApp, uuid_suffix};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn many_concurrent_buyers_never_oversell() {
@@ -257,6 +257,126 @@ async fn a_late_payment_for_sold_out_stock_requires_a_refund() {
         .await;
     assert_eq!(refunded.body["disposition"], "refunded");
     assert_eq!(refunded.body["reservation"]["status"], "refunded");
+}
+
+/// What a late payment did, and how many tickets of the shop's type are left after it.
+async fn pay_late(
+    app: &TestApp,
+    shop: &Shop,
+    attestor: &Attestor,
+    reservation: &Value,
+) -> (Value, Value) {
+    let paid = app.pay(attestor, "late", reservation).await;
+    assert_eq!(paid.status, StatusCode::OK, "{:?}", paid.body);
+    let left = app
+        .call(
+            Method::GET,
+            &format!("/v1/ticket-types/{}", shop.ticket_type_id),
+            Some(&shop.organizer),
+            None,
+        )
+        .await;
+    (paid.body, left.body["available"].clone())
+}
+
+#[tokio::test]
+async fn a_late_payment_for_a_cancelled_event_requires_a_refund() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let attestor = app.attestor("live").await;
+    app.accept_attestor(&shop, &attestor.id).await;
+    let buyer = app.buyer().await;
+    let reservation = app.reserve(&buyer, &shop, 1).await;
+    expire_everything(&app).await;
+
+    let path = format!("/v1/events/{}", shop.event_id);
+    let current = app
+        .call(Method::GET, &path, Some(&shop.organizer), None)
+        .await;
+    let cancelled = app
+        .call(
+            Method::PATCH,
+            &path,
+            Some(&shop.organizer),
+            Some(json!({ "version": current.body["version"], "status": "cancelled" })),
+        )
+        .await;
+    assert_eq!(cancelled.status, StatusCode::OK);
+
+    let (paid, left) = pay_late(&app, &shop, &attestor, &reservation).await;
+    assert_eq!(paid["disposition"], "refund_required", "{paid:?}");
+    assert_eq!(paid["reservation"]["status"], "refund_required");
+    assert_eq!(left, 10, "no ticket taken for a cancelled event");
+}
+
+#[tokio::test]
+async fn a_payment_for_a_hold_of_a_cancelled_event_requires_a_refund() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let attestor = app.attestor("live").await;
+    app.accept_attestor(&shop, &attestor.id).await;
+    let buyer = app.buyer().await;
+    let reservation = app.reserve(&buyer, &shop, 2).await;
+
+    let path = format!("/v1/events/{}", shop.event_id);
+    let current = app
+        .call(Method::GET, &path, Some(&shop.organizer), None)
+        .await;
+    let cancelled = app
+        .call(
+            Method::PATCH,
+            &path,
+            Some(&shop.organizer),
+            Some(json!({ "version": current.body["version"], "status": "cancelled" })),
+        )
+        .await;
+    assert_eq!(cancelled.status, StatusCode::OK);
+
+    // The hold was still live: the money comes back, and so does the stock.
+    let (paid, left) = pay_late(&app, &shop, &attestor, &reservation).await;
+    assert_eq!(paid["disposition"], "refund_required", "{paid:?}");
+    assert_eq!(paid["reservation"]["status"], "refund_required");
+    assert_eq!(left, 10, "the hold was released");
+    assert_eq!(paid["ticket_ids"], json!([]));
+
+    let refunded = app
+        .signed(
+            &attestor,
+            Method::POST,
+            "/v1/payment-attestations",
+            Some(json!({ "attestation_id": "late", "outcome": "refunded" })),
+        )
+        .await;
+    assert_eq!(
+        refunded.body["reservation"]["status"], "refunded",
+        "{:?}",
+        refunded.body
+    );
+}
+
+#[tokio::test]
+async fn a_late_payment_from_a_denied_account_requires_a_refund() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let attestor = app.attestor("live").await;
+    app.accept_attestor(&shop, &attestor.id).await;
+    let buyer = app.buyer().await;
+    let reservation = app.reserve(&buyer, &shop, 1).await;
+    expire_everything(&app).await;
+
+    let denied = app
+        .call(
+            Method::POST,
+            &format!("/v1/events/{}/denials", shop.event_id),
+            Some(&shop.organizer),
+            Some(json!({ "subject": { "kind": "account", "id": reservation["account_id"] } })),
+        )
+        .await;
+    assert_eq!(denied.status, StatusCode::CREATED, "{:?}", denied.body);
+
+    let (paid, left) = pay_late(&app, &shop, &attestor, &reservation).await;
+    assert_eq!(paid["disposition"], "refund_required", "{paid:?}");
+    assert_eq!(left, 10, "a denied account takes no ticket");
 }
 
 #[tokio::test]
@@ -1133,7 +1253,7 @@ async fn the_attestor_feed_reads_past_other_attestors_events() {
     let their_shop = app.shop(10, 1_000, json!({})).await;
     app.accept_attestor(&their_shop, &theirs.id).await;
 
-    let checkout = async |buyer: &str, shop: &support::Shop, attestor: &support::Attestor| {
+    let checkout = async |buyer: &str, shop: &Shop, attestor: &Attestor| {
         let reservation = app.reserve(buyer, shop, 1).await;
         let checked_out = app
             .call(
@@ -1156,7 +1276,7 @@ async fn the_attestor_feed_reads_past_other_attestors_events() {
     checkout(&second, &our_shop, &ours).await;
 
     // A window of two holds only the other attestor's events; the feed reads on.
-    let poll = async |attestor: &support::Attestor, after: i64| {
+    let poll = async |attestor: &Attestor, after: i64| {
         let reply = app
             .signed(
                 attestor,
@@ -1458,6 +1578,27 @@ async fn an_event_with_orders_is_cancelled_not_withdrawn() {
         "urn:kippu:problem:illegal-transition"
     );
     assert_eq!(set_status("cancelled").await.status, StatusCode::OK);
+
+    // Cancelled for good: a new event takes its place. Its other fields stay editable.
+    for status in ["published", "draft"] {
+        let revived = set_status(status).await;
+        assert_eq!(revived.status, StatusCode::CONFLICT, "{status}");
+        assert_eq!(revived.body["type"], "urn:kippu:problem:illegal-transition");
+    }
+    assert_eq!(set_status("cancelled").await.status, StatusCode::OK);
+    let current = app
+        .call(Method::GET, &path, Some(&shop.organizer), None)
+        .await;
+    let renamed = app
+        .call(
+            Method::PATCH,
+            &path,
+            Some(&shop.organizer),
+            Some(json!({ "version": current.body["version"], "title": "Moved to next year" })),
+        )
+        .await;
+    assert_eq!(renamed.status, StatusCode::OK, "{:?}", renamed.body);
+    assert_eq!(renamed.body["status"], "cancelled");
 }
 
 #[tokio::test]

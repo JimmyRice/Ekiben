@@ -38,7 +38,7 @@ Keep the repository root uncluttered and do not add speculative `.gitignore` ent
 ## Commands
 
 ```bash
-cargo test --workspace --all-features                                   # 426 tests incl. e2e over TCP
+cargo test --workspace --all-features                                   # 430 tests incl. e2e over TCP
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets           # default features too
 cargo fmt --all
@@ -272,7 +272,13 @@ Do not change these unless the user explicitly asks.
   change no more; `sessions::issue` refuses them (`account-closed`).
 - **Event status and sales:** only a published event sells (front door and worker; a request
   queued before a cancellation is rejected). An event someone ordered for (a reservation not
-  expired or cancelled) can be cancelled but not withdrawn to a draft.
+  expired or cancelled) can be cancelled but not withdrawn to a draft. Cancelling is final
+  (`illegal-transition` for any other status; other fields stay editable): buyers and gates
+  were told, so a revived event is a new event. A payment for an event no longer on sale
+  answers `refund_required`, also for a reservation still holding stock (the hold is
+  released). A late payment for a lapsed reservation takes its tickets again only as a
+  purchase could (event on sale, account open and not denied; the sale window is not
+  checked, the buyer checked out within it), otherwise it answers `refund_required`.
 - **Waiting rooms:** buyers may join before the sale opens and keep the order they joined in;
   nobody is admitted before `opens_at` (with no purchases yet the backlog is empty and would
   let the whole room through), then one batch per tick while the backlog is below
