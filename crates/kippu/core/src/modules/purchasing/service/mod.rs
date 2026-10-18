@@ -18,4 +18,4 @@ mod pipeline;
 pub use buying::*;
 pub use granting::*;
 pub use orders::*;
-pub(crate) use pipeline::{expire_batch, process_batch};
+pub(crate) use pipeline::{expire_batch, process_batch, release};

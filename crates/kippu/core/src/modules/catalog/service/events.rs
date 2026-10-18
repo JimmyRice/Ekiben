@@ -246,6 +246,19 @@ pub async fn update_event(
         Scope::Organization(current.organization_id),
     )?;
     check_version(current.version, expected_version)?;
+    // Buyers and gates were told it is off; bringing it back would surprise both. Its other
+    // fields stay editable, e.g. to point to the event that replaces it.
+    if current.status == EventStatus::Cancelled
+        && changes
+            .status
+            .is_some_and(|status| status != EventStatus::Cancelled)
+    {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            ProblemKind::ILLEGAL_TRANSITION,
+            "a cancelled event stays cancelled: create a new event instead",
+        ));
+    }
     // Buyers and gates know an event once someone ordered for it: it can be cancelled, but
     // not withdrawn.
     if changes.status == Some(EventStatus::Draft)

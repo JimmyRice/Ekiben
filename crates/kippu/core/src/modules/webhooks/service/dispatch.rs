@@ -171,7 +171,13 @@ pub(crate) async fn deliver(
             next_attempt_at: state.now(),
         },
         Some(error) => {
-            let failures = webhook.failures.saturating_add(1);
+            // Failures count in a row: a run that got events through before failing ended
+            // the previous streak, so this failure is the first of a new one.
+            let failures = if through > webhook.delivered_through {
+                1
+            } else {
+                webhook.failures.saturating_add(1)
+            };
             tracing::warn!(
                 webhook = %webhook.id,
                 failures,
