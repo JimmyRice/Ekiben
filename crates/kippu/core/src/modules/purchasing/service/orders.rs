@@ -65,7 +65,8 @@ pub async fn event_reservations(
 
 /// Someone who ordered for an event (a reservation that has not expired or been cancelled),
 /// for the event's organizers: to reach them about the event, through the contact details
-/// they share. Others are reported as missing.
+/// they share. Others are reported as missing, and so are the buyers of other organizations'
+/// events.
 #[tracing::instrument(skip_all)]
 pub async fn buyer(
     state: &AppState,
@@ -73,13 +74,16 @@ pub async fn buyer(
     event_id: EventId,
     account_id: AccountId,
 ) -> ApiResult<Account> {
+    if !state.policy().allows(principal.role(), ORDERS_READ) {
+        return Err(ApiError::forbidden());
+    }
     let event = visible_event(state, Some(principal), event_id).await?;
-    state.authorize(
+    if !state.policy().permits(
         principal,
         ORDERS_READ,
         Scope::Organization(event.organization_id),
-    )?;
-    if !state.store().has_orders(event.id, Some(account_id)).await? {
+    ) || !state.store().has_orders(event.id, Some(account_id)).await?
+    {
         return Err(ApiError::not_found("buyer"));
     }
     state

@@ -174,7 +174,12 @@ pub(crate) async fn record_attestation(
     security(("bearer" = [])),
     params(("reservation_id" = ReservationId, Path)),
     request_body = ManualPaymentRequest,
-    responses((status = 200, body = SettlementView), (status = 403, body = Problem), (status = 422, body = Problem))
+    responses(
+        (status = 200, body = SettlementView),
+        (status = 403, description = "Not an organizer", body = Problem),
+        (status = 404, description = "No such reservation of your events", body = Problem),
+        (status = 422, body = Problem)
+    )
 )]
 pub(crate) async fn manual_payment(
     State(state): State<AppState>,

@@ -812,6 +812,42 @@ async fn joining_the_waiting_room_again_keeps_the_place() {
 }
 
 #[tokio::test]
+async fn purchase_and_checkout_bodies_refuse_unknown_fields() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 0, json!({})).await;
+    let buyer = app.buyer().await;
+    let purchase = app
+        .call_with(
+            Method::POST,
+            &format!("/v1/sales/{}/purchase-requests", shop.sale_id),
+            Some(&buyer),
+            Some(json!({
+                "items": [{ "ticket_type_id": shop.ticket_type_id, "quantity": 1 }],
+                "discount": 100,
+            })),
+            &[("idempotency-key", "unknown-field")],
+        )
+        .await;
+    assert_eq!(purchase.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(purchase.body["type"], "urn:kippu:problem:invalid-json");
+
+    let reservation = app.reserve(&buyer, &shop, 1).await;
+    let checkout = app
+        .call(
+            Method::POST,
+            &format!(
+                "/v1/reservations/{}/checkout",
+                reservation["id"].as_str().unwrap()
+            ),
+            Some(&buyer),
+            Some(json!({ "attestor": "card" })),
+        )
+        .await;
+    assert_eq!(checkout.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(checkout.body["type"], "urn:kippu:problem:invalid-json");
+}
+
+#[tokio::test]
 async fn free_tickets_are_issued_at_checkout() {
     let app = TestApp::start().await;
     let shop = app.shop(10, 0, json!({})).await;
@@ -921,7 +957,19 @@ async fn organizers_record_cash_payments_for_their_own_events_only() {
             Some(body.clone()),
         )
         .await;
-    assert_eq!(stranger.status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        stranger.status,
+        StatusCode::NOT_FOUND,
+        "hidden from other organizers"
+    );
+    let own = app
+        .call(Method::POST, &path, Some(&buyer), Some(body.clone()))
+        .await;
+    assert_eq!(
+        own.status,
+        StatusCode::FORBIDDEN,
+        "buyers never record payments"
+    );
     let paid = app
         .call(Method::POST, &path, Some(&shop.organizer), Some(body))
         .await;
@@ -1559,7 +1607,17 @@ async fn organizers_reach_the_buyers_of_their_events() {
     let stranger = app
         .call(Method::GET, &path, Some(&other_shop.organizer), None)
         .await;
-    assert_eq!(stranger.status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        stranger.status,
+        StatusCode::NOT_FOUND,
+        "hidden from other organizers"
+    );
+    let themself = app.call(Method::GET, &path, Some(&buyer), None).await;
+    assert_eq!(
+        themself.status,
+        StatusCode::FORBIDDEN,
+        "buyers read no buyers"
+    );
     let not_a_buyer = app
         .call(
             Method::GET,

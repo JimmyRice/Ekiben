@@ -37,7 +37,7 @@ pub use purchasing::{
     Hold, Holds, InventoryTx, LineItems, PurchaseStore, PurchasesTx, QueuedRequest, QuotaLine,
     QuotaLines, ReservationsTx,
 };
-pub use queue::{EventBus, InboxDelivery, PurchaseInbox};
+pub use queue::{Enqueued, EventBus, InboxDelivery, PurchaseInbox};
 pub use store::{Store, StoreCapabilities, StoreTx};
 pub use ticketing::{TicketStore, TicketsTx};
 pub use webhooks::{WebhookRun, WebhookStore};

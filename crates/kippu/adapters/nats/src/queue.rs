@@ -5,6 +5,7 @@ use std::time::Duration;
 use async_nats::HeaderMap;
 use async_nats::jetstream::consumer::pull::Config as PullConfig;
 use async_nats::jetstream::consumer::{AckPolicy, PullConsumer};
+use async_nats::jetstream::publish::PublishAck;
 use async_nats::jetstream::stream::{Config as StreamConfig, RetentionPolicy, Stream};
 use async_nats::jetstream::{self, Context};
 use kippu_store::{StoreError, StoreResult};
@@ -39,7 +40,8 @@ impl Default for NatsOptions {
 /// JetStream as Kippu's purchase inbox and event bus.
 ///
 /// - The inbox is a work-queue stream: [`PurchaseInbox::enqueue`](kippu_store::PurchaseInbox::enqueue) publishes a request with
-///   `Nats-Msg-Id` set to its id and returns once JetStream acknowledged it, and every
+///   `Nats-Msg-Id` set to its id and returns once JetStream acknowledged it; a duplicate is
+///   answered with the message first stored under that id, read back by its sequence. Every
 ///   instance pulls from one durable consumer, acknowledging each request once persisted.
 /// - The bus is a stream of `<prefix>.events.<topic>` subjects, one message per outbox event
 ///   with `Nats-Msg-Id` `outbox-<sequence>` and a `Kippu-Sequence` header; the last message
@@ -49,6 +51,7 @@ pub struct NatsQueue {
     jetstream: Context,
     pub(crate) inbox_subject: String,
     pub(crate) events_prefix: String,
+    pub(crate) purchases: Stream,
     pub(crate) consumer: PullConsumer,
     pub(crate) events: Stream,
     pub(crate) receive_wait: Duration,
@@ -102,20 +105,22 @@ impl NatsQueue {
             jetstream,
             inbox_subject,
             events_prefix,
+            purchases,
             consumer,
             events,
             receive_wait: options.receive_wait,
         })
     }
 
-    /// Publishes with `id` as `Nats-Msg-Id`, waiting for JetStream to acknowledge it.
+    /// Publishes with `id` as `Nats-Msg-Id`, waiting for JetStream to acknowledge it. A
+    /// duplicate's acknowledgement carries the sequence of the message first stored under `id`.
     pub(crate) async fn publish(
         &self,
         subject: String,
         id: String,
         headers: HeaderMap,
         payload: Vec<u8>,
-    ) -> StoreResult<()> {
+    ) -> StoreResult<PublishAck> {
         let mut headers = headers;
         headers.insert("Nats-Msg-Id", id.as_str());
         kippu_telemetry::call("nats", "publish", async {
@@ -124,8 +129,7 @@ impl NatsQueue {
                 .await
                 .map_err(unavailable)?
                 .await
-                .map_err(unavailable)?;
-            Ok(())
+                .map_err(unavailable)
         })
         .await
     }

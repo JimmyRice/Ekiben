@@ -38,7 +38,7 @@ Keep the repository root uncluttered and do not add speculative `.gitignore` ent
 ## Commands
 
 ```bash
-cargo test --workspace --all-features                                   # 431 tests incl. e2e over TCP
+cargo test --workspace --all-features                                   # 433 tests incl. e2e over TCP
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets           # default features too
 cargo fmt --all
@@ -246,8 +246,10 @@ Do not change these unless the user explicitly asks.
 - **Payments:** the backend integrates no payment provider. Attestors with registered Ed25519
   keys report signed results (`spec/attestor-protocol.md`).
 - **Messaging is optional** (database is the queue); the first MQ adapter is NATS JetStream.
-  Known edge: the same idempotency key retried with a *different* cart before it reaches the
-  database is dropped by JetStream dedup; the first cart wins.
+  A retry still in the inbox is dropped by JetStream dedup and answered as the database
+  would: the duplicate's ack names the first message, read back by sequence, so a different
+  cart gets `idempotency-key-reused`. Known edge: after the dedup window (10 minutes) a
+  request still unpersisted is enqueued again and the first cart wins silently.
 - **Webhooks:** deployment-wide Ed25519 key, public key at `/.well-known/kippu/webhook-keys`,
   same signature format as attestors; subscriptions per organization (`spec/webhook-protocol.md`).
 - **Bindings:** Swift/Kotlin/C# via UniFFI, C/C++/firmware via the hand-written C ABI. C++ stays

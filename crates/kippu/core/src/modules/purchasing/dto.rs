@@ -11,6 +11,7 @@ use crate::http::{ListingTag, PageQuery};
 
 /// What to buy. Send it with an `Idempotency-Key` header; retrying with the same key is safe.
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PurchaseRequestBody {
     /// Ticket types and quantities.
     pub items: Vec<LineItem>,
@@ -29,6 +30,7 @@ pub struct GrantRequest {
 
 /// Choose how to pay for a reservation.
 #[derive(Debug, Default, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CheckoutRequest {
     /// The attestor (payment method) to pay with. Omit for free reservations, which are
     /// settled immediately.
