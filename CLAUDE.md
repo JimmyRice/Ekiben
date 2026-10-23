@@ -38,7 +38,7 @@ Keep the repository root uncluttered and do not add speculative `.gitignore` ent
 ## Commands
 
 ```bash
-cargo test --workspace --all-features                                   # 430 tests incl. e2e over TCP
+cargo test --workspace --all-features                                   # 431 tests incl. e2e over TCP
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets           # default features too
 cargo fmt --all
@@ -269,16 +269,19 @@ Do not change these unless the user explicitly asks.
   fingerprint (`email_hash`, unique, kept for every account) and the external identities stay,
   so neither can make another account (no way back: Kippu does not verify emails, so a
   "restore" would let anyone with the address take over the old tickets). Closed accounts
-  change no more; `sessions::issue` refuses them (`account-closed`).
+  change no more; `sessions::issue` refuses them (`account-closed`). Closing leaves the
+  account's unpaid reservations to expire; a payment for one answers `refund_required` and
+  releases the hold (nobody could fetch the tickets).
 - **Event status and sales:** only a published event sells (front door and worker; a request
   queued before a cancellation is rejected). An event someone ordered for (a reservation not
   expired or cancelled) can be cancelled but not withdrawn to a draft. Cancelling is final
   (`illegal-transition` for any other status; other fields stay editable): buyers and gates
-  were told, so a revived event is a new event. A payment for an event no longer on sale
-  answers `refund_required`, also for a reservation still holding stock (the hold is
-  released). A late payment for a lapsed reservation takes its tickets again only as a
-  purchase could (event on sale, account open and not denied; the sale window is not
-  checked, the buyer checked out within it), otherwise it answers `refund_required`.
+  were told, so a revived event is a new event. A payment for an event no longer on sale, or
+  from a closed account, answers `refund_required`, also for a reservation still holding
+  stock (the hold is released). A late payment for a lapsed reservation takes its tickets
+  again only as a purchase could (event on sale, account open and not denied; the sale
+  window is not checked, the buyer checked out within it), otherwise it answers
+  `refund_required`.
 - **Waiting rooms:** buyers may join before the sale opens and keep the order they joined in;
   nobody is admitted before `opens_at` (with no purchases yet the backlog is empty and would
   let the whole room through), then one batch per tick while the backlog is below
@@ -430,6 +433,8 @@ Do not change these unless the user explicitly asks.
   in them, work until they expire (`auth.access_token_ttl_seconds`, 15 minutes by default).
 - Withdrawing an event checks for orders, then updates it; a purchase the worker commits in
   between leaves a reservation on a draft (rare; the organizer publishes or cancels it).
+- A payment reads whether its account is closed before its transaction: one recorded while
+  the account closes can still issue tickets to it (rare; an organizer refunds them).
 - The generic `Idempotency-Key` middleware does not stop two simultaneous first requests with
   the same key from both running (purchases and payments are idempotent on their own). A strict
   fix is a "processing" placeholder row.

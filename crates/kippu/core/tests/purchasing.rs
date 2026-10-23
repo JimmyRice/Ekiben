@@ -380,6 +380,45 @@ async fn a_late_payment_from_a_denied_account_requires_a_refund() {
 }
 
 #[tokio::test]
+async fn a_payment_from_a_closed_account_requires_a_refund() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let attestor = app.attestor("live").await;
+    app.accept_attestor(&shop, &attestor.id).await;
+    let buyer = app.buyer().await;
+    let reservation = app.reserve(&buyer, &shop, 2).await;
+    let closed = app
+        .call(
+            Method::DELETE,
+            "/v1/me",
+            Some(&buyer),
+            Some(json!({ "current_password": "correct horse battery" })),
+        )
+        .await;
+    assert_eq!(closed.status, StatusCode::NO_CONTENT, "{:?}", closed.body);
+
+    // The hold is still live, but nobody could fetch its tickets: the money and the stock
+    // come back.
+    let (paid, left) = pay_late(&app, &shop, &attestor, &reservation).await;
+    assert_eq!(paid["disposition"], "refund_required", "{paid:?}");
+    assert_eq!(paid["reservation"]["status"], "refund_required");
+    assert_eq!(paid["ticket_ids"], json!([]));
+    assert_eq!(left, 10, "the hold was released");
+
+    let feed = app
+        .signed(&attestor, Method::GET, "/v1/attestor/feed", None)
+        .await;
+    assert!(
+        feed.body.as_array().unwrap().iter().any(|entry| {
+            entry["event"]["topic"] == "refund.required"
+                && entry["event"]["attestation_id"] == "late"
+        }),
+        "{:?}",
+        feed.body
+    );
+}
+
+#[tokio::test]
 async fn a_second_payment_for_the_same_reservation_is_refunded() {
     let app = TestApp::start().await;
     let shop = app.shop(10, 1_000, json!({})).await;

@@ -86,7 +86,7 @@ The response says what became of the money:
 | `disposition` | Meaning | What the attestor does |
 |---|---|---|
 | `applied` | Tickets were issued, in the same transaction that recorded the payment. | Nothing. |
-| `refund_required` | The money cannot be used: the event was cancelled; the reservation lapsed and its tickets sold out, or the buyer was denied entry or closed the account meanwhile; or the reservation was already paid. | Refund the buyer, then report it (§5). |
+| `refund_required` | The money cannot be used: the event was cancelled or the buyer closed the account; the reservation lapsed and its tickets sold out, or the buyer was denied entry meanwhile; or the reservation was already paid. | Refund the buyer, then report it (§5). |
 
 A 200 with `refund_required` is a successful delivery: stop retrying. Kippu also records a
 `refund.required` event in the feed.
