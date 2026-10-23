@@ -11,7 +11,9 @@ use kippu_domain::validation::IdempotencyKey;
 use kippu_domain::{
     AccountId, Duration, Money, PurchaseRequestId, ReservationId, SaleId, TicketTypeId,
 };
-use kippu_store::{BoxError, Holds, Insertion, LineItems, QueuedRequest, QuotaLines, StoreTx};
+use kippu_store::{
+    BoxError, Enqueued, Holds, Insertion, LineItems, QueuedRequest, QuotaLines, StoreTx,
+};
 use tracing::Instrument;
 
 use crate::app::AppState;
@@ -37,7 +39,8 @@ fn resubmitted(existing: PurchaseRequest, basket: &Basket) -> ApiResult<Purchase
 ///
 /// With an inbox the request is accepted into it and persisted by a worker later, unless the
 /// database already has it. A retry while the first attempt is still in the inbox is
-/// dropped by the inbox's deduplication; if its basket differed, the first one wins.
+/// dropped by the inbox's deduplication and answered as the database would: with the first
+/// attempt, or `idempotency-key-reused` if its basket differed.
 #[tracing::instrument(skip_all)]
 pub(super) async fn submit(
     state: &AppState,
@@ -60,9 +63,20 @@ pub(super) async fn submit(
         if let Some(existing) = state.store().purchase_request(request.id).await? {
             return resubmitted(existing, &request.basket);
         }
-        inbox.enqueue(&request).await?;
-        tracing::info!(id = %request.id, "purchase request accepted into the inbox");
-        return Ok(request);
+        return match inbox.enqueue(&request).await? {
+            Enqueued::Accepted => {
+                tracing::info!(id = %request.id, "purchase request accepted into the inbox");
+                Ok(request)
+            }
+            Enqueued::Duplicate(Some(first)) => resubmitted(first, &request.basket),
+            // It left the inbox meanwhile, so the database has it now.
+            Enqueued::Duplicate(None) => match state.store().purchase_request(request.id).await? {
+                Some(existing) => resubmitted(existing, &request.basket),
+                None => Err(ApiError::unavailable(
+                    "the inbox no longer holds a request the database does not have yet",
+                )),
+            },
+        };
     }
     match state.store().insert_purchase_request(&request).await? {
         Insertion::Inserted => {

@@ -159,21 +159,29 @@ pub async fn manual_payment(
     reservation_id: ReservationId,
     payment: ManualPayment,
 ) -> ApiResult<PaymentResult> {
+    // Refused by role before anything is read; organizers of other events are told the
+    // reservation does not exist.
+    if !state.policy().allows(principal.role(), PAYMENTS_MANUAL) {
+        return Err(ApiError::forbidden());
+    }
+    let not_found = || ApiError::not_found("reservation");
     let reservation = state
         .store()
         .reservation(reservation_id)
         .await?
-        .ok_or_else(|| ApiError::not_found("reservation"))?;
+        .ok_or_else(not_found)?;
     let event = state
         .store()
         .event_summary(reservation.event_id)
         .await?
-        .ok_or_else(|| ApiError::not_found("event"))?;
-    state.authorize(
+        .ok_or_else(not_found)?;
+    if !state.policy().permits(
         principal,
         PAYMENTS_MANUAL,
         Scope::Organization(event.organization_id),
-    )?;
+    ) {
+        return Err(not_found());
+    }
     let manual = state
         .store()
         .attestor(AttestorId::MANUAL)

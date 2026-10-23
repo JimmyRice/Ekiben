@@ -203,8 +203,8 @@ pub(crate) async fn list_event_reservations(
     params(("event_id" = EventId, Path), ("account_id" = AccountId, Path)),
     responses(
         (status = 200, body = BuyerView),
-        (status = 403, body = Problem),
-        (status = 404, description = "No such buyer of this event", body = Problem)
+        (status = 403, description = "Not an organizer", body = Problem),
+        (status = 404, description = "No such buyer of your event", body = Problem)
     )
 )]
 pub(crate) async fn get_buyer(

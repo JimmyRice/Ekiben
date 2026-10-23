@@ -10,7 +10,7 @@ use kippu_domain::outbox::IntegrationEvent;
 use kippu_domain::purchase::{Basket, LineItem, PurchaseRequest, PurchaseStatus};
 use kippu_domain::{AccountId, PurchaseRequestId, ReservationId, SaleId, TicketTypeId, Timestamp};
 use kippu_nats::{NatsOptions, NatsQueue};
-use kippu_store::{EventBus, OutboxRecord, PurchaseInbox};
+use kippu_store::{Enqueued, EventBus, OutboxRecord, PurchaseInbox};
 
 async fn queue(ack_wait: Duration) -> Option<(NatsQueue, String, String)> {
     let url = std::env::var("EKIBEN_TEST_NATS_URL").ok()?;
@@ -50,9 +50,15 @@ async fn the_inbox_deduplicates_and_redelivers_until_acknowledged() {
         return;
     };
     let (first, second) = (request(), request());
-    inbox.enqueue(&first).await.unwrap();
-    inbox.enqueue(&first).await.unwrap(); // a retry
-    inbox.enqueue(&second).await.unwrap();
+    assert_eq!(inbox.enqueue(&first).await.unwrap(), Enqueued::Accepted);
+    // A retry, with another basket: answered with the request first stored.
+    let mut retry = first.clone();
+    retry.basket = second.basket.clone();
+    assert_eq!(
+        inbox.enqueue(&retry).await.unwrap(),
+        Enqueued::Duplicate(Some(first.clone()))
+    );
+    assert_eq!(inbox.enqueue(&second).await.unwrap(), Enqueued::Accepted);
 
     let delivered = inbox.receive(10).await.unwrap();
     let ids: Vec<_> = delivered
@@ -78,6 +84,11 @@ async fn the_inbox_deduplicates_and_redelivers_until_acknowledged() {
     assert!(
         inbox.receive(10).await.unwrap().is_empty(),
         "acknowledged for good"
+    );
+    assert_eq!(
+        inbox.enqueue(&first).await.unwrap(),
+        Enqueued::Duplicate(None),
+        "still deduplicated, no longer held"
     );
 }
 
