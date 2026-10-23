@@ -223,6 +223,11 @@ pub async fn settle(
         .event_summary(reservation.event_id)
         .await?
         .ok_or_else(|| ApiError::not_found("event"))?;
+    // Tickets of a closed account reach nobody: it cannot sign in to fetch them.
+    let account_open = store
+        .account(reservation.account_id)
+        .await?
+        .is_some_and(|account| !account.is_closed());
     check_payment(attestor, &sale, &reservation, &payment)?;
     let ticket_types = store.list_ticket_types(reservation.sale_id).await?;
 
@@ -249,11 +254,12 @@ pub async fn settle(
 
     let items = line_items(&reservation);
     let view = match reservation.status.settle() {
-        Settlement::Issue if event.is_on_sale() => {
+        Settlement::Issue if event.is_on_sale() && account_open => {
             tx.inventory().sell_held(&items).await?;
             issue(state, &mut *tx, reservation, &ticket_types, now).await?
         }
-        // Called off while the money was on its way: give back the hold, return the money.
+        // Called off, or the account closed, while the money was on its way: give back the
+        // hold, return the money.
         Settlement::Issue => {
             let mut reservation = reservation;
             reservation.status = reservation.status.require_refund()?;
@@ -263,7 +269,7 @@ pub async fn settle(
         }
         Settlement::Reacquire => {
             let account = reservation.account_id;
-            let quota = may_reacquire(state, &event, &reservation).await?
+            let quota = may_reacquire(state, &event, &reservation, account_open).await?
                 && tx
                     .inventory()
                     .try_take_quota(account, &holds(&items, &ticket_types)?)
@@ -330,24 +336,20 @@ fn check_payment(
 /// as a purchase would, only while its event is on sale and for an account that is open and
 /// not denied entry. The sale's window is not checked: the buyer checked out while it was
 /// open. Read outside the payment's transaction, like the worker's catalog checks; only late
-/// payments pay for the account reads.
+/// payments pay for the denial read.
 async fn may_reacquire(
     state: &AppState,
     event: &EventSummary,
     reservation: &Reservation,
+    account_open: bool,
 ) -> ApiResult<bool> {
-    let store = state.store();
-    if !event.is_on_sale() {
+    if !event.is_on_sale() || !account_open {
         return Ok(false);
     }
-    let open = store
-        .account(reservation.account_id)
-        .await?
-        .is_some_and(|account| !account.is_closed());
-    Ok(open
-        && !store
-            .account_denied(event.organization_id, event.id, reservation.account_id)
-            .await?)
+    Ok(!state
+        .store()
+        .account_denied(event.organization_id, event.id, reservation.account_id)
+        .await?)
 }
 
 fn log_settlement(attestor: &Attestor, view: &PaymentResult) {
