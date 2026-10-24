@@ -42,6 +42,10 @@ kippu-attestor-v1
 Kippu rejects the request (401) if the attestor or key is unknown or revoked, the signature
 does not verify, or `ts` is more than 300 seconds from Kippu's clock.
 
+Send only the fields and query parameters this document names. Kippu refuses anything else,
+so a misspelled field fails instead of being ignored: `422 invalid-json` for an unknown field in
+a body, `400 invalid-parameter` for an unknown query parameter. Neither is worth retrying.
+
 ## 3. Learning what to charge
 
 When a buyer checks out with an attestor, Kippu records a `payment.requested` event:

@@ -74,6 +74,11 @@ Ok(Json(sessions::issue(&state, linked.account).await?))
 Keep the module stateless like the rest of Kippu: anything that must survive from `start` to
 `callback` travels with the client (a cookie, the app) or is signed.
 
+Give the module's own request bodies and queries `#[serde(deny_unknown_fields)]`, as Kippu's
+are, so a misspelled field is refused instead of ignored. The `callback` query is the
+exception: the provider writes it, and providers add parameters of their own (`scope`, `iss`,
+`authuser`…), so keep it lenient.
+
 The `external_login` example in `crates/kippu/server/examples` is a complete module with a
 pretend provider that approves everyone, so it runs without registering anywhere:
 

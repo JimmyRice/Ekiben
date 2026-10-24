@@ -463,7 +463,7 @@ async fn events_carry_a_structured_address_besides_the_venue() {
     assert_eq!(online.body["address"], json!(null));
 
     // A full update states the address too; leaving it out means none.
-    let mut moved = online.body.clone();
+    let mut moved = support::editable(online.body.clone());
     moved["venue"] = json!("Makuhari Messe");
     moved["address"] = json!({ "country": "JP", "street": "中瀬2-1" });
     let moved = app

@@ -195,7 +195,11 @@ Content-Type: application/merge-patch+json
 { "version": 1, "accepted_attestors": ["{{attestor_id}}"] }
 ```
 
-Publish the event the same way:
+`PUT` replaces every editable field at once instead. Like every body, it holds only the fields
+the OpenAPI document lists: a misspelled field, or a read-only one such as `id` or
+`created_at` echoed from a `GET`, fails with `422 invalid-json` instead of being ignored.
+
+Publish the event with a `PATCH` the same way:
 
 ```http
 PATCH /v1/events/{{event_id}} HTTP/1.1

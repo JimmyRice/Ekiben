@@ -38,7 +38,7 @@ Keep the repository root uncluttered and do not add speculative `.gitignore` ent
 ## Commands
 
 ```bash
-cargo test --workspace --all-features                                   # 433 tests incl. e2e over TCP
+cargo test --workspace --all-features                                   # 436 tests incl. e2e over TCP
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets           # default features too
 cargo fmt --all
@@ -108,6 +108,15 @@ as `shop`, `attestor`, `reserve`, `drain`); the full journey over real TCP is
   `payload-too-large`). Errors the framework answers (unknown route, wrong method, bad path
   parameter, panic, timeout) are rewritten into problems by `http/problems.rs`; clients see one
   error format.
+- **Strict input:** every request body and query struct carries
+  `#[serde(deny_unknown_fields)]`, so a misspelled field is refused (`invalid-json`,
+  `invalid-parameter`) instead of silently ignored; `tests/request_bodies.rs` checks every body
+  in the OpenAPI document. PUT takes the editable fields only, so echoing a GET's read-only
+  fields (`id`, `created_at`, …) is refused too. Domain types nested in bodies that are also
+  stored or queued (`Money`, `LineItem`, `AdmissionPolicy`) stay lenient, so a field added later
+  cannot break instances still reading rows during a rolling upgrade. Input written by others
+  stays lenient: `RootClaims` (JWT libraries add standard claims) and OAuth callback queries
+  in sign-in modules (providers add parameters).
 - **Idempotency:** anything that may be retried must be safe to repeat (derived ids, unique
   keys returning `Insertion::Existing`, status checks before transitions). Handlers that are
   idempotent by design are declared in `Module::idempotent_routes`; the `Idempotency-Key`

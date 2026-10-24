@@ -443,7 +443,7 @@ impl TestApp {
         );
         let ticket_type_id = ticket_type.body["id"].as_str().unwrap().to_owned();
 
-        let mut published = event.body.clone();
+        let mut published = editable(event.body.clone());
         published["status"] = json!("published");
         let published = self
             .call(
@@ -474,7 +474,7 @@ impl TestApp {
                 None,
             )
             .await;
-        let mut sale = sale.body;
+        let mut sale = editable(sale.body);
         sale["accepted_attestors"] = json!([attestor_id]);
         let updated = self
             .call(
@@ -633,4 +633,23 @@ fn rand_bytes() -> [u8; 32] {
     let mut bytes = [0; 32];
     getrandom::fill(&mut bytes).unwrap();
     bytes
+}
+
+/// What a GET returned, as a PUT takes it: without the read-only fields, which a PUT refuses
+/// like any unknown field.
+pub fn editable(mut resource: Value) -> Value {
+    let fields = resource.as_object_mut().unwrap();
+    for read_only in [
+        "id",
+        "organization_id",
+        "event_id",
+        "sale_id",
+        "created_at",
+        "updated_at",
+        "ticket_types",
+        "available",
+    ] {
+        fields.remove(read_only);
+    }
+    resource
 }
