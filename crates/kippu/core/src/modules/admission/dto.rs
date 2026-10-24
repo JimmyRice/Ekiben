@@ -18,6 +18,7 @@ pub struct QueuePlace {
 
 /// Ask whether it is your turn.
 #[derive(Debug, Default, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AdmissionRequest {
     /// The ticket from joining the waiting room. Not needed for sales without one.
     pub queue_ticket: Option<String>,

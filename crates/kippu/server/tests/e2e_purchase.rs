@@ -320,7 +320,11 @@ async fn a_ticket_bought_through_the_whole_pipeline_passes_the_gate() {
         )
         .await;
     let attestor_id = attestor.body["id"].as_str().unwrap().to_owned();
+    // A PUT takes the editable fields only: drop what the server wrote.
     let mut sale = sale.body;
+    for read_only in ["id", "event_id", "created_at"] {
+        sale.as_object_mut().unwrap().remove(read_only);
+    }
     sale["accepted_attestors"] = json!([attestor_id]);
     assert_eq!(
         client
@@ -335,6 +339,9 @@ async fn a_ticket_bought_through_the_whole_pipeline_passes_the_gate() {
         200
     );
     let mut event = event.body;
+    for read_only in ["id", "organization_id", "created_at", "updated_at"] {
+        event.as_object_mut().unwrap().remove(read_only);
+    }
     event["status"] = json!("published");
     assert_eq!(
         client

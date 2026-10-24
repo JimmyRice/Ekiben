@@ -203,6 +203,7 @@ pub(crate) fn required_version(version: Option<i64>) -> Result<i64, ValidationEr
 
 /// A new event. It starts as a draft.
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateEventRequest {
     /// URL-friendly unique name.
     pub slug: String,
@@ -229,6 +230,7 @@ pub struct CreateEventRequest {
 
 /// An event's new state. `version` must be the version you last read.
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateEventRequest {
     /// The version you are editing; a mismatch fails with 412.
     pub version: i64,
@@ -258,6 +260,7 @@ pub struct UpdateEventRequest {
 
 /// A sale's settings, for creating or (with `version`) updating it.
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SaleRequest {
     /// Required when updating: the version you are editing.
     pub version: Option<i64>,
@@ -308,6 +311,7 @@ const fn live() -> Environment {
 
 /// A ticket type's settings, for creating or (with `version`) updating it.
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TicketTypeRequest {
     /// Required when updating: the version you are editing.
     pub version: Option<i64>,

@@ -14,6 +14,7 @@ use crate::http::{ListingTag, PageQuery};
 
 /// Sign up as a user.
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RegisterRequest {
     /// Sign-in address.
     pub email: String,
@@ -25,6 +26,7 @@ pub struct RegisterRequest {
 
 /// Sign in with email and password.
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct LoginRequest {
     /// Sign-in address.
     pub email: String,
@@ -34,6 +36,7 @@ pub struct LoginRequest {
 
 /// Exchange a refresh token for new tokens. The old refresh token stops working.
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RefreshRequest {
     /// The refresh token from the previous sign-in or refresh.
     pub refresh_token: String,
@@ -41,6 +44,7 @@ pub struct RefreshRequest {
 
 /// Set your email address.
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SetEmailRequest {
     /// The new sign-in address.
     pub email: String,
@@ -48,6 +52,7 @@ pub struct SetEmailRequest {
 
 /// Set or change your password.
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SetPasswordRequest {
     /// Your current password. Leave it out only if the account has none yet (it was
     /// created through an external sign-in).
@@ -70,6 +75,7 @@ pub struct ProfilePatch {
 
 /// Close your account.
 #[derive(Debug, Default, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CloseAccountRequest {
     /// Your password. Leave it out (or send no body at all) only if the account has none (it
     /// was created through an external sign-in).
@@ -96,6 +102,7 @@ pub enum Me {
 
 /// Create an account of a role below the caller's.
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateAccountRequest {
     /// Sign-in address.
     pub email: String,
@@ -150,6 +157,7 @@ pub struct AccountView {
 
 /// Create an organization.
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateOrganizationRequest {
     /// URL-friendly unique name.
     pub slug: String,
@@ -159,6 +167,7 @@ pub struct CreateOrganizationRequest {
 
 /// Replace an organization's slug and name.
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateOrganizationRequest {
     /// URL-friendly unique name.
     pub slug: String,

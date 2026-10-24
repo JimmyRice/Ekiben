@@ -19,6 +19,7 @@ use crate::keys::encode_key;
 
 /// Register an attestor and its first keys.
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateAttestorRequest {
     /// Display name, shown to buyers as a payment method, e.g. "Credit card (Stripe)".
     pub name: String,
@@ -31,6 +32,7 @@ pub struct CreateAttestorRequest {
 
 /// Register a signing key for an attestor.
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AttestorKeyRequest {
     /// The attestor's name for the key, sent in `Kippu-Signature`.
     pub key_id: String,
@@ -40,6 +42,7 @@ pub struct AttestorKeyRequest {
 
 /// Revoke or restore.
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RevokedRequest {
     /// `true` to stop believing it.
     pub revoked: bool,
@@ -82,6 +85,7 @@ pub enum PaymentOutcome {
 
 /// An attestor's statement about a payment. Send it signed (see `Kippu-Signature`).
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AttestationRequest {
     /// The attestor's own reference for the payment, unique per attestor. Retries reuse it.
     pub attestation_id: String,
@@ -100,6 +104,7 @@ pub struct AttestationRequest {
 
 /// Record a payment taken in person.
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ManualPaymentRequest {
     /// Your reference for the payment, e.g. a receipt number. Unique.
     pub attestation_id: String,
@@ -135,6 +140,7 @@ pub struct RefundTicketsRequest {
 
 /// Where to continue reading an event feed.
 #[derive(Debug, Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
 #[into_params(parameter_in = Query)]
 pub struct FeedQuery {
     /// Return events after this sequence number (default 0).

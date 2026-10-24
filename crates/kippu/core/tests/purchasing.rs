@@ -463,7 +463,7 @@ async fn untrusted_payments_are_refused() {
             None,
         )
         .await;
-    let mut sale = sale.body;
+    let mut sale = support::editable(sale.body);
     sale["accepted_attestors"] = json!([live.id, sandbox.id]);
     app.call(
         Method::PUT,
@@ -848,6 +848,33 @@ async fn purchase_and_checkout_bodies_refuse_unknown_fields() {
 }
 
 #[tokio::test]
+async fn unknown_query_parameters_are_refused() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let attestor = app.attestor("live").await;
+    let buyer = app.buyer().await;
+    let submitted = app.purchase(&buyer, &shop, 1, "query").await;
+    let poll = app
+        .call(
+            Method::GET,
+            &format!(
+                "/v1/purchase-requests/{}?reciept=x",
+                submitted.body["id"].as_str().unwrap()
+            ),
+            Some(&buyer),
+            None,
+        )
+        .await;
+    assert_eq!(poll.status, StatusCode::BAD_REQUEST, "{:?}", poll.body);
+    assert_eq!(poll.body["type"], "urn:kippu:problem:invalid-parameter");
+    let feed = app
+        .signed(&attestor, Method::GET, "/v1/attestor/feed?since=0", None)
+        .await;
+    assert_eq!(feed.status, StatusCode::BAD_REQUEST, "{:?}", feed.body);
+    assert_eq!(feed.body["type"], "urn:kippu:problem:invalid-parameter");
+}
+
+#[tokio::test]
 async fn free_tickets_are_issued_at_checkout() {
     let app = TestApp::start().await;
     let shop = app.shop(10, 0, json!({})).await;
@@ -992,7 +1019,7 @@ async fn drafts_are_invisible_to_the_public() {
             None,
         )
         .await;
-    let mut draft = event.body;
+    let mut draft = support::editable(event.body);
     draft["status"] = json!("draft");
     app.call(
         Method::PUT,
@@ -1486,7 +1513,7 @@ async fn buyers_see_the_payment_methods_a_sale_accepts() {
     let free = "00000000-0000-0000-0000-000000000001";
     let manual = "00000000-0000-0000-0000-000000000002";
     let sale_path = format!("/v1/sales/{}", shop.sale_id);
-    let mut sale = app.call(Method::GET, &sale_path, None, None).await.body;
+    let mut sale = support::editable(app.call(Method::GET, &sale_path, None, None).await.body);
     sale["accepted_attestors"] = json!([sandbox.id, manual, live.id, free]);
     let updated = app
         .call(Method::PUT, &sale_path, Some(&shop.organizer), Some(sale))

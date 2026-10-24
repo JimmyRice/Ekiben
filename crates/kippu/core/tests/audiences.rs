@@ -299,7 +299,7 @@ async fn invitation_lists_are_kept_by_organizers() {
         Vec::<String>::new()
     );
     // A full update without the field leaves it as it is.
-    let mut replaced = patched.body.clone();
+    let mut replaced = support::editable(patched.body.clone());
     replaced.as_object_mut().unwrap().remove("audience");
     let replaced = app
         .call(
