@@ -16,6 +16,8 @@ POST /v1/admin/attestors
 
 - `environment` is `live` or `sandbox`. A sandbox attestor can never settle a live sale.
 - Each sale lists the attestors it accepts (`accepted_attestors`). Organizers choose per sale.
+  A reservation checked out with an attestor keeps accepting that attestor's payment even if
+  the sale stops accepting it afterwards: the buyer may already have paid.
 - Revoking an attestor or a key (`PUT …/revoked`) takes effect on every instance immediately.
   Adding a key alongside the old one allows rotation without downtime.
 
