@@ -305,14 +305,18 @@ pub async fn settle(
 }
 
 /// Refuses a payment Kippu must not record: from an attestor the sale does not accept, from a
-/// sandbox for a live sale, or of the wrong amount.
+/// sandbox for a live sale, or of the wrong amount. The attestor the buyer checked out with
+/// stays accepted for that reservation even if the sale drops it later: the buyer may already
+/// have paid it, and refusing the report would leave the money with neither tickets nor a
+/// refund obligation.
 fn check_payment(
     attestor: &Attestor,
     sale: &Sale,
     reservation: &Reservation,
     payment: &IncomingPayment,
 ) -> ApiResult<()> {
-    if !attestor.id.is_builtin() && !sale.accepts(attestor.id) {
+    let chosen_at_checkout = reservation.attestor_id == Some(attestor.id);
+    if !attestor.id.is_builtin() && !chosen_at_checkout && !sale.accepts(attestor.id) {
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,
             ProblemKind::ATTESTOR_NOT_ACCEPTED,

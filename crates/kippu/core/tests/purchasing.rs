@@ -523,6 +523,42 @@ async fn untrusted_payments_are_refused() {
 }
 
 #[tokio::test]
+async fn the_checkout_attestor_settles_after_the_sale_drops_it() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let wallet = app.attestor("live").await;
+    let card = app.attestor("live").await;
+    app.accept_attestor(&shop, &wallet.id).await;
+    let buyer = app.buyer().await;
+    let chosen = app.reserve(&buyer, &shop, 1).await;
+    let other = app.reserve(&app.buyer().await, &shop, 1).await;
+    let checkout = app
+        .call(
+            Method::POST,
+            &format!(
+                "/v1/reservations/{}/checkout",
+                chosen["id"].as_str().unwrap()
+            ),
+            Some(&buyer),
+            Some(json!({ "attestor_id": wallet.id })),
+        )
+        .await;
+    assert_eq!(checkout.body["status"], "payment_pending");
+
+    // The organizer stops taking the wallet while the buyer is paying with it.
+    app.accept_attestor(&shop, &card.id).await;
+
+    let paid = app.pay(&wallet, "w-1", &chosen).await;
+    assert_eq!(paid.status, StatusCode::OK, "{:?}", paid.body);
+    assert_eq!(paid.body["disposition"], "applied");
+    // A reservation that did not choose the wallet is refused as before.
+    assert_eq!(
+        app.pay(&wallet, "w-2", &other).await.body["type"],
+        "urn:kippu:problem:attestor-not-accepted"
+    );
+}
+
+#[tokio::test]
 async fn the_waiting_room_admits_in_batches() {
     let app = TestApp::start().await;
     let shop = app.shop(10, 1_000, json!({ "admission": { "mode": "waiting_room", "admit_per_tick": 2, "max_backlog": 100 } })).await;
