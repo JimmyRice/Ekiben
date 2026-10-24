@@ -251,16 +251,18 @@ pub async fn settle(
         disposition: PaymentDisposition::Applied,
     };
     let mut tx = store.begin().await?;
-    if let Insertion::Existing(existing) = tx.payments().insert_attestation(&attestation).await? {
-        drop(tx);
-        check_same_payment(&existing, attestation.reservation_id, attestation.amount)?;
-        return replay(state, existing).await;
-    }
+    // The reservation first: inserting the attestation share-locks it through the foreign
+    // key, so two payments that each did that and then asked to lock it would deadlock.
     let reservation = tx
         .reservations()
         .lock_reservation(payment.reservation_id)
         .await?
         .ok_or_else(|| ApiError::not_found("reservation"))?;
+    if let Insertion::Existing(existing) = tx.payments().insert_attestation(&attestation).await? {
+        drop(tx);
+        check_same_payment(&existing, attestation.reservation_id, attestation.amount)?;
+        return replay(state, existing).await;
+    }
 
     let items = line_items(&reservation);
     let view = match reservation.status.settle() {
