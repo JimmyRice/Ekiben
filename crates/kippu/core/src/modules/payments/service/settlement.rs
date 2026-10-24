@@ -102,8 +102,8 @@ pub(crate) fn holds(items: &LineItems, ticket_types: &[TicketType]) -> ApiResult
     .ok_or_else(|| ApiError::internal("a reserved ticket type no longer exists"))
 }
 
-/// A reservation an attestor may charge for: one of a sale that accepts it. Others look
-/// missing.
+/// A reservation an attestor may charge for: one of a sale that accepts it, or one the buyer
+/// checked out with it. Others look missing.
 #[tracing::instrument(skip_all)]
 pub async fn reservation_for_attestor(
     state: &AppState,
@@ -120,7 +120,7 @@ pub async fn reservation_for_attestor(
         .sale(reservation.sale_id)
         .await?
         .ok_or_else(|| ApiError::not_found("sale"))?;
-    if sale.accepts(attestor.id) {
+    if reservation.attestor_id == Some(attestor.id) || sale.accepts(attestor.id) {
         Ok(reservation)
     } else {
         Err(ApiError::not_found("reservation"))
@@ -215,6 +215,7 @@ pub async fn settle(
         .attestation(attestor.id, &payment.attestation_id)
         .await?
     {
+        check_same_payment(&existing, payment.reservation_id, payment.amount)?;
         return replay(state, existing).await;
     }
 
@@ -252,6 +253,7 @@ pub async fn settle(
     let mut tx = store.begin().await?;
     if let Insertion::Existing(existing) = tx.payments().insert_attestation(&attestation).await? {
         drop(tx);
+        check_same_payment(&existing, attestation.reservation_id, attestation.amount)?;
         return replay(state, existing).await;
     }
     let reservation = tx
@@ -342,6 +344,25 @@ fn check_payment(
         ));
     }
     Ok(())
+}
+
+/// Refuses a delivery that reuses a recorded `attestation_id` for another reservation or
+/// amount: answering it as a replay would tell the attestor that a payment it never recorded
+/// had settled.
+fn check_same_payment(
+    existing: &PaymentAttestation,
+    reservation_id: ReservationId,
+    amount: Money,
+) -> ApiResult<()> {
+    if existing.reservation_id == reservation_id && existing.amount == amount {
+        Ok(())
+    } else {
+        Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ProblemKind::ATTESTATION_ID_REUSED,
+            "this attestation_id was already recorded for another reservation or amount",
+        ))
+    }
 }
 
 /// Whether a lapsed reservation may take its tickets again for a payment that arrived late:
