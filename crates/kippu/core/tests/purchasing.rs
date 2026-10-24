@@ -615,6 +615,31 @@ async fn an_attestation_id_cannot_pay_for_another_reservation() {
     assert_eq!(untouched.body["status"], "reserved");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn simultaneous_payments_for_one_reservation_both_get_an_answer() {
+    let app = TestApp::start().await;
+    let shop = app.shop(20, 1_000, json!({})).await;
+    let card = app.attestor("live").await;
+    app.accept_attestor(&shop, &card.id).await;
+    for round in 0..5 {
+        let reservation = app.reserve(&app.buyer().await, &shop, 1).await;
+        // Two payments of one buyer (say, a double tap), not one payment delivered twice.
+        let (once, twice) = (format!("pi_once_{round}"), format!("pi_twice_{round}"));
+        let (first, second) = tokio::join!(
+            app.pay(&card, &once, &reservation),
+            app.pay(&card, &twice, &reservation),
+        );
+        assert_eq!(first.status, StatusCode::OK, "{:?}", first.body);
+        assert_eq!(second.status, StatusCode::OK, "{:?}", second.body);
+        let mut dispositions = [
+            first.body["disposition"].clone(),
+            second.body["disposition"].clone(),
+        ];
+        dispositions.sort_by_key(ToString::to_string);
+        assert_eq!(dispositions, [json!("applied"), json!("refund_required")]);
+    }
+}
+
 #[tokio::test]
 async fn the_waiting_room_admits_in_batches() {
     let app = TestApp::start().await;
