@@ -8,12 +8,14 @@ mod denials;
 mod errors;
 mod housekeeping;
 mod images;
+mod invitations;
 mod outbox;
 mod payments;
 mod purchasing;
 mod store;
 mod ticketing;
 mod tx;
+mod waiting_rooms;
 mod webhooks;
 
 pub use store::PostgresStore;

@@ -1,7 +1,7 @@
 use async_trait::async_trait;
-use kippu_domain::admission::WaitingRoom;
+use kippu_domain::admission::{AdmissionPolicy, WaitingRoom};
 use kippu_domain::catalog::{Event, EventSummary, Inventory, Sale, TicketType};
-use kippu_domain::validation::CountryCode;
+use kippu_domain::validation::{CountryCode, Slug};
 use kippu_domain::{AccountId, EventId, SaleId, TicketTypeId, Timestamp};
 use kippu_store::{
     CatalogStore, EventFilter, EventOrder, Favorite, Keyset, PageRequest, StoreError, StoreResult,
@@ -12,7 +12,7 @@ use crate::convert::{
     AddressValues, EventRow, EventSummaryRow, InventoryRow, SaleRow, TicketTypeRow, all,
     event_status, extensions_json, instant, json, micros, optional,
 };
-use crate::{SqliteStore, error, unique};
+use crate::{SqliteStore, error, unique, waiting_rooms};
 
 const EVENT_SUMMARY_COLUMNS: &str = "SELECT id, organization_id, slug, title, description, venue, \
      address_country, address_region, address_locality, address_postal_code, address_street, \
@@ -34,7 +34,7 @@ const fn event_order(order: EventOrder) -> (&'static str, &'static str, &'static
     }
 }
 
-const SALE_COLUMNS: &str = "SELECT id, event_id, name, opens_at, closes_at, admission, \
+const SALE_COLUMNS: &str = "SELECT id, event_id, name, audience, opens_at, closes_at, admission, \
      reservation_ttl_seconds, max_tickets_per_request, accepted_attestors, environment, \
      created_at, version FROM sales";
 
@@ -43,7 +43,7 @@ const TICKET_TYPE_COLUMNS: &str = "SELECT id, sale_id, event_id, name, price_min
      created_at, version FROM ticket_types";
 
 /// Fails with `Conflict("version")` unless exactly one row was updated.
-fn expect_one_updated(result: &sqlx::sqlite::SqliteQueryResult) -> StoreResult<()> {
+pub(crate) fn expect_one_updated(result: &sqlx::sqlite::SqliteQueryResult) -> StoreResult<()> {
     if result.rows_affected() == 1 {
         Ok(())
     } else {
@@ -135,6 +135,17 @@ impl CatalogStore for SqliteStore {
         optional(row)
     }
 
+    async fn event_by_slug(&self, slug: &Slug) -> StoreResult<Option<Event>> {
+        let row = sqlx::query_as::<_, EventRow>(sqlx::AssertSqlSafe(format!(
+            "{EVENT_COLUMNS} WHERE slug = ?1"
+        )))
+        .bind(slug.as_str())
+        .fetch_optional(&self.reader)
+        .await
+        .map_err(error)?;
+        optional(row)
+    }
+
     async fn event_summary(&self, id: EventId) -> StoreResult<Option<EventSummary>> {
         let row = sqlx::query_as::<_, EventSummaryRow>(sqlx::AssertSqlSafe(format!(
             "{EVENT_SUMMARY_COLUMNS} WHERE id = ?1"
@@ -183,12 +194,50 @@ impl CatalogStore for SqliteStore {
         all(rows)
     }
 
+    async fn delete_draft_event(&self, id: EventId) -> StoreResult<bool> {
+        let mut tx = self
+            .writer
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(error)?;
+        // Denials name the event without cascading; images and favourites cascade.
+        sqlx::query("DELETE FROM denials WHERE event_id = ?1")
+            .bind(id.as_uuid())
+            .execute(&mut *tx)
+            .await
+            .map_err(error)?;
+        let deleted = sqlx::query(
+            "DELETE FROM events WHERE id = ?1 AND status = 'draft'
+               AND NOT EXISTS (SELECT 1 FROM sales WHERE event_id = ?1)",
+        )
+        .bind(id.as_uuid())
+        .execute(&mut *tx)
+        .await
+        .map_err(error);
+        match deleted {
+            Ok(result) if result.rows_affected() == 1 => {
+                tx.commit().await.map_err(error)?;
+                Ok(true)
+            }
+            // A sale committed meanwhile still references the event.
+            Ok(_) | Err(StoreError::Conflict("reference")) => Ok(false),
+            Err(other) => Err(other),
+        }
+    }
+
     async fn insert_sale(&self, sale: &Sale) -> StoreResult<()> {
+        // A sale's waiting room, if it has one, comes with it in the same transaction; a sale
+        // that takes one later gets it on the first join.
+        let mut tx = self
+            .writer
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(error)?;
         sqlx::query(
             "INSERT INTO sales (id, event_id, name, opens_at, closes_at, admission,
                                 reservation_ttl_seconds, max_tickets_per_request,
-                                accepted_attestors, environment, created_at, version)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                                accepted_attestors, environment, created_at, version, audience)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         )
         .bind(sale.id.as_uuid())
         .bind(sale.event_id.as_uuid())
@@ -202,17 +251,22 @@ impl CatalogStore for SqliteStore {
         .bind(sale.environment.as_str())
         .bind(micros(sale.created_at))
         .bind(sale.version)
-        .execute(&self.writer)
+        .bind(sale.audience.as_str())
+        .execute(&mut *tx)
         .await
         .map_err(error)?;
-        Ok(())
+        if matches!(sale.admission, AdmissionPolicy::WaitingRoom { .. }) {
+            waiting_rooms::create(&mut tx, sale.id).await?;
+        }
+        tx.commit().await.map_err(error)
     }
 
     async fn update_sale(&self, sale: &Sale, expected_version: i64) -> StoreResult<()> {
         let result = sqlx::query(
             "UPDATE sales SET name = ?2, opens_at = ?3, closes_at = ?4, admission = ?5,
                               reservation_ttl_seconds = ?6, max_tickets_per_request = ?7,
-                              accepted_attestors = ?8, environment = ?9, version = ?10
+                              accepted_attestors = ?8, environment = ?9, version = ?10,
+                              audience = ?12
              WHERE id = ?1 AND version = ?11",
         )
         .bind(sale.id.as_uuid())
@@ -226,6 +280,7 @@ impl CatalogStore for SqliteStore {
         .bind(sale.environment.as_str())
         .bind(sale.version)
         .bind(expected_version)
+        .bind(sale.audience.as_str())
         .execute(&self.writer)
         .await
         .map_err(error)?;
@@ -417,6 +472,18 @@ impl CatalogStore for SqliteStore {
         Ok(())
     }
 
+    async fn is_favorite(&self, account: AccountId, event: EventId) -> StoreResult<bool> {
+        let found = sqlx::query_scalar::<_, i64>(
+            "SELECT EXISTS (SELECT 1 FROM favorites WHERE account_id = ?1 AND event_id = ?2)",
+        )
+        .bind(account.as_uuid())
+        .bind(event.as_uuid())
+        .fetch_one(&self.reader)
+        .await
+        .map_err(error)?;
+        Ok(found != 0)
+    }
+
     async fn favorites(
         &self,
         account: AccountId,
@@ -444,61 +511,28 @@ impl CatalogStore for SqliteStore {
             .collect())
     }
 
-    async fn join_waiting_room(&self, sale: SaleId) -> StoreResult<u64> {
-        let position = sqlx::query_scalar::<_, i64>(
-            "INSERT INTO waiting_rooms (sale_id, last_position, admitted_through) VALUES (?1, 1, 0)
-             ON CONFLICT (sale_id) DO UPDATE SET last_position = last_position + 1
-             RETURNING last_position",
-        )
-        .bind(sale.as_uuid())
-        .fetch_one(&self.writer)
-        .await
-        .map_err(error)?;
-        u64::try_from(position).map_err(StoreError::backend)
+    async fn join_waiting_room(&self, sale: SaleId, account: AccountId) -> StoreResult<u64> {
+        waiting_rooms::join(&self.reader, &self.writer, sale, account).await
     }
 
     async fn waiting_room(&self, sale: SaleId) -> StoreResult<WaitingRoom> {
-        let row = sqlx::query_as::<_, (i64, i64)>(
-            "SELECT last_position, admitted_through FROM waiting_rooms WHERE sale_id = ?1",
-        )
-        .bind(sale.as_uuid())
-        .fetch_optional(&self.reader)
-        .await
-        .map_err(error)?;
-        let Some((last_position, admitted_through)) = row else {
-            return Ok(WaitingRoom::default());
-        };
-        Ok(WaitingRoom {
-            last_position: u64::try_from(last_position).map_err(StoreError::backend)?,
-            admitted_through: u64::try_from(admitted_through).map_err(StoreError::backend)?,
-        })
+        waiting_rooms::room(&self.reader, sale).await
     }
 
-    async fn pending_waiting_rooms(&self) -> StoreResult<Vec<SaleId>> {
-        let ids = sqlx::query_scalar::<_, Uuid>(
-            "SELECT sale_id FROM waiting_rooms WHERE admitted_through < last_position ORDER BY sale_id",
-        )
-        .fetch_all(&self.reader)
-        .await
-        .map_err(error)?;
-        Ok(ids.into_iter().map(Into::into).collect())
+    async fn admitted_through(&self, sale: SaleId) -> StoreResult<u64> {
+        waiting_rooms::admitted_through(&self.reader, sale).await
     }
 
-    async fn advance_waiting_room(&self, sale: SaleId, from: u64, to: u64) -> StoreResult<bool> {
-        let (from, to) = (
-            i64::try_from(from).map_err(StoreError::backend)?,
-            i64::try_from(to).map_err(StoreError::backend)?,
-        );
-        let result = sqlx::query(
-            "UPDATE waiting_rooms SET admitted_through = ?3
-             WHERE sale_id = ?1 AND admitted_through = ?2 AND ?3 <= last_position",
-        )
-        .bind(sale.as_uuid())
-        .bind(from)
-        .bind(to)
-        .execute(&self.writer)
-        .await
-        .map_err(error)?;
-        Ok(result.rows_affected() == 1)
+    async fn pending_waiting_rooms(&self, now: Timestamp) -> StoreResult<Vec<SaleId>> {
+        waiting_rooms::pending(&self.reader, now).await
+    }
+
+    async fn advance_waiting_room(
+        &self,
+        sale: SaleId,
+        from: u64,
+        to: u64,
+    ) -> StoreResult<Option<u64>> {
+        waiting_rooms::advance(&self.writer, sale, from, to).await
     }
 }

@@ -20,17 +20,31 @@ pub trait InboxDelivery: Send {
 /// A durable queue purchase requests pass through before reaching the database, so that
 /// bursts are absorbed by the queue instead of the database.
 ///
-/// **Contract:** `enqueue` returns only once the request is durably stored; enqueueing the
-/// same request id again (a retry) delivers it at most once more within the queue's
-/// deduplication window, and persisting is idempotent anyway. Every enqueued request is
-/// delivered by `receive` until acknowledged.
+/// **Contract:** `enqueue` returns only once the request is durably stored. Enqueueing a
+/// request id again within the queue's deduplication window (a retry) stores nothing and
+/// answers [`Enqueued::Duplicate`] with the request first enqueued under it, as long as the
+/// queue still holds it; after the window it may be stored again, and persisting is
+/// idempotent anyway. Every enqueued request is delivered by `receive` until acknowledged,
+/// and acknowledged only once persisted, so a request the queue no longer holds is in the
+/// database.
 #[async_trait]
 pub trait PurchaseInbox: Send + Sync {
-    /// Durably accepts a request.
-    async fn enqueue(&self, request: &PurchaseRequest) -> StoreResult<()>;
+    /// Durably accepts a request, unless the queue already has one with its id.
+    async fn enqueue(&self, request: &PurchaseRequest) -> StoreResult<Enqueued>;
 
     /// Takes up to `limit` requests, waiting only briefly when there are none.
     async fn receive(&self, limit: usize) -> StoreResult<Vec<Box<dyn InboxDelivery>>>;
+}
+
+/// What [`PurchaseInbox::enqueue`] did with a request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Enqueued {
+    /// Stored: it will be delivered.
+    Accepted,
+    /// A request with this id was enqueued before and nothing was stored. Holds that request,
+    /// which may differ from the one just offered, or `None` once it has left the queue for
+    /// the database.
+    Duplicate(Option<PurchaseRequest>),
 }
 
 /// Where integration events are published, in outbox order.

@@ -7,8 +7,10 @@ use kippu_domain::account::{Account, Identity, Organization};
 use kippu_domain::{AccountId, OrganizationId};
 
 use super::dto::{
-    AuditEntryResponse, CreateAccountRequest, CreateOrganizationRequest, LoginRequest, Me,
-    RefreshRequest, RegisterRequest, SessionResponse, SetEmailRequest, SetPasswordRequest,
+    AccountView, AccountsQuery, AuditEntryResponse, CloseAccountRequest, CreateAccountRequest,
+    CreateOrganizationRequest, LoginRequest, Me, OrganizationPatch, ProfilePatch, RefreshRequest,
+    RegisterRequest, SessionResponse, SetEmailRequest, SetPasswordRequest,
+    UpdateOrganizationRequest,
 };
 use super::service;
 use crate::app::AppState;
@@ -88,6 +90,47 @@ pub(crate) async fn logout(
 )]
 pub(crate) async fn me(State(state): State<AppState>, principal: Principal) -> ApiResult<Json<Me>> {
     Ok(Json(service::whoami(&state, &principal).await?.into()))
+}
+
+/// Change your name or contact details; leave out what stays.
+#[utoipa::path(
+    patch, path = "/v1/me", tag = TAG,
+    security(("bearer" = [])),
+    request_body(content((ProfilePatch = "application/merge-patch+json"), (ProfilePatch = "application/json"))),
+    responses((status = 200, body = Account), (status = 404, body = Problem), (status = 422, body = Problem))
+)]
+pub(crate) async fn update_me(
+    State(state): State<AppState>,
+    principal: Principal,
+    Json(patch): Json<ProfilePatch>,
+) -> ApiResult<Json<Account>> {
+    Ok(Json(
+        service::update_profile(&state, &principal, patch.into()).await?,
+    ))
+}
+
+/// Close your account. Your orders, tickets and refunds stay on record under its id, but
+/// your email, password, name, contact details, sessions and memberships go; neither the
+/// email nor your external sign-ins can be used for an account again. Send your password if
+/// the account has one; an account without one may send no body.
+#[utoipa::path(
+    delete, path = "/v1/me", tag = TAG,
+    security(("bearer" = [])),
+    request_body = Option<CloseAccountRequest>,
+    responses(
+        (status = 204),
+        (status = 403, description = "Password missing or wrong", body = Problem),
+        (status = 404, body = Problem)
+    )
+)]
+pub(crate) async fn close_me(
+    State(state): State<AppState>,
+    principal: Principal,
+    request: Option<Json<CloseAccountRequest>>,
+) -> ApiResult<StatusCode> {
+    let Json(request) = request.unwrap_or_default();
+    service::close_own_account(&state, &principal, request.current_password).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Set your email address, e.g. after signing up through a provider that shared none.
@@ -182,11 +225,11 @@ pub(crate) async fn create_account(
     Ok((StatusCode::CREATED, Json(account)))
 }
 
-/// List accounts.
+/// List accounts in id order, optionally only those of a role or the one with an email.
 #[utoipa::path(
     get, path = "/v1/admin/accounts", tag = TAG,
     security(("bearer" = [])),
-    params(PageQuery),
+    params(AccountsQuery),
     responses(
         (status = 200, body = Listing<Account>),
         (status = 400, body = Problem),
@@ -196,10 +239,10 @@ pub(crate) async fn create_account(
 pub(crate) async fn list_accounts(
     State(state): State<AppState>,
     principal: Principal,
-    Query(query): Query<PageQuery>,
+    Query(query): Query<AccountsQuery>,
 ) -> ApiResult<Json<Listing<Account>>> {
-    let page = query.page(ListingTag::ACCOUNTS)?;
-    let accounts = service::accounts(&state, &principal, page).await?;
+    let (filter, page) = query.into_parts()?;
+    let accounts = service::accounts(&state, &principal, filter, page).await?;
     Ok(Json(Listing::page(
         accounts,
         ListingTag::ACCOUNTS,
@@ -207,7 +250,27 @@ pub(crate) async fn list_accounts(
     )))
 }
 
-/// Delete an account of a role below your own.
+/// An account, with the organizations it belongs to.
+#[utoipa::path(
+    get, path = "/v1/admin/accounts/{account_id}", tag = TAG,
+    security(("bearer" = [])),
+    params(("account_id" = AccountId, Path)),
+    responses((status = 200, body = AccountView), (status = 403, body = Problem), (status = 404, body = Problem))
+)]
+pub(crate) async fn get_account(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(account_id): Path<AccountId>,
+) -> ApiResult<Json<AccountView>> {
+    Ok(Json(
+        service::account(&state, &principal, account_id)
+            .await?
+            .into(),
+    ))
+}
+
+/// Close an account of a role below your own, as it would close itself: its records stay,
+/// nothing about the person does. Closing it again changes nothing.
 #[utoipa::path(
     delete, path = "/v1/admin/accounts/{account_id}", tag = TAG,
     security(("bearer" = [])),
@@ -219,7 +282,7 @@ pub(crate) async fn delete_account(
     principal: Principal,
     Path(account_id): Path<AccountId>,
 ) -> ApiResult<StatusCode> {
-    service::delete_account(&state, &principal, account_id).await?;
+    service::close_account(&state, &principal, account_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -261,6 +324,102 @@ pub(crate) async fn list_organizations(
         organizations,
         ListingTag::ORGANIZATIONS,
         |organization| organization,
+    )))
+}
+
+/// An organization, with the `version` that `PUT` and `PATCH` expect.
+#[utoipa::path(
+    get, path = "/v1/admin/organizations/{organization_id}", tag = TAG,
+    security(("bearer" = [])),
+    params(("organization_id" = OrganizationId, Path)),
+    responses((status = 200, body = Organization), (status = 403, body = Problem), (status = 404, body = Problem))
+)]
+pub(crate) async fn get_organization(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(organization_id): Path<OrganizationId>,
+) -> ApiResult<Json<Organization>> {
+    Ok(Json(
+        service::organization(&state, &principal, organization_id).await?,
+    ))
+}
+
+/// Rename an organization or change its slug.
+#[utoipa::path(
+    put, path = "/v1/admin/organizations/{organization_id}", tag = TAG,
+    security(("bearer" = [])),
+    params(("organization_id" = OrganizationId, Path)),
+    request_body = UpdateOrganizationRequest,
+    responses(
+        (status = 200, body = Organization),
+        (status = 404, body = Problem),
+        (status = 409, description = "Slug taken", body = Problem),
+        (status = 412, description = "Edited concurrently", body = Problem)
+    )
+)]
+pub(crate) async fn update_organization(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(organization_id): Path<OrganizationId>,
+    Json(request): Json<UpdateOrganizationRequest>,
+) -> ApiResult<Json<Organization>> {
+    let version = request.version;
+    Ok(Json(
+        service::update_organization(&state, &principal, organization_id, version, request.into())
+            .await?,
+    ))
+}
+
+/// Change some of an organization's fields.
+#[utoipa::path(
+    patch, path = "/v1/admin/organizations/{organization_id}", tag = TAG,
+    security(("bearer" = [])),
+    params(("organization_id" = OrganizationId, Path)),
+    request_body(content((OrganizationPatch = "application/merge-patch+json"), (OrganizationPatch = "application/json"))),
+    responses(
+        (status = 200, body = Organization),
+        (status = 404, body = Problem),
+        (status = 409, description = "Slug taken", body = Problem),
+        (status = 412, description = "Edited concurrently", body = Problem)
+    )
+)]
+pub(crate) async fn patch_organization(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(organization_id): Path<OrganizationId>,
+    Json(patch): Json<OrganizationPatch>,
+) -> ApiResult<Json<Organization>> {
+    let version = patch.version;
+    Ok(Json(
+        service::update_organization(&state, &principal, organization_id, version, patch.into())
+            .await?,
+    ))
+}
+
+/// The members of an organization, in account id order.
+#[utoipa::path(
+    get, path = "/v1/admin/organizations/{organization_id}/members", tag = TAG,
+    security(("bearer" = [])),
+    params(("organization_id" = OrganizationId, Path), PageQuery),
+    responses(
+        (status = 200, body = Listing<Account>),
+        (status = 400, body = Problem),
+        (status = 403, body = Problem),
+        (status = 404, body = Problem)
+    )
+)]
+pub(crate) async fn list_members(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(organization_id): Path<OrganizationId>,
+    Query(query): Query<PageQuery>,
+) -> ApiResult<Json<Listing<Account>>> {
+    let page = query.page(ListingTag::MEMBERS)?;
+    let members = service::members(&state, &principal, organization_id, page).await?;
+    Ok(Json(Listing::page(
+        members,
+        ListingTag::MEMBERS,
+        |account| account,
     )))
 }
 

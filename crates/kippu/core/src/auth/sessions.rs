@@ -14,7 +14,7 @@ use utoipa::ToSchema;
 
 use crate::app::AppState;
 use crate::auth::tokens::IssuedToken;
-use crate::error::{ApiError, ApiResult};
+use crate::error::{ApiError, ApiResult, ProblemKind, StatusCode};
 
 /// A signed-in session.
 #[derive(Debug, Serialize, ToSchema)]
@@ -45,6 +45,13 @@ pub(crate) fn hash_token(token: &str) -> String {
 ///
 /// Call it once you know who someone is, however you found out.
 pub async fn issue(state: &AppState, account: Account) -> ApiResult<SessionResponse> {
+    if account.is_closed() {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            ProblemKind::ACCOUNT_CLOSED,
+            "this account was closed",
+        ));
+    }
     let now = state.now();
     let refresh_token = random_token()?;
     let ttl = Duration::seconds(i64::from(
@@ -91,6 +98,7 @@ pub async fn refresh(state: &AppState, refresh_token: &str) -> ApiResult<Session
         .store()
         .account(account_id)
         .await?
+        .filter(|account| !account.is_closed())
         .ok_or_else(|| ApiError::unauthenticated("account no longer exists"))?;
     let organizations = state.store().memberships(account.id).await?;
     Ok(SessionResponse {

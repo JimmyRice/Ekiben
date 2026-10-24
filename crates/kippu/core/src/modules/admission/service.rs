@@ -1,8 +1,9 @@
 //! Waiting-room use cases, independent of HTTP: joining, asking whether it is your turn,
 //! and the task that lets the next batch in.
 
-use kippu_domain::SaleId;
-use kippu_domain::admission::AdmissionPolicy;
+use kippu_domain::admission::{AdmissionPolicy, WaitingRoom};
+use kippu_domain::catalog::{EventSummary, Sale};
+use kippu_domain::{SaleId, Timestamp};
 use kippu_store::BoxError;
 
 use crate::app::AppState;
@@ -10,7 +11,7 @@ use crate::auth::tokens::IssuedToken;
 use crate::auth::{Principal, Scope};
 use crate::error::{ApiError, ApiResult, ProblemKind, StatusCode};
 use crate::module::Progress;
-use crate::modules::catalog::service::visible_sale;
+use crate::modules::catalog::service::{visible_sale, writable_sale};
 use crate::modules::purchasing::permissions::PURCHASES_CREATE;
 
 /// A buyer's place in a waiting room.
@@ -44,7 +45,47 @@ fn admission_required() -> ApiError {
     )
 }
 
-/// Joins a sale's waiting room.
+/// A waiting room is over once its sale closes or its event is cancelled: nobody can buy any
+/// more, and nobody is admitted, so joining or waiting is answered as a purchase would be.
+#[track_caller]
+fn ensure_selling(sale: &Sale, event: &EventSummary, now: Timestamp) -> ApiResult<()> {
+    if event.is_on_sale() && now < sale.closes_at {
+        Ok(())
+    } else {
+        Err(ApiError::new(
+            StatusCode::CONFLICT,
+            ProblemKind::SALE_CLOSED,
+            "this sale is closed",
+        ))
+    }
+}
+
+#[track_caller]
+fn no_waiting_room() -> ApiError {
+    ApiError::new(
+        StatusCode::CONFLICT,
+        ProblemKind::NO_WAITING_ROOM,
+        "this sale has no waiting room",
+    )
+}
+
+/// How far a sale's waiting room has got, for its organizers: the last position handed out
+/// and how far admission has reached.
+#[tracing::instrument(skip_all)]
+pub async fn waiting_room(
+    state: &AppState,
+    principal: &Principal,
+    sale_id: SaleId,
+) -> ApiResult<WaitingRoom> {
+    let (sale, _) = writable_sale(state, principal, sale_id).await?;
+    if !matches!(sale.admission, AdmissionPolicy::WaitingRoom { .. }) {
+        return Err(no_waiting_room());
+    }
+    Ok(state.store().waiting_room(sale.id).await?)
+}
+
+/// Joins a sale's waiting room. An account holds one place: joining again returns the position
+/// it got the first time, with a new queue ticket.
 #[tracing::instrument(skip_all)]
 pub async fn join_waiting_room(
     state: &AppState,
@@ -53,15 +94,12 @@ pub async fn join_waiting_room(
 ) -> ApiResult<QueueTicket> {
     let account = principal.require_account()?;
     state.authorize(principal, PURCHASES_CREATE, Scope::Account(account))?;
-    let (sale, _) = visible_sale(state, Some(principal), sale_id).await?;
+    let (sale, event) = visible_sale(state, Some(principal), sale_id).await?;
     if !matches!(sale.admission, AdmissionPolicy::WaitingRoom { .. }) {
-        return Err(ApiError::new(
-            StatusCode::CONFLICT,
-            ProblemKind::NO_WAITING_ROOM,
-            "this sale has no waiting room",
-        ));
+        return Err(no_waiting_room());
     }
-    let position = state.store().join_waiting_room(sale.id).await?;
+    ensure_selling(&sale, &event, state.now())?;
+    let position = state.store().join_waiting_room(sale.id, account).await?;
     let token = state
         .tokens()
         .issue_queue_ticket(account, sale.id, position, state.now());
@@ -79,18 +117,21 @@ pub async fn request_admission(
 ) -> ApiResult<Admission> {
     let account = principal.require_account()?;
     state.authorize(principal, PURCHASES_CREATE, Scope::Account(account))?;
-    let (sale, _) = visible_sale(state, Some(principal), sale_id).await?;
+    let (sale, event) = visible_sale(state, Some(principal), sale_id).await?;
     let now = state.now();
+    ensure_selling(&sale, &event, now)?;
     if let AdmissionPolicy::WaitingRoom { .. } = sale.admission {
         let ticket = queue_ticket.ok_or_else(admission_required)?;
         let position = state
             .tokens()
             .verify_queue_ticket(&ticket, account, sale.id, now)?;
-        let room = state.store().waiting_room(sale.id).await?;
-        if !room.admits(position) {
+        // Not the whole room: how far it has admitted is all this needs, and the read the
+        // waiting crowd repeats most stays a single row.
+        let admitted_through = state.store().admitted_through(sale.id).await?;
+        if position > admitted_through {
             return Ok(Admission::Waiting {
                 position,
-                admitted_through: room.admitted_through,
+                admitted_through,
             });
         }
     }
@@ -99,12 +140,14 @@ pub async fn request_admission(
     ))
 }
 
-/// Background task: advances every waiting room by one batch, unless its sale's purchase
-/// backlog is already large. Safe on many instances: the advance is a compare-and-set.
+/// Background task: advances every waiting room by one batch, unless its sale has not opened
+/// yet or its purchase backlog is already large, and by no more people than the sale has
+/// tickets left. Safe on many instances: the advance is a compare-and-set.
 #[tracing::instrument(skip_all)]
 pub(crate) async fn admit_batches(state: AppState) -> Result<Progress, BoxError> {
     let store = state.store();
-    for sale_id in store.pending_waiting_rooms().await? {
+    let now = state.now();
+    for sale_id in store.pending_waiting_rooms(now).await? {
         let Some(sale) = store.sale(sale_id).await? else {
             continue;
         };
@@ -115,16 +158,36 @@ pub(crate) async fn admit_batches(state: AppState) -> Result<Progress, BoxError>
         else {
             continue;
         };
+        // Before the sale opens nobody can buy, so the backlog stays empty and the whole room
+        // would be let through before the first purchase. (A closed sale is not pending: it
+        // sells nothing more.)
+        if now < sale.opens_at {
+            continue;
+        }
         let room = store.waiting_room(sale_id).await?;
         // Only whether the backlog reached the limit matters, so counting stops there.
         let backlog = store.queued_purchase_count(sale_id, max_backlog).await?;
-        let next = room.next_admitted_through(admit_per_tick, max_backlog, backlog);
+        // A sold-out sale admits nobody; tickets that come back go to the next in line.
+        let available = store
+            .sale_inventory(sale_id)
+            .await?
+            .iter()
+            .map(|inventory| u64::from(inventory.available()))
+            .sum();
+        let next = room.next_admitted_through(admit_per_tick, max_backlog, backlog, available);
+        // The store may stop short of `next`, below positions still being handed out.
         if next > room.admitted_through
-            && store
+            && let Some(admitted_through) = store
                 .advance_waiting_room(sale_id, room.admitted_through, next)
                 .await?
         {
-            tracing::info!(sale = %sale_id, admitted_through = next, backlog, "admitted a batch");
+            tracing::info!(
+                sale = %sale_id,
+                admitted_through,
+                backlog,
+                available,
+                "admitted a batch"
+            );
         }
     }
     Ok(Progress::Idle)

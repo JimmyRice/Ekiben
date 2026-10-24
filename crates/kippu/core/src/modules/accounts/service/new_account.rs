@@ -1,5 +1,7 @@
 //! Creating password accounts, shared by signing up and by admins.
 
+use std::collections::BTreeMap;
+
 use kippu_domain::AccountId;
 use kippu_domain::account::{Account, Role};
 use kippu_domain::validation::{Email, non_empty};
@@ -19,7 +21,8 @@ pub struct NewAccount {
     pub display_name: String,
 }
 
-fn validate_display_name(display_name: &str) -> ApiResult<()> {
+/// Checks a name shown to others.
+pub(super) fn validate_display_name(display_name: &str) -> ApiResult<()> {
     Ok(non_empty("display_name", display_name, 100)?)
 }
 
@@ -38,6 +41,8 @@ pub(super) async fn insert_account(
         display_name: new.display_name,
         role,
         created_at: state.now(),
+        contacts: BTreeMap::new(),
+        deleted_at: None,
     };
     let password_hash = hash_password(new.password).await?;
     state

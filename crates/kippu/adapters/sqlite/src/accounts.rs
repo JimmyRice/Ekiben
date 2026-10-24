@@ -1,21 +1,31 @@
 use async_trait::async_trait;
-use kippu_domain::account::{Account, Identity, Organization};
-use kippu_domain::validation::{Email, ProviderName, Subject};
-use kippu_domain::{AccountId, OrganizationId};
+use kippu_domain::account::{Account, Contacts, Identity, Organization, Role};
+use kippu_domain::validation::{Email, ProviderName, Slug, Subject};
+use kippu_domain::{AccountId, OrganizationId, Timestamp};
 use kippu_store::{
-    AccountStore, Insertion, PageRequest, Session, SessionRenewal, StoreResult, Unlink,
+    AccountFilter, AccountStore, Insertion, PageRequest, Session, SessionRenewal, StoreResult,
+    Unlink,
 };
 use sqlx::SqliteConnection;
 use uuid::Uuid;
 
+use crate::catalog::expect_one_updated;
 use crate::convert::{
-    AccountRow, CredentialsRow, IdentityRow, OrganizationRow, all, micros, optional,
+    AccountRow, CredentialsRow, IdentityRow, OrganizationRow, all, json, micros, optional,
 };
 use crate::{SqliteStore, error, unique};
 
+const ORGANIZATION_COLUMNS: &str = "SELECT id, slug, name, created_at, version FROM organizations";
+
+/// Whether the organization of the row has an event the public may see.
+const HAS_PUBLIC_EVENT: &str =
+    "EXISTS (SELECT 1 FROM events WHERE events.organization_id = organizations.id
+                                  AND events.status IN ('published', 'cancelled'))";
+
 const INSERT_ACCOUNT: &str =
-    "INSERT INTO accounts (id, email, display_name, role, password_hash, created_at)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
+    "INSERT INTO accounts (id, email, display_name, role, password_hash, created_at, contacts,
+                           email_hash)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
 
 const INSERT_IDENTITY: &str =
     "INSERT INTO identities (provider, subject, account_id, created_at) VALUES (?1, ?2, ?3, ?4)
@@ -33,6 +43,8 @@ async fn insert_account(
         .bind(account.role.as_str())
         .bind(password_hash)
         .bind(micros(account.created_at))
+        .bind(json(&account.contacts)?)
+        .bind(account.email.as_ref().map(Email::fingerprint))
         .execute(connection)
         .await
         .map_err(unique("email"))?;
@@ -113,7 +125,7 @@ impl AccountStore for SqliteStore {
 
     async fn account(&self, id: AccountId) -> StoreResult<Option<Account>> {
         let row = sqlx::query_as::<_, AccountRow>(
-            "SELECT id, email, display_name, role, created_at FROM accounts WHERE id = ?1",
+            "SELECT id, email, display_name, role, created_at, contacts, deleted_at FROM accounts WHERE id = ?1",
         )
         .bind(id.as_uuid())
         .fetch_optional(&self.reader)
@@ -127,7 +139,7 @@ impl AccountStore for SqliteStore {
         email: &Email,
     ) -> StoreResult<Option<(Account, Option<String>)>> {
         let row = sqlx::query_as::<_, CredentialsRow>(
-            "SELECT id, email, display_name, role, created_at, password_hash
+            "SELECT id, email, display_name, role, created_at, contacts, deleted_at, password_hash
              FROM accounts WHERE email = ?1",
         )
         .bind(email.as_str())
@@ -150,22 +162,46 @@ impl AccountStore for SqliteStore {
     }
 
     async fn set_password_hash(&self, id: AccountId, password_hash: &str) -> StoreResult<bool> {
-        let result = sqlx::query("UPDATE accounts SET password_hash = ?2 WHERE id = ?1")
-            .bind(id.as_uuid())
-            .bind(password_hash)
-            .execute(&self.writer)
-            .await
-            .map_err(error)?;
+        let result = sqlx::query(
+            "UPDATE accounts SET password_hash = ?2 WHERE id = ?1 AND deleted_at IS NULL",
+        )
+        .bind(id.as_uuid())
+        .bind(password_hash)
+        .execute(&self.writer)
+        .await
+        .map_err(error)?;
         Ok(result.rows_affected() == 1)
     }
 
     async fn set_email(&self, id: AccountId, email: &Email) -> StoreResult<bool> {
-        let result = sqlx::query("UPDATE accounts SET email = ?2 WHERE id = ?1")
-            .bind(id.as_uuid())
-            .bind(email.as_str())
-            .execute(&self.writer)
-            .await
-            .map_err(unique("email"))?;
+        let result = sqlx::query(
+            "UPDATE accounts SET email = ?2, email_hash = ?3 WHERE id = ?1 AND deleted_at IS NULL",
+        )
+        .bind(id.as_uuid())
+        .bind(email.as_str())
+        .bind(email.fingerprint())
+        .execute(&self.writer)
+        .await
+        .map_err(unique("email"))?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    async fn update_profile(
+        &self,
+        id: AccountId,
+        display_name: &str,
+        contacts: &Contacts,
+    ) -> StoreResult<bool> {
+        let result = sqlx::query(
+            "UPDATE accounts SET display_name = ?2, contacts = ?3
+             WHERE id = ?1 AND deleted_at IS NULL",
+        )
+        .bind(id.as_uuid())
+        .bind(display_name)
+        .bind(json(contacts)?)
+        .execute(&self.writer)
+        .await
+        .map_err(error)?;
         Ok(result.rows_affected() == 1)
     }
 
@@ -243,11 +279,19 @@ impl AccountStore for SqliteStore {
         Ok(Unlink::Unlinked)
     }
 
-    async fn list_accounts(&self, page: PageRequest) -> StoreResult<Vec<Account>> {
+    async fn list_accounts(
+        &self,
+        filter: &AccountFilter,
+        page: PageRequest,
+    ) -> StoreResult<Vec<Account>> {
         let rows = sqlx::query_as::<_, AccountRow>(
-            "SELECT id, email, display_name, role, created_at FROM accounts
-             WHERE ?1 IS NULL OR id > ?1 ORDER BY id LIMIT ?2",
+            "SELECT id, email, display_name, role, created_at, contacts, deleted_at FROM accounts
+             WHERE (?1 IS NULL OR role = ?1) AND (?2 IS NULL OR email = ?2)
+               AND (?3 IS NULL OR id > ?3)
+             ORDER BY id LIMIT ?4",
         )
+        .bind(filter.role.map(Role::as_str))
+        .bind(filter.email.as_ref().map(Email::as_str))
         .bind(page.after)
         .bind(page.limit)
         .fetch_all(&self.reader)
@@ -256,13 +300,45 @@ impl AccountStore for SqliteStore {
         all(rows)
     }
 
-    async fn delete_account(&self, id: AccountId) -> StoreResult<bool> {
-        let result = sqlx::query("DELETE FROM accounts WHERE id = ?1")
-            .bind(id.as_uuid())
-            .execute(&self.writer)
+    async fn close_account(
+        &self,
+        id: AccountId,
+        fingerprint: Option<&str>,
+        closed_at: Timestamp,
+    ) -> StoreResult<bool> {
+        let mut tx = self
+            .writer
+            .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(error)?;
-        Ok(result.rows_affected() == 1)
+        let closed = sqlx::query(
+            "UPDATE accounts SET email = NULL, email_hash = COALESCE(email_hash, ?2),
+                                 password_hash = NULL, display_name = '', contacts = '{}',
+                                 deleted_at = ?3
+             WHERE id = ?1 AND deleted_at IS NULL",
+        )
+        .bind(id.as_uuid())
+        .bind(fingerprint)
+        .bind(micros(closed_at))
+        .execute(&mut *tx)
+        .await
+        .map_err(error)?;
+        if closed.rows_affected() != 1 {
+            return Ok(false);
+        }
+        for statement in [
+            "DELETE FROM sessions WHERE account_id = ?1",
+            "DELETE FROM memberships WHERE account_id = ?1",
+            "DELETE FROM favorites WHERE account_id = ?1",
+        ] {
+            sqlx::query(statement)
+                .bind(id.as_uuid())
+                .execute(&mut *tx)
+                .await
+                .map_err(error)?;
+        }
+        tx.commit().await.map_err(error)?;
+        Ok(true)
     }
 
     async fn insert_session(&self, session: &Session) -> StoreResult<()> {
@@ -330,22 +406,44 @@ impl AccountStore for SqliteStore {
 
     async fn insert_organization(&self, organization: &Organization) -> StoreResult<()> {
         sqlx::query(
-            "INSERT INTO organizations (id, slug, name, created_at) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO organizations (id, slug, name, created_at, version)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
         )
         .bind(organization.id.as_uuid())
         .bind(organization.slug.as_str())
         .bind(&organization.name)
         .bind(micros(organization.created_at))
+        .bind(organization.version)
         .execute(&self.writer)
         .await
         .map_err(unique("slug"))?;
         Ok(())
     }
 
-    async fn organization(&self, id: OrganizationId) -> StoreResult<Option<Organization>> {
-        let row = sqlx::query_as::<_, OrganizationRow>(
-            "SELECT id, slug, name, created_at FROM organizations WHERE id = ?1",
+    async fn update_organization(
+        &self,
+        organization: &Organization,
+        expected_version: i64,
+    ) -> StoreResult<()> {
+        let result = sqlx::query(
+            "UPDATE organizations SET slug = ?2, name = ?3, version = ?4
+             WHERE id = ?1 AND version = ?5",
         )
+        .bind(organization.id.as_uuid())
+        .bind(organization.slug.as_str())
+        .bind(&organization.name)
+        .bind(organization.version)
+        .bind(expected_version)
+        .execute(&self.writer)
+        .await
+        .map_err(unique("slug"))?;
+        expect_one_updated(&result)
+    }
+
+    async fn organization(&self, id: OrganizationId) -> StoreResult<Option<Organization>> {
+        let row = sqlx::query_as::<_, OrganizationRow>(sqlx::AssertSqlSafe(format!(
+            "{ORGANIZATION_COLUMNS} WHERE id = ?1"
+        )))
         .bind(id.as_uuid())
         .fetch_optional(&self.reader)
         .await
@@ -353,11 +451,45 @@ impl AccountStore for SqliteStore {
         optional(row)
     }
 
+    async fn organization_by_slug(&self, slug: &Slug) -> StoreResult<Option<Organization>> {
+        let row = sqlx::query_as::<_, OrganizationRow>(sqlx::AssertSqlSafe(format!(
+            "{ORGANIZATION_COLUMNS} WHERE slug = ?1"
+        )))
+        .bind(slug.as_str())
+        .fetch_optional(&self.reader)
+        .await
+        .map_err(error)?;
+        optional(row)
+    }
+
     async fn list_organizations(&self, page: PageRequest) -> StoreResult<Vec<Organization>> {
-        let rows = sqlx::query_as::<_, OrganizationRow>(
-            "SELECT id, slug, name, created_at FROM organizations
-             WHERE ?1 IS NULL OR id > ?1 ORDER BY id LIMIT ?2",
-        )
+        let rows = sqlx::query_as::<_, OrganizationRow>(sqlx::AssertSqlSafe(format!(
+            "{ORGANIZATION_COLUMNS} WHERE ?1 IS NULL OR id > ?1 ORDER BY id LIMIT ?2"
+        )))
+        .bind(page.after)
+        .bind(page.limit)
+        .fetch_all(&self.reader)
+        .await
+        .map_err(error)?;
+        all(rows)
+    }
+
+    async fn public_organization(&self, id: OrganizationId) -> StoreResult<Option<Organization>> {
+        let row = sqlx::query_as::<_, OrganizationRow>(sqlx::AssertSqlSafe(format!(
+            "{ORGANIZATION_COLUMNS} WHERE id = ?1 AND {HAS_PUBLIC_EVENT}"
+        )))
+        .bind(id.as_uuid())
+        .fetch_optional(&self.reader)
+        .await
+        .map_err(error)?;
+        optional(row)
+    }
+
+    async fn public_organizations(&self, page: PageRequest) -> StoreResult<Vec<Organization>> {
+        let rows = sqlx::query_as::<_, OrganizationRow>(sqlx::AssertSqlSafe(format!(
+            "{ORGANIZATION_COLUMNS} WHERE (?1 IS NULL OR id > ?1) AND {HAS_PUBLIC_EVENT}
+             ORDER BY id LIMIT ?2"
+        )))
         .bind(page.after)
         .bind(page.limit)
         .fetch_all(&self.reader)
@@ -407,5 +539,26 @@ impl AccountStore for SqliteStore {
         .await
         .map_err(error)?;
         Ok(ids.into_iter().map(Into::into).collect())
+    }
+
+    async fn members(
+        &self,
+        organization: OrganizationId,
+        page: PageRequest,
+    ) -> StoreResult<Vec<Account>> {
+        let rows = sqlx::query_as::<_, AccountRow>(
+            "SELECT accounts.id, email, display_name, role, created_at, contacts, deleted_at
+             FROM memberships JOIN accounts ON accounts.id = memberships.account_id
+             WHERE memberships.organization_id = ?1
+               AND (?2 IS NULL OR memberships.account_id > ?2)
+             ORDER BY memberships.account_id LIMIT ?3",
+        )
+        .bind(organization.as_uuid())
+        .bind(page.after)
+        .bind(page.limit)
+        .fetch_all(&self.reader)
+        .await
+        .map_err(error)?;
+        all(rows)
     }
 }

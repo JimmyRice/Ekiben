@@ -4,7 +4,7 @@
 //! the inventory, the reservation, the tickets and the outbox event. Either all of it happens
 //! or none of it does, so money can never be recorded without its tickets (or its refund).
 
-use kippu_domain::catalog::TicketType;
+use kippu_domain::catalog::{EventSummary, Sale, TicketType};
 use kippu_domain::outbox::IntegrationEvent;
 use kippu_domain::payment::{
     Attestor, Environment, PaymentAttestation, PaymentDisposition, validate_attestation_id,
@@ -22,6 +22,7 @@ use crate::app::AppState;
 use crate::auth::{Principal, Scope};
 use crate::error::{ApiError, ApiResult, ProblemKind, StatusCode};
 use crate::modules::payments::permissions::PAYMENTS_MANUAL;
+use crate::modules::purchasing::service::release;
 use crate::modules::ticketing::service::issue_tickets;
 
 /// What an attestor reports.
@@ -101,8 +102,8 @@ pub(crate) fn holds(items: &LineItems, ticket_types: &[TicketType]) -> ApiResult
     .ok_or_else(|| ApiError::internal("a reserved ticket type no longer exists"))
 }
 
-/// A reservation an attestor may charge for: one of a sale that accepts it. Others look
-/// missing.
+/// A reservation an attestor may charge for: one of a sale that accepts it, or one the buyer
+/// checked out with it. Others look missing.
 #[tracing::instrument(skip_all)]
 pub async fn reservation_for_attestor(
     state: &AppState,
@@ -119,7 +120,7 @@ pub async fn reservation_for_attestor(
         .sale(reservation.sale_id)
         .await?
         .ok_or_else(|| ApiError::not_found("sale"))?;
-    if sale.accepts(attestor.id) {
+    if reservation.attestor_id == Some(attestor.id) || sale.accepts(attestor.id) {
         Ok(reservation)
     } else {
         Err(ApiError::not_found("reservation"))
@@ -158,21 +159,29 @@ pub async fn manual_payment(
     reservation_id: ReservationId,
     payment: ManualPayment,
 ) -> ApiResult<PaymentResult> {
+    // Refused by role before anything is read; organizers of other events are told the
+    // reservation does not exist.
+    if !state.policy().allows(principal.role(), PAYMENTS_MANUAL) {
+        return Err(ApiError::forbidden());
+    }
+    let not_found = || ApiError::not_found("reservation");
     let reservation = state
         .store()
         .reservation(reservation_id)
         .await?
-        .ok_or_else(|| ApiError::not_found("reservation"))?;
+        .ok_or_else(not_found)?;
     let event = state
         .store()
         .event_summary(reservation.event_id)
         .await?
-        .ok_or_else(|| ApiError::not_found("event"))?;
-    state.authorize(
+        .ok_or_else(not_found)?;
+    if !state.policy().permits(
         principal,
         PAYMENTS_MANUAL,
         Scope::Organization(event.organization_id),
-    )?;
+    ) {
+        return Err(not_found());
+    }
     let manual = state
         .store()
         .attestor(AttestorId::MANUAL)
@@ -206,6 +215,7 @@ pub async fn settle(
         .attestation(attestor.id, &payment.attestation_id)
         .await?
     {
+        check_same_payment(&existing, payment.reservation_id, payment.amount)?;
         return replay(state, existing).await;
     }
 
@@ -217,7 +227,100 @@ pub async fn settle(
         .sale(reservation.sale_id)
         .await?
         .ok_or_else(|| ApiError::not_found("sale"))?;
-    if !attestor.id.is_builtin() && !sale.accepts(attestor.id) {
+    // Read outside the transaction, like the purchase worker's catalog checks.
+    let event = store
+        .event_summary(reservation.event_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("event"))?;
+    // Tickets of a closed account reach nobody: it cannot sign in to fetch them.
+    let account_open = store
+        .account(reservation.account_id)
+        .await?
+        .is_some_and(|account| !account.is_closed());
+    check_payment(attestor, &sale, &reservation, &payment)?;
+    let ticket_types = store.list_ticket_types(reservation.sale_id).await?;
+
+    let now = state.now();
+    let attestation = PaymentAttestation {
+        attestor_id: attestor.id,
+        attestation_id: payment.attestation_id,
+        reservation_id: payment.reservation_id,
+        amount: payment.amount,
+        occurred_at: payment.occurred_at.unwrap_or(now),
+        received_at: now,
+        disposition: PaymentDisposition::Applied,
+    };
+    let mut tx = store.begin().await?;
+    // The reservation first: inserting the attestation share-locks it through the foreign
+    // key, so two payments that each did that and then asked to lock it would deadlock.
+    let reservation = tx
+        .reservations()
+        .lock_reservation(payment.reservation_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("reservation"))?;
+    if let Insertion::Existing(existing) = tx.payments().insert_attestation(&attestation).await? {
+        drop(tx);
+        check_same_payment(&existing, attestation.reservation_id, attestation.amount)?;
+        return replay(state, existing).await;
+    }
+
+    let items = line_items(&reservation);
+    let view = match reservation.status.settle() {
+        Settlement::Issue if event.is_on_sale() && account_open => {
+            tx.inventory().sell_held(&items).await?;
+            issue(state, &mut *tx, reservation, &ticket_types, now).await?
+        }
+        // Called off, or the account closed, while the money was on its way: give back the
+        // hold, return the money.
+        Settlement::Issue => {
+            let mut reservation = reservation;
+            reservation.status = reservation.status.require_refund()?;
+            reservation.updated_at = now;
+            release(&mut *tx, &reservation).await?;
+            require_refund(&mut *tx, &attestation, reservation, now).await?
+        }
+        Settlement::Reacquire => {
+            let account = reservation.account_id;
+            let quota = may_reacquire(state, &event, &reservation, account_open).await?
+                && tx
+                    .inventory()
+                    .try_take_quota(account, &holds(&items, &ticket_types)?)
+                    .await?;
+            if quota && tx.inventory().try_sell(&items).await? {
+                issue(state, &mut *tx, reservation, &ticket_types, now).await?
+            } else {
+                if quota {
+                    tx.inventory().return_quota(account, &items).await?;
+                }
+                let mut reservation = reservation;
+                reservation.status = reservation.status.require_refund()?;
+                reservation.updated_at = now;
+                tx.reservations().update_reservation(&reservation).await?;
+                require_refund(&mut *tx, &attestation, reservation, now).await?
+            }
+        }
+        Settlement::RefundPayment => {
+            require_refund(&mut *tx, &attestation, reservation, now).await?
+        }
+    };
+    tx.commit().await?;
+    log_settlement(attestor, &view);
+    Ok(view)
+}
+
+/// Refuses a payment Kippu must not record: from an attestor the sale does not accept, from a
+/// sandbox for a live sale, or of the wrong amount. The attestor the buyer checked out with
+/// stays accepted for that reservation even if the sale drops it later: the buyer may already
+/// have paid it, and refusing the report would leave the money with neither tickets nor a
+/// refund obligation.
+fn check_payment(
+    attestor: &Attestor,
+    sale: &Sale,
+    reservation: &Reservation,
+    payment: &IncomingPayment,
+) -> ApiResult<()> {
+    let chosen_at_checkout = reservation.attestor_id == Some(attestor.id);
+    if !attestor.id.is_builtin() && !chosen_at_checkout && !sale.accepts(attestor.id) {
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,
             ProblemKind::ATTESTOR_NOT_ACCEPTED,
@@ -242,61 +345,46 @@ pub async fn settle(
             ),
         ));
     }
-    let ticket_types = store.list_ticket_types(reservation.sale_id).await?;
+    Ok(())
+}
 
-    let now = state.now();
-    let attestation = PaymentAttestation {
-        attestor_id: attestor.id,
-        attestation_id: payment.attestation_id,
-        reservation_id: payment.reservation_id,
-        amount: payment.amount,
-        occurred_at: payment.occurred_at.unwrap_or(now),
-        received_at: now,
-        disposition: PaymentDisposition::Applied,
-    };
-    let mut tx = store.begin().await?;
-    if let Insertion::Existing(existing) = tx.payments().insert_attestation(&attestation).await? {
-        drop(tx);
-        return replay(state, existing).await;
+/// Refuses a delivery that reuses a recorded `attestation_id` for another reservation or
+/// amount: answering it as a replay would tell the attestor that a payment it never recorded
+/// had settled.
+fn check_same_payment(
+    existing: &PaymentAttestation,
+    reservation_id: ReservationId,
+    amount: Money,
+) -> ApiResult<()> {
+    if existing.reservation_id == reservation_id && existing.amount == amount {
+        Ok(())
+    } else {
+        Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ProblemKind::ATTESTATION_ID_REUSED,
+            "this attestation_id was already recorded for another reservation or amount",
+        ))
     }
-    let reservation = tx
-        .reservations()
-        .lock_reservation(payment.reservation_id)
-        .await?
-        .ok_or_else(|| ApiError::not_found("reservation"))?;
+}
 
-    let items = line_items(&reservation);
-    let view = match reservation.status.settle() {
-        Settlement::Issue => {
-            tx.inventory().sell_held(&items).await?;
-            issue(state, &mut *tx, reservation, &ticket_types, now).await?
-        }
-        Settlement::Reacquire => {
-            let account = reservation.account_id;
-            let quota = tx
-                .inventory()
-                .try_take_quota(account, &holds(&items, &ticket_types)?)
-                .await?;
-            if quota && tx.inventory().try_sell(&items).await? {
-                issue(state, &mut *tx, reservation, &ticket_types, now).await?
-            } else {
-                if quota {
-                    tx.inventory().return_quota(account, &items).await?;
-                }
-                let mut reservation = reservation;
-                reservation.status = reservation.status.require_refund()?;
-                reservation.updated_at = now;
-                tx.reservations().update_reservation(&reservation).await?;
-                require_refund(&mut *tx, &attestation, reservation, now).await?
-            }
-        }
-        Settlement::RefundPayment => {
-            require_refund(&mut *tx, &attestation, reservation, now).await?
-        }
-    };
-    tx.commit().await?;
-    log_settlement(attestor, &view);
-    Ok(view)
+/// Whether a lapsed reservation may take its tickets again for a payment that arrived late:
+/// as a purchase would, only while its event is on sale and for an account that is open and
+/// not denied entry. The sale's window is not checked: the buyer checked out while it was
+/// open. Read outside the payment's transaction, like the worker's catalog checks; only late
+/// payments pay for the denial read.
+async fn may_reacquire(
+    state: &AppState,
+    event: &EventSummary,
+    reservation: &Reservation,
+    account_open: bool,
+) -> ApiResult<bool> {
+    if !event.is_on_sale() || !account_open {
+        return Ok(false);
+    }
+    Ok(!state
+        .store()
+        .account_denied(event.organization_id, event.id, reservation.account_id)
+        .await?)
 }
 
 fn log_settlement(attestor: &Attestor, view: &PaymentResult) {

@@ -2,10 +2,11 @@
 
 use async_nats::HeaderMap;
 use async_nats::jetstream::Message;
+use async_nats::jetstream::stream::RawMessageErrorKind;
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use kippu_domain::purchase::PurchaseRequest;
-use kippu_store::{InboxDelivery, PurchaseInbox, StoreError, StoreResult};
+use kippu_store::{Enqueued, InboxDelivery, PurchaseInbox, StoreError, StoreResult};
 
 use crate::queue::{NatsQueue, unavailable};
 
@@ -36,15 +37,23 @@ impl InboxDelivery for NatsDelivery {
 
 #[async_trait]
 impl PurchaseInbox for NatsQueue {
-    async fn enqueue(&self, request: &PurchaseRequest) -> StoreResult<()> {
+    async fn enqueue(&self, request: &PurchaseRequest) -> StoreResult<Enqueued> {
         let payload = serde_json::to_vec(request).map_err(StoreError::backend)?;
-        self.publish(
-            self.inbox_subject.clone(),
-            request.id.to_string(),
-            HeaderMap::new(),
-            payload,
-        )
-        .await
+        let ack = self
+            .publish(
+                self.inbox_subject.clone(),
+                request.id.to_string(),
+                HeaderMap::new(),
+                payload,
+            )
+            .await?;
+        if !ack.duplicate {
+            return Ok(Enqueued::Accepted);
+        }
+        let first = kippu_telemetry::call("nats", "get", self.stored(ack.sequence)).await?;
+        Ok(Enqueued::Duplicate(
+            first.filter(|first| first.id == request.id),
+        ))
     }
 
     async fn receive(&self, limit: usize) -> StoreResult<Vec<Box<dyn InboxDelivery>>> {
@@ -53,6 +62,17 @@ impl PurchaseInbox for NatsQueue {
 }
 
 impl NatsQueue {
+    /// The request stored at `sequence` of the inbox, or `None` once it was acknowledged.
+    async fn stored(&self, sequence: u64) -> StoreResult<Option<PurchaseRequest>> {
+        match self.purchases.get_raw_message(sequence).await {
+            Ok(message) => serde_json::from_slice(&message.payload)
+                .map(Some)
+                .map_err(StoreError::backend),
+            Err(error) if error.kind() == RawMessageErrorKind::NoMessageFound => Ok(None),
+            Err(error) => Err(unavailable(error)),
+        }
+    }
+
     /// Pulls up to `limit` requests from the inbox consumer.
     async fn pull(&self, limit: usize) -> StoreResult<Vec<Box<dyn InboxDelivery>>> {
         let mut batch = self

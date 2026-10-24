@@ -26,6 +26,9 @@ database.url = "postgres://kippu:secret@db.internal/kippu?max_connections=32"
 `max_connections` (default 16) sets the pool size per instance; every other parameter is
 passed to libpq as usual (`sslmode`, `application_name`, …).
 
-Waiting-room positions come from a per-sale counter row incremented by a single atomic
-`INSERT … ON CONFLICT DO UPDATE`; positions must be dense per sale for admission batches to
-mean "the next N people", which a shared sequence would not give.
+Waiting-room positions come from 128 counter rows per room, not a sequence: positions must be
+all but consecutive per sale for admission batches to mean "the next N people". A join takes
+the lowest position of a counter no other join holds with `FOR UPDATE SKIP LOCKED` and enters
+the account in the same statement, so joins do not wait for each other. The counter is picked
+in a CTE joined by `FROM`: as a subquery in `WHERE` it would run again when PostgreSQL
+re-checks a counter another join has just moved, and the join would often update nothing.

@@ -32,7 +32,9 @@ provider being reachable.
 - **`kippu_core::auth::external::link(&state, &account, &identity)`** links a provider to an
   account that is already signed in, e.g. from its settings page.
 - **`kippu_core::auth::sessions::issue(&state, account)`** signs an account in: an access
-  token plus a single-use refresh token, the same response as `POST /v1/auth/login`.
+  token plus a single-use refresh token, the same response as `POST /v1/auth/login`. A closed
+  account is refused (`403 account-closed`): its identities stay linked to it, so a person
+  who closed their account cannot sign up again through the same provider.
 
 People manage their sign-in methods themselves:
 
@@ -42,6 +44,7 @@ People manage their sign-in methods themselves:
 | `DELETE /v1/me/identities/{provider}/{subject}` | Unlink one. The last way to sign in cannot be removed (`409 last-sign-in-method`) until a password is set. |
 | `PUT /v1/me/email` | Add or change the email, e.g. after signing up through WeChat. |
 | `PUT /v1/me/password` | Set a first password (no current one needed), or change it (`current_password` required). |
+| `DELETE /v1/me` | Close the account: `current_password` if it has one, otherwise no body at all. |
 
 ## Writing a provider module
 
@@ -70,6 +73,11 @@ Ok(Json(sessions::issue(&state, linked.account).await?))
 
 Keep the module stateless like the rest of Kippu: anything that must survive from `start` to
 `callback` travels with the client (a cookie, the app) or is signed.
+
+Give the module's own request bodies and queries `#[serde(deny_unknown_fields)]`, as Kippu's
+are, so a misspelled field is refused instead of ignored. The `callback` query is the
+exception: the provider writes it, and providers add parameters of their own (`scope`, `iss`,
+`authuser`…), so keep it lenient.
 
 The `external_login` example in `crates/kippu/server/examples` is a complete module with a
 pretend provider that approves everyone, so it runs without registering anywhere:

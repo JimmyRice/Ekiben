@@ -70,3 +70,43 @@ async fn a_body_over_the_limit_is_too_large() {
     let reply = app.call_raw(Method::POST, REGISTER, &[JSON], body).await;
     assert_problem(&reply, StatusCode::PAYLOAD_TOO_LARGE, "payload-too-large");
 }
+
+#[tokio::test]
+async fn unknown_fields_are_refused() {
+    let app = TestApp::start().await;
+    let body = r#"{"email": "a@example.org", "password": "correct horse battery",
+                   "display_name": "A", "nickname": "a"}"#;
+    let reply = app.call_raw(Method::POST, REGISTER, &[JSON], body).await;
+    assert_problem(&reply, StatusCode::UNPROCESSABLE_ENTITY, "invalid-json");
+}
+
+#[tokio::test]
+async fn every_request_body_refuses_unknown_fields() {
+    let app = TestApp::start().await;
+    let openapi = app
+        .call(Method::GET, "/openapi.json", None, None)
+        .await
+        .body;
+    let schemas = &openapi["components"]["schemas"];
+    let mut checked = 0;
+    for (path, operations) in openapi["paths"].as_object().unwrap() {
+        for (method, operation) in operations.as_object().unwrap() {
+            let Some(content) = operation["requestBody"]["content"].as_object() else {
+                continue;
+            };
+            for (media_type, body) in content {
+                let Some(reference) = body["schema"]["$ref"].as_str() else {
+                    continue;
+                };
+                let name = reference.trim_start_matches("#/components/schemas/");
+                assert_eq!(
+                    schemas[name]["additionalProperties"], false,
+                    "{method} {path} ({media_type}) takes {name}, which accepts unknown fields: \
+                     add #[serde(deny_unknown_fields)]"
+                );
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 30, "only {checked} request bodies found");
+}

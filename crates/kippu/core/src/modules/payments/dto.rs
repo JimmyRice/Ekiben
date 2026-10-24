@@ -1,9 +1,11 @@
 use kippu_domain::outbox::IntegrationEvent;
 use kippu_domain::payment::{Attestor, Environment, PaymentDisposition};
-use kippu_domain::refund::Refund;
+use kippu_domain::refund::{Refund, RefundStatus};
 use kippu_domain::reservation::Reservation;
-use kippu_domain::{Money, RefundId, ReservationId, TicketId, Timestamp, ValidationError};
-use kippu_store::OutboxRecord;
+use kippu_domain::{
+    AttestorId, Money, RefundId, ReservationId, TicketId, Timestamp, ValidationError,
+};
+use kippu_store::{Keyset, OutboxRecord, PageRequest};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
@@ -11,12 +13,15 @@ use super::service::{
     AttestorReport, AttestorWithKeys, IncomingPayment, ManualPayment, NewAttestor, NewAttestorKey,
     PaymentResult, RefundRequest,
 };
+use crate::error::ApiError;
+use crate::http::{ListingTag, PageQuery};
 use crate::keys::encode_key;
 
 /// Register an attestor and its first keys.
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateAttestorRequest {
-    /// Display name, e.g. "Stripe gateway".
+    /// Display name, shown to buyers as a payment method, e.g. "Credit card (Stripe)".
     pub name: String,
     /// `live` or `sandbox`. Sandbox attestors can only settle sandbox sales.
     pub environment: Environment,
@@ -27,6 +32,7 @@ pub struct CreateAttestorRequest {
 
 /// Register a signing key for an attestor.
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AttestorKeyRequest {
     /// The attestor's name for the key, sent in `Kippu-Signature`.
     pub key_id: String,
@@ -36,6 +42,7 @@ pub struct AttestorKeyRequest {
 
 /// Revoke or restore.
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RevokedRequest {
     /// `true` to stop believing it.
     pub revoked: bool,
@@ -78,6 +85,7 @@ pub enum PaymentOutcome {
 
 /// An attestor's statement about a payment. Send it signed (see `Kippu-Signature`).
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AttestationRequest {
     /// The attestor's own reference for the payment, unique per attestor. Retries reuse it.
     pub attestation_id: String,
@@ -96,6 +104,7 @@ pub struct AttestationRequest {
 
 /// Record a payment taken in person.
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ManualPaymentRequest {
     /// Your reference for the payment, e.g. a receipt number. Unique.
     pub attestation_id: String,
@@ -131,6 +140,7 @@ pub struct RefundTicketsRequest {
 
 /// Where to continue reading an event feed.
 #[derive(Debug, Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
 #[into_params(parameter_in = Query)]
 pub struct FeedQuery {
     /// Return events after this sequence number (default 0).
@@ -265,5 +275,50 @@ impl From<OutboxRecord> for FeedEvent {
             created_at: record.created_at,
             event: record.event,
         }
+    }
+}
+
+/// A way to pay that a sale accepts: pass its `id` as `attestor_id` when checking out.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PaymentMethod {
+    /// The attestor to check out with.
+    pub id: AttestorId,
+    /// Its display name, e.g. "Credit card (Stripe)".
+    pub name: String,
+}
+
+impl From<Attestor> for PaymentMethod {
+    fn from(attestor: Attestor) -> Self {
+        Self {
+            id: attestor.id,
+            name: attestor.name,
+        }
+    }
+}
+
+/// Which of an event's refunds to list, and which page.
+#[derive(Debug, Default, Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
+#[into_params(parameter_in = Query)]
+pub struct EventRefundsQuery {
+    /// Only refunds in this status: `pending` or `completed`.
+    pub status: Option<RefundStatus>,
+    /// At most this many refunds (default 50, at most 200).
+    pub limit: Option<u32>,
+    /// The `next_cursor` of the previous page. Keep the other parameters as they were.
+    pub cursor: Option<String>,
+}
+
+impl EventRefundsQuery {
+    /// The status to list and the page.
+    pub(crate) fn into_parts(
+        self,
+    ) -> Result<(Option<RefundStatus>, PageRequest<Keyset>), ApiError> {
+        let page = PageQuery {
+            limit: self.limit,
+            cursor: self.cursor,
+        }
+        .page(ListingTag::EVENT_REFUNDS)?;
+        Ok((self.status, page))
     }
 }

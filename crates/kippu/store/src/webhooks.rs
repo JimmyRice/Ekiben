@@ -9,7 +9,8 @@ use crate::{Lease, StoreResult};
 pub struct WebhookRun {
     /// The outbox sequence delivered (or passed over) through.
     pub delivered_through: i64,
-    /// Consecutive failures, 0 after a run that ended well.
+    /// Failures in a row: 0 after a run that ended well, 1 after a run that got events
+    /// through before failing.
     pub failures: u32,
     /// What went wrong, if the run ended in a failure.
     pub last_error: Option<String>,

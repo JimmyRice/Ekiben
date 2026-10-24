@@ -195,7 +195,11 @@ Content-Type: application/merge-patch+json
 { "version": 1, "accepted_attestors": ["{{attestor_id}}"] }
 ```
 
-Publish the event the same way:
+`PUT` replaces every editable field at once instead. Like every body, it holds only the fields
+the OpenAPI document lists: a misspelled field, or a read-only one such as `id` or
+`created_at` echoed from a `GET`, fails with `422 invalid-json` instead of being ignored.
+
+Publish the event with a `PATCH` the same way:
 
 ```http
 PATCH /v1/events/{{event_id}} HTTP/1.1
@@ -239,6 +243,19 @@ While `next_cursor` is not `null`, more follow: send the same request with
 `&cursor=<next_cursor>` for the next page. Cursors are opaque and resume exactly where the
 page ended, however many events were added meanwhile.
 
+The organizations running them are listed too, once they have a published (or cancelled)
+event; each one's events take the same parameters at
+`GET /v1/organizations/{{organization_id}}/events`, which shows its own organizers the drafts as
+well:
+
+```http
+GET /v1/organizations HTTP/1.1
+Host: localhost:8080
+```
+
+For readable URLs, `GET /v1/events/by-slug/{slug}` and `GET /v1/organizations/by-slug/{slug}`
+find one by its slug, under the same rules as by id.
+
 Ask for two tickets. The request is queued durably and answered with `202 Accepted` and a
 `Location`; sending it again with the same `Idempotency-Key` returns the same request instead
 of buying twice:
@@ -262,6 +279,14 @@ Host: localhost:8080
 Authorization: Bearer {{buyer_token}}
 ```
 
+The sale names the payment methods a buyer may choose — the attestors it accepts that can
+settle it, `{"id", "name"}` each:
+
+```http
+GET /v1/sales/{{sale_id}}/payment-methods HTTP/1.1
+Host: localhost:8080
+```
+
 Choose how to pay. The reservation becomes `payment_pending` and holds the tickets until it
 expires:
 
@@ -273,6 +298,13 @@ Content-Type: application/json
 
 { "attestor_id": "{{attestor_id}}" }
 ```
+
+The organizer follows orders as they come in: the stock of each ticket type
+(`GET /v1/sales/{{sale_id}}/inventory`: held, sold, left), `GET /v1/events/{{event_id}}/reservations`
+(optionally `?status=issued`), each reservation and its tickets
+(`GET /v1/reservations/{{reservation_id}}/tickets`, without the signed bytes, which only the
+holder gets), and the refunds still to hand back in cash
+(`GET /v1/events/{{event_id}}/refunds?status=pending`).
 
 ## 17. The attestor reports the payment
 

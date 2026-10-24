@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use kippu_domain::catalog::{EventSummary, TicketType};
+use kippu_domain::catalog::{Audience, EventSummary, Sale, TicketType};
 use kippu_domain::{Money, SaleId, TicketTypeId, Timestamp, ValidationError};
 
 use super::{TicketTypeAvailability, check_version, visible_sale, writable_sale};
@@ -84,6 +84,18 @@ pub async fn visible_ticket_type(
         .ok_or_else(|| ApiError::not_found("ticket type"))?;
     visible_sale(state, principal, ticket_type.sale_id).await?;
     Ok(ticket_type)
+}
+
+/// Checks that a private sale's ticket types are free: their tickets are granted, never sold.
+fn check_price(sale: &Sale, ticket_type: &TicketType) -> ApiResult<()> {
+    if sale.audience == Audience::Private && !ticket_type.price.is_zero() {
+        return Err(ValidationError::new(
+            "price",
+            "must be zero in a private sale: its tickets are granted, free of charge",
+        )
+        .into());
+    }
+    Ok(())
 }
 
 /// Checks that buyers' refunds of `ticket_type` end before `event` opens: after that a refund
@@ -183,6 +195,7 @@ pub async fn create_ticket_type(
         version: 1,
     };
     ticket_type.validate()?;
+    check_price(&sale, &ticket_type)?;
     check_refund_period(&ticket_type, &event)?;
     check_ticket_length(state, &ticket_type)?;
     check_currency(state, &ticket_type).await?;
@@ -205,7 +218,7 @@ pub async fn update_ticket_type(
         .ticket_type(id)
         .await?
         .ok_or_else(|| ApiError::not_found("ticket type"))?;
-    let (_, event) = writable_sale(state, principal, current.sale_id).await?;
+    let (sale, event) = writable_sale(state, principal, current.sale_id).await?;
     check_version(current.version, expected_version)?;
     let ticket_type = TicketType {
         name: changes.name.unwrap_or(current.name),
@@ -224,6 +237,7 @@ pub async fn update_ticket_type(
         ..current
     };
     ticket_type.validate()?;
+    check_price(&sale, &ticket_type)?;
     check_refund_period(&ticket_type, &event)?;
     check_ticket_length(state, &ticket_type)?;
     check_currency(state, &ticket_type).await?;

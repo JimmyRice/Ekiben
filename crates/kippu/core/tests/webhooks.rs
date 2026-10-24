@@ -27,6 +27,8 @@ use support::{Shop, TestApp};
 struct Inbox {
     attempts: Mutex<Vec<(HeaderMap, Bytes, bool)>>,
     failing: AtomicBool,
+    /// Refuse each delivery the first time it arrives, accept it when retried.
+    refusing_first_attempts: AtomicBool,
 }
 
 impl Inbox {
@@ -46,8 +48,14 @@ impl Inbox {
 }
 
 async fn receive(State(inbox): State<Arc<Inbox>>, headers: HeaderMap, body: Bytes) -> StatusCode {
-    let accept = !inbox.failing.load(Ordering::SeqCst);
-    inbox.attempts.lock().unwrap().push((headers, body, accept));
+    let mut attempts = inbox.attempts.lock().unwrap();
+    let retried = attempts
+        .iter()
+        .any(|(seen, _, _)| seen.get("kippu-delivery") == headers.get("kippu-delivery"));
+    let accept = !inbox.failing.load(Ordering::SeqCst)
+        && (retried || !inbox.refusing_first_attempts.load(Ordering::SeqCst));
+    attempts.push((headers, body, accept));
+    drop(attempts);
     if accept {
         StatusCode::NO_CONTENT
     } else {
@@ -241,6 +249,45 @@ async fn a_failing_receiver_is_retried_later_without_losing_events() {
         .await;
     assert_eq!(recovered.body["failures"], 0);
     assert_eq!(recovered.body["last_error"], Value::Null);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failure_after_progress_starts_a_new_backoff() {
+    let app = app().await;
+    let inbox = Arc::new(Inbox::default());
+    let url = receiver(inbox.clone()).await;
+    let shop = app.shop(10, 0, json!({})).await;
+    let created = app
+        .call(
+            Method::POST,
+            "/v1/admin/webhooks",
+            Some(&app.root_token()),
+            Some(json!({ "url": url, "topics": ["tickets.issued"] })),
+        )
+        .await;
+    assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.body);
+    let path = format!("/v1/webhooks/{}", created.body["id"].as_str().unwrap());
+    for _ in 0..4 {
+        free_ticket(&app, &shop).await;
+    }
+
+    // Every run gets one event through and fails on the next: each failure follows progress,
+    // so the backoff never grows beyond the first step.
+    inbox.refusing_first_attempts.store(true, Ordering::SeqCst);
+    for run in 1..=4 {
+        app.drain("webhooks").await;
+        let webhook = app
+            .call(Method::GET, &path, Some(&app.root_token()), None)
+            .await;
+        assert_eq!(webhook.body["failures"], 1, "run {run}: {:?}", webhook.body);
+        app.clock.advance(Duration::seconds(3));
+    }
+    app.drain("webhooks").await;
+    assert_eq!(inbox.accepted().len(), 4, "every event delivered");
+    let webhook = app
+        .call(Method::GET, &path, Some(&app.root_token()), None)
+        .await;
+    assert_eq!(webhook.body["failures"], 0, "{:?}", webhook.body);
 }
 
 #[tokio::test]
