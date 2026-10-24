@@ -237,3 +237,59 @@ async fn without_object_storage_images_are_unavailable() {
         "urn:kippu:problem:images-not-configured"
     );
 }
+
+#[tokio::test]
+async fn deleting_a_draft_removes_its_images() {
+    let store = Arc::new(InMemory::new());
+    let app = app_with(store.clone(), |_| {}).await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let draft = app
+        .call(
+            Method::POST,
+            &format!("/v1/organizations/{}/events", shop.organization_id),
+            Some(&shop.organizer),
+            Some(json!({
+                "slug": "draft-with-poster",
+                "title": "Draft",
+                "venue": "Hall",
+                "starts_at": "2031-05-01T10:00:00Z",
+                "ends_at": "2031-05-02T18:00:00Z",
+            })),
+        )
+        .await;
+    let draft_id = draft.body["id"].as_str().unwrap();
+    let draft_shop = Shop {
+        organization_id: shop.organization_id.clone(),
+        organizer: shop.organizer.clone(),
+        event_id: draft_id.to_owned(),
+        sale_id: String::new(),
+        ticket_type_id: String::new(),
+    };
+    let uploaded = upload(&app, &draft_shop, &shop.organizer, "image/png", PNG).await;
+    assert_eq!(uploaded.status, StatusCode::CREATED, "{:?}", uploaded.body);
+    let key = Path::from(format!(
+        "events/{draft_id}/images/{}.png",
+        uploaded.body["id"].as_str().unwrap()
+    ));
+    assert!(store.get(&key).await.is_ok());
+
+    let deleted = app
+        .call(
+            Method::DELETE,
+            &format!("/v1/events/{draft_id}"),
+            Some(&shop.organizer),
+            None,
+        )
+        .await;
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{:?}", deleted.body);
+    assert!(store.get(&key).await.is_err(), "the object is gone too");
+    let gone = app
+        .call(
+            Method::GET,
+            &format!("/v1/events/{draft_id}"),
+            Some(&shop.organizer),
+            None,
+        )
+        .await;
+    assert_eq!(gone.status, StatusCode::NOT_FOUND);
+}

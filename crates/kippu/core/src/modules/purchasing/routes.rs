@@ -7,10 +7,13 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use kippu_domain::purchase::PurchaseRequest;
 use kippu_domain::reservation::Reservation;
-use kippu_domain::{PurchaseRequestId, ReservationId, SaleId};
+use kippu_domain::{AccountId, EventId, PurchaseRequestId, ReservationId, SaleId};
 
-use super::dto::{CheckoutRequest, PollQuery, PurchaseRequestBody};
-use super::service::{self, PurchaseSubmission};
+use super::dto::{
+    BuyerView, CheckoutRequest, EventReservationsQuery, GrantRequest, PollQuery,
+    PurchaseRequestBody,
+};
+use super::service::{self, Grant, PurchaseSubmission};
 use crate::app::AppState;
 use crate::auth::Principal;
 use crate::error::{ApiResult, Problem};
@@ -73,6 +76,56 @@ pub(crate) async fn create_purchase_request(
     Ok(response)
 }
 
+/// Grant an account free tickets of a private sale, for guests, exhibitors and other people
+/// the organizers choose. The tickets are issued at once, under the same per-account limits,
+/// stock and deny lists as purchases; the reservation's holder sees and refunds them as any
+/// other.
+///
+/// Requires an `Idempotency-Key`: granting again with the same key and the same account
+/// answers 200 with the first grant and never grants twice.
+#[utoipa::path(
+    post, path = "/v1/sales/{sale_id}/grants", tag = TAG,
+    security(("bearer" = [])),
+    params(
+        ("sale_id" = SaleId, Path),
+        ("Idempotency-Key" = String, Header, description = "Client-chosen key that makes retries safe"),
+    ),
+    request_body = GrantRequest,
+    responses(
+        (status = 201, description = "Granted; the reservation is `issued`", body = Reservation),
+        (status = 200, description = "Granted before with this key", body = Reservation),
+        (status = 403, body = Problem),
+        (status = 404, body = Problem),
+        (status = 409, description = "Not a private sale, not open, sold out, over the limit, or the account denied or closed", body = Problem),
+        (status = 422, body = Problem),
+    )
+)]
+pub(crate) async fn grant_tickets(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(sale_id): Path<SaleId>,
+    headers: HeaderMap,
+    Json(body): Json<GrantRequest>,
+) -> ApiResult<Response> {
+    let grant = Grant {
+        idempotency_key: header(&headers, IDEMPOTENCY_KEY),
+        account_id: body.account_id,
+        items: body.items,
+    };
+    let granted = service::grant_tickets(&state, &principal, sale_id, grant).await?;
+    let status = if granted.created {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+    let location = format!("/v1/reservations/{}", granted.reservation.id);
+    let mut response = (status, Json(granted.reservation)).into_response();
+    if let Ok(location) = HeaderValue::from_str(&location) {
+        response.headers_mut().insert(LOCATION, location);
+    }
+    Ok(response)
+}
+
 /// Poll a purchase request: `queued`, `reserved` (with the reservation) or `rejected`.
 /// Use the `Location` from submitting it as is.
 #[utoipa::path(
@@ -113,7 +166,60 @@ pub(crate) async fn my_reservations(
     )))
 }
 
-/// A reservation.
+/// An event's reservations, newest first, for its organizers: who bought what, in every
+/// status or in one.
+#[utoipa::path(
+    get, path = "/v1/events/{event_id}/reservations", tag = TAG,
+    security(("bearer" = [])),
+    params(("event_id" = EventId, Path), EventReservationsQuery),
+    responses(
+        (status = 200, body = Listing<Reservation>),
+        (status = 400, body = Problem),
+        (status = 403, body = Problem),
+        (status = 404, body = Problem)
+    )
+)]
+pub(crate) async fn list_event_reservations(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(event_id): Path<EventId>,
+    Query(query): Query<EventReservationsQuery>,
+) -> ApiResult<Json<Listing<Reservation>>> {
+    let (status, page) = query.into_parts()?;
+    let reservations =
+        service::event_reservations(&state, &principal, event_id, status, page).await?;
+    Ok(Json(Listing::page(
+        reservations,
+        ListingTag::EVENT_RESERVATIONS,
+        |reservation| reservation,
+    )))
+}
+
+/// Someone who ordered for an event, for its organizers: their name and the contact details
+/// they share, to reach them about the event. Not their email.
+#[utoipa::path(
+    get, path = "/v1/events/{event_id}/buyers/{account_id}", tag = TAG,
+    security(("bearer" = [])),
+    params(("event_id" = EventId, Path), ("account_id" = AccountId, Path)),
+    responses(
+        (status = 200, body = BuyerView),
+        (status = 403, description = "Not an organizer", body = Problem),
+        (status = 404, description = "No such buyer of your event", body = Problem)
+    )
+)]
+pub(crate) async fn get_buyer(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((event_id, account_id)): Path<(EventId, AccountId)>,
+) -> ApiResult<Json<BuyerView>> {
+    Ok(Json(
+        service::buyer(&state, &principal, event_id, account_id)
+            .await?
+            .into(),
+    ))
+}
+
+/// A reservation: your own, or, for organizers, one for their event.
 #[utoipa::path(
     get, path = "/v1/reservations/{reservation_id}", tag = TAG,
     security(("bearer" = [])),

@@ -8,46 +8,58 @@
 
 mod support;
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use axum::http::{Method, StatusCode};
 use kippu_domain::purchase::PurchaseRequest;
-use kippu_store::{EventBus, InboxDelivery, OutboxRecord, PurchaseInbox, StoreResult};
+use kippu_store::{Enqueued, EventBus, InboxDelivery, OutboxRecord, PurchaseInbox, StoreResult};
 use serde_json::json;
 use support::{Shop, TestApp, uuid_suffix};
 
 /// An inbox that keeps requests in memory and drops ids it has seen, like JetStream's
-/// deduplication.
+/// deduplication: a duplicate is answered with the request held under its id until that one
+/// is acknowledged.
 #[derive(Default)]
 struct MemoryInbox {
     queued: Mutex<VecDeque<PurchaseRequest>>,
-    seen: Mutex<HashSet<String>>,
+    /// Every id ever enqueued, with the request while it is not acknowledged.
+    seen: Arc<Mutex<HashMap<String, Option<PurchaseRequest>>>>,
     enqueued: Mutex<usize>,
 }
 
-struct Delivery(PurchaseRequest);
+struct Delivery {
+    request: PurchaseRequest,
+    seen: Arc<Mutex<HashMap<String, Option<PurchaseRequest>>>>,
+}
 
 #[async_trait]
 impl InboxDelivery for Delivery {
     fn request(&self) -> &PurchaseRequest {
-        &self.0
+        &self.request
     }
 
     async fn ack(self: Box<Self>) -> StoreResult<()> {
+        self.seen
+            .lock()
+            .unwrap()
+            .insert(self.request.id.to_string(), None);
         Ok(())
     }
 }
 
 #[async_trait]
 impl PurchaseInbox for MemoryInbox {
-    async fn enqueue(&self, request: &PurchaseRequest) -> StoreResult<()> {
+    async fn enqueue(&self, request: &PurchaseRequest) -> StoreResult<Enqueued> {
         *self.enqueued.lock().unwrap() += 1;
-        if self.seen.lock().unwrap().insert(request.id.to_string()) {
-            self.queued.lock().unwrap().push_back(request.clone());
+        let mut seen = self.seen.lock().unwrap();
+        if let Some(held) = seen.get(&request.id.to_string()) {
+            return Ok(Enqueued::Duplicate(held.clone()));
         }
-        Ok(())
+        seen.insert(request.id.to_string(), Some(request.clone()));
+        self.queued.lock().unwrap().push_back(request.clone());
+        Ok(Enqueued::Accepted)
     }
 
     async fn receive(&self, limit: usize) -> StoreResult<Vec<Box<dyn InboxDelivery>>> {
@@ -55,7 +67,12 @@ impl PurchaseInbox for MemoryInbox {
         let count = limit.min(queued.len());
         Ok(queued
             .drain(..count)
-            .map(|request| Box::new(Delivery(request)) as Box<dyn InboxDelivery>)
+            .map(|request| {
+                Box::new(Delivery {
+                    request,
+                    seen: self.seen.clone(),
+                }) as Box<dyn InboxDelivery>
+            })
             .collect())
     }
 }
@@ -136,8 +153,26 @@ async fn queued_requests_are_answered_by_receipt_until_persisted() {
         "a receipt is only good for its owner"
     );
 
-    // A retry while it is in the inbox is deduplicated there.
-    submit(&app, &buyer, &shop, "inbox-1").await;
+    // A retry while it is in the inbox is deduplicated there and answered with the first
+    // attempt; one with another basket is refused, as the database would refuse it.
+    let retried = submit(&app, &buyer, &shop, "inbox-1").await;
+    assert_eq!(retried.status, StatusCode::ACCEPTED, "{:?}", retried.body);
+    assert_eq!(retried.body, accepted.body);
+    assert_eq!(inbox.queued.lock().unwrap().len(), 1);
+    let other_basket = app
+        .call_with(
+            Method::POST,
+            &format!("/v1/sales/{}/purchase-requests", shop.sale_id),
+            Some(&buyer),
+            Some(json!({ "items": [{ "ticket_type_id": shop.ticket_type_id, "quantity": 2 }] })),
+            &[("idempotency-key", "inbox-1")],
+        )
+        .await;
+    assert_eq!(
+        other_basket.body["type"], "urn:kippu:problem:idempotency-key-reused",
+        "{:?}",
+        other_basket.body
+    );
     assert_eq!(inbox.queued.lock().unwrap().len(), 1);
 
     app.drain("purchase-inbox").await;
@@ -168,6 +203,31 @@ async fn queued_requests_are_answered_by_receipt_until_persisted() {
         other_basket.body["type"],
         "urn:kippu:problem:idempotency-key-reused"
     );
+}
+
+#[tokio::test]
+async fn a_duplicate_the_inbox_no_longer_holds_is_answered_from_the_database() {
+    let inbox = Arc::new(MemoryInbox::default());
+    let app = app(inbox.clone(), Arc::new(MemoryBus::default())).await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let buyer = app.buyer().await;
+    let accepted = submit(&app, &buyer, &shop, "gone").await;
+    let id = accepted.body["id"].as_str().unwrap().to_owned();
+
+    // Acknowledged but, as seen by this retry, not in the database yet: never guess.
+    inbox.seen.lock().unwrap().insert(id.clone(), None);
+    let retried = submit(&app, &buyer, &shop, "gone").await;
+    assert_eq!(
+        retried.status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{:?}",
+        retried.body
+    );
+
+    app.drain("purchase-inbox").await;
+    let retried = submit(&app, &buyer, &shop, "gone").await;
+    assert_eq!(retried.status, StatusCode::ACCEPTED, "{:?}", retried.body);
+    assert_eq!(retried.body["id"], id.as_str());
 }
 
 #[tokio::test]

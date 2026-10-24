@@ -57,6 +57,7 @@ impl NatsQueue {
             headers,
             payload,
         )
-        .await
+        .await?;
+        Ok(())
     }
 }

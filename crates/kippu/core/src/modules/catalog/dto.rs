@@ -1,10 +1,12 @@
 use std::collections::BTreeMap;
 
+use kippu_domain::account::Organization;
 use kippu_domain::admission::AdmissionPolicy;
-use kippu_domain::catalog::{Address, EventStatus, Sale, TicketType};
+use kippu_domain::catalog::{Address, Audience, EventStatus, Inventory, Sale, TicketType};
 use kippu_domain::payment::Environment;
 use kippu_domain::validation::CountryCode;
-use kippu_domain::{AttestorId, Money, Timestamp, ValidationError};
+use kippu_domain::validation::Slug;
+use kippu_domain::{AttestorId, Money, OrganizationId, TicketTypeId, Timestamp, ValidationError};
 use kippu_store::{EventFilter, EventOrder, Keyset, PageRequest};
 use serde::{Deserialize, Deserializer, Serialize};
 use utoipa::{IntoParams, ToSchema};
@@ -22,6 +24,54 @@ fn present<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
     deserializer: D,
 ) -> Result<Option<T>, D::Error> {
     T::deserialize(deserializer).map(Some)
+}
+
+/// What anyone may know about an organization.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct OrganizationProfile {
+    /// Identity of the organization.
+    pub id: OrganizationId,
+    /// URL-friendly unique name.
+    pub slug: Slug,
+    /// Display name.
+    pub name: String,
+}
+
+impl From<Organization> for OrganizationProfile {
+    fn from(organization: Organization) -> Self {
+        Self {
+            id: organization.id,
+            slug: organization.slug,
+            name: organization.name,
+        }
+    }
+}
+
+/// The stock of a ticket type.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct InventoryView {
+    /// The ticket type.
+    pub ticket_type_id: TicketTypeId,
+    /// How many tickets it has in all.
+    pub capacity: u32,
+    /// Held by reservations not paid yet.
+    pub held: u32,
+    /// Sold (refunded tickets return to the stock).
+    pub sold: u32,
+    /// Left to buy: `capacity - held - sold`. Capacity can drop no lower than `held + sold`.
+    pub available: u32,
+}
+
+impl From<Inventory> for InventoryView {
+    fn from(inventory: Inventory) -> Self {
+        Self {
+            ticket_type_id: inventory.ticket_type_id,
+            capacity: inventory.capacity,
+            held: inventory.held,
+            sold: inventory.sold,
+            available: inventory.available(),
+        }
+    }
 }
 
 /// How events are listed: `starts_at` (default), `-starts_at`, `created_at` or `-created_at`.
@@ -153,6 +203,7 @@ pub(crate) fn required_version(version: Option<i64>) -> Result<i64, ValidationEr
 
 /// A new event. It starts as a draft.
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateEventRequest {
     /// URL-friendly unique name.
     pub slug: String,
@@ -179,6 +230,7 @@ pub struct CreateEventRequest {
 
 /// An event's new state. `version` must be the version you last read.
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateEventRequest {
     /// The version you are editing; a mismatch fails with 412.
     pub version: i64,
@@ -208,14 +260,21 @@ pub struct UpdateEventRequest {
 
 /// A sale's settings, for creating or (with `version`) updating it.
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SaleRequest {
     /// Required when updating: the version you are editing.
     pub version: Option<i64>,
     /// Display name, e.g. "Early bird".
     pub name: String,
-    /// When purchase requests start being accepted.
+    /// Who sees the sale: `public` (everyone), `invited` (only the accounts on its invitation
+    /// list buy from it) or `private` (nobody buys; its organizers grant its free tickets).
+    /// Private is chosen when the sale is created and kept. Absent: `public` for a new sale,
+    /// unchanged when updating.
+    #[serde(default)]
+    pub audience: Option<Audience>,
+    /// When purchase requests start being accepted (for a private sale: grants).
     pub opens_at: Timestamp,
-    /// When purchase requests stop being accepted.
+    /// When purchase requests stop being accepted (for a private sale: grants).
     pub closes_at: Timestamp,
     /// `{"mode": "open"}` or `{"mode": "waiting_room", "admit_per_tick": 100, "max_backlog": 500}`.
     #[serde(default = "open_admission")]
@@ -252,6 +311,7 @@ const fn live() -> Environment {
 
 /// A ticket type's settings, for creating or (with `version`) updating it.
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TicketTypeRequest {
     /// Required when updating: the version you are editing.
     pub version: Option<i64>,
@@ -320,6 +380,8 @@ pub struct SalePatch {
     pub version: i64,
     /// Display name.
     pub name: Option<String>,
+    /// `public` or `invited`; a private sale stays private.
+    pub audience: Option<Audience>,
     /// When purchase requests start being accepted.
     pub opens_at: Option<Timestamp>,
     /// When purchase requests stop being accepted.
@@ -437,6 +499,7 @@ impl From<SaleRequest> for SaleSettings {
     fn from(request: SaleRequest) -> Self {
         Self {
             name: request.name,
+            audience: request.audience,
             opens_at: request.opens_at,
             closes_at: request.closes_at,
             admission: request.admission,
@@ -452,6 +515,7 @@ impl From<SalePatch> for SaleChanges {
     fn from(patch: SalePatch) -> Self {
         Self {
             name: patch.name,
+            audience: patch.audience,
             opens_at: patch.opens_at,
             closes_at: patch.closes_at,
             admission: patch.admission,

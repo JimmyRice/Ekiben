@@ -8,9 +8,9 @@ use std::sync::Arc;
 use axum::http::{Method, StatusCode};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use kippu_domain::Duration;
+use kippu_domain::{Duration, SaleId};
 use serde_json::{Value, json};
-use support::{TestApp, uuid_suffix};
+use support::{Attestor, Shop, TestApp, uuid_suffix};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn many_concurrent_buyers_never_oversell() {
@@ -259,6 +259,165 @@ async fn a_late_payment_for_sold_out_stock_requires_a_refund() {
     assert_eq!(refunded.body["reservation"]["status"], "refunded");
 }
 
+/// What a late payment did, and how many tickets of the shop's type are left after it.
+async fn pay_late(
+    app: &TestApp,
+    shop: &Shop,
+    attestor: &Attestor,
+    reservation: &Value,
+) -> (Value, Value) {
+    let paid = app.pay(attestor, "late", reservation).await;
+    assert_eq!(paid.status, StatusCode::OK, "{:?}", paid.body);
+    let left = app
+        .call(
+            Method::GET,
+            &format!("/v1/ticket-types/{}", shop.ticket_type_id),
+            Some(&shop.organizer),
+            None,
+        )
+        .await;
+    (paid.body, left.body["available"].clone())
+}
+
+#[tokio::test]
+async fn a_late_payment_for_a_cancelled_event_requires_a_refund() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let attestor = app.attestor("live").await;
+    app.accept_attestor(&shop, &attestor.id).await;
+    let buyer = app.buyer().await;
+    let reservation = app.reserve(&buyer, &shop, 1).await;
+    expire_everything(&app).await;
+
+    let path = format!("/v1/events/{}", shop.event_id);
+    let current = app
+        .call(Method::GET, &path, Some(&shop.organizer), None)
+        .await;
+    let cancelled = app
+        .call(
+            Method::PATCH,
+            &path,
+            Some(&shop.organizer),
+            Some(json!({ "version": current.body["version"], "status": "cancelled" })),
+        )
+        .await;
+    assert_eq!(cancelled.status, StatusCode::OK);
+
+    let (paid, left) = pay_late(&app, &shop, &attestor, &reservation).await;
+    assert_eq!(paid["disposition"], "refund_required", "{paid:?}");
+    assert_eq!(paid["reservation"]["status"], "refund_required");
+    assert_eq!(left, 10, "no ticket taken for a cancelled event");
+}
+
+#[tokio::test]
+async fn a_payment_for_a_hold_of_a_cancelled_event_requires_a_refund() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let attestor = app.attestor("live").await;
+    app.accept_attestor(&shop, &attestor.id).await;
+    let buyer = app.buyer().await;
+    let reservation = app.reserve(&buyer, &shop, 2).await;
+
+    let path = format!("/v1/events/{}", shop.event_id);
+    let current = app
+        .call(Method::GET, &path, Some(&shop.organizer), None)
+        .await;
+    let cancelled = app
+        .call(
+            Method::PATCH,
+            &path,
+            Some(&shop.organizer),
+            Some(json!({ "version": current.body["version"], "status": "cancelled" })),
+        )
+        .await;
+    assert_eq!(cancelled.status, StatusCode::OK);
+
+    // The hold was still live: the money comes back, and so does the stock.
+    let (paid, left) = pay_late(&app, &shop, &attestor, &reservation).await;
+    assert_eq!(paid["disposition"], "refund_required", "{paid:?}");
+    assert_eq!(paid["reservation"]["status"], "refund_required");
+    assert_eq!(left, 10, "the hold was released");
+    assert_eq!(paid["ticket_ids"], json!([]));
+
+    let refunded = app
+        .signed(
+            &attestor,
+            Method::POST,
+            "/v1/payment-attestations",
+            Some(json!({ "attestation_id": "late", "outcome": "refunded" })),
+        )
+        .await;
+    assert_eq!(
+        refunded.body["reservation"]["status"], "refunded",
+        "{:?}",
+        refunded.body
+    );
+}
+
+#[tokio::test]
+async fn a_late_payment_from_a_denied_account_requires_a_refund() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let attestor = app.attestor("live").await;
+    app.accept_attestor(&shop, &attestor.id).await;
+    let buyer = app.buyer().await;
+    let reservation = app.reserve(&buyer, &shop, 1).await;
+    expire_everything(&app).await;
+
+    let denied = app
+        .call(
+            Method::POST,
+            &format!("/v1/events/{}/denials", shop.event_id),
+            Some(&shop.organizer),
+            Some(json!({ "subject": { "kind": "account", "id": reservation["account_id"] } })),
+        )
+        .await;
+    assert_eq!(denied.status, StatusCode::CREATED, "{:?}", denied.body);
+
+    let (paid, left) = pay_late(&app, &shop, &attestor, &reservation).await;
+    assert_eq!(paid["disposition"], "refund_required", "{paid:?}");
+    assert_eq!(left, 10, "a denied account takes no ticket");
+}
+
+#[tokio::test]
+async fn a_payment_from_a_closed_account_requires_a_refund() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let attestor = app.attestor("live").await;
+    app.accept_attestor(&shop, &attestor.id).await;
+    let buyer = app.buyer().await;
+    let reservation = app.reserve(&buyer, &shop, 2).await;
+    let closed = app
+        .call(
+            Method::DELETE,
+            "/v1/me",
+            Some(&buyer),
+            Some(json!({ "current_password": "correct horse battery" })),
+        )
+        .await;
+    assert_eq!(closed.status, StatusCode::NO_CONTENT, "{:?}", closed.body);
+
+    // The hold is still live, but nobody could fetch its tickets: the money and the stock
+    // come back.
+    let (paid, left) = pay_late(&app, &shop, &attestor, &reservation).await;
+    assert_eq!(paid["disposition"], "refund_required", "{paid:?}");
+    assert_eq!(paid["reservation"]["status"], "refund_required");
+    assert_eq!(paid["ticket_ids"], json!([]));
+    assert_eq!(left, 10, "the hold was released");
+
+    let feed = app
+        .signed(&attestor, Method::GET, "/v1/attestor/feed", None)
+        .await;
+    assert!(
+        feed.body.as_array().unwrap().iter().any(|entry| {
+            entry["event"]["topic"] == "refund.required"
+                && entry["event"]["attestation_id"] == "late"
+        }),
+        "{:?}",
+        feed.body
+    );
+}
+
 #[tokio::test]
 async fn a_second_payment_for_the_same_reservation_is_refunded() {
     let app = TestApp::start().await;
@@ -304,7 +463,7 @@ async fn untrusted_payments_are_refused() {
             None,
         )
         .await;
-    let mut sale = sale.body;
+    let mut sale = support::editable(sale.body);
     sale["accepted_attestors"] = json!([live.id, sandbox.id]);
     app.call(
         Method::PUT,
@@ -361,6 +520,124 @@ async fn untrusted_payments_are_refused() {
             .status,
         StatusCode::UNAUTHORIZED
     );
+}
+
+#[tokio::test]
+async fn the_checkout_attestor_settles_after_the_sale_drops_it() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let wallet = app.attestor("live").await;
+    let card = app.attestor("live").await;
+    app.accept_attestor(&shop, &wallet.id).await;
+    let buyer = app.buyer().await;
+    let chosen = app.reserve(&buyer, &shop, 1).await;
+    let other = app.reserve(&app.buyer().await, &shop, 1).await;
+    let checkout = app
+        .call(
+            Method::POST,
+            &format!(
+                "/v1/reservations/{}/checkout",
+                chosen["id"].as_str().unwrap()
+            ),
+            Some(&buyer),
+            Some(json!({ "attestor_id": wallet.id })),
+        )
+        .await;
+    assert_eq!(checkout.body["status"], "payment_pending");
+
+    // The organizer stops taking the wallet while the buyer is paying with it.
+    app.accept_attestor(&shop, &card.id).await;
+
+    let chosen_id = chosen["id"].as_str().unwrap();
+    let looked_up = app
+        .signed(
+            &wallet,
+            Method::GET,
+            &format!("/v1/attestor/reservations/{chosen_id}"),
+            None,
+        )
+        .await;
+    assert_eq!(looked_up.status, StatusCode::OK, "{:?}", looked_up.body);
+    let other_id = other["id"].as_str().unwrap();
+    let hidden = app
+        .signed(
+            &wallet,
+            Method::GET,
+            &format!("/v1/attestor/reservations/{other_id}"),
+            None,
+        )
+        .await;
+    assert_eq!(hidden.status, StatusCode::NOT_FOUND);
+
+    let paid = app.pay(&wallet, "w-1", &chosen).await;
+    assert_eq!(paid.status, StatusCode::OK, "{:?}", paid.body);
+    assert_eq!(paid.body["disposition"], "applied");
+    // A reservation that did not choose the wallet is refused as before.
+    assert_eq!(
+        app.pay(&wallet, "w-2", &other).await.body["type"],
+        "urn:kippu:problem:attestor-not-accepted"
+    );
+}
+
+#[tokio::test]
+async fn an_attestation_id_cannot_pay_for_another_reservation() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let attestor = app.attestor("live").await;
+    app.accept_attestor(&shop, &attestor.id).await;
+    let first = app.reserve(&app.buyer().await, &shop, 1).await;
+    let second = app.reserve(&app.buyer().await, &shop, 2).await;
+    let paid = app.pay(&attestor, "pi_once", &first).await;
+    assert_eq!(paid.body["disposition"], "applied");
+
+    for other in [
+        &second,
+        &json!({ "id": first["id"], "total": second["total"] }),
+    ] {
+        let reused = app.pay(&attestor, "pi_once", other).await;
+        assert_eq!(reused.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            reused.body["type"],
+            "urn:kippu:problem:attestation-id-reused"
+        );
+    }
+    let replayed = app.pay(&attestor, "pi_once", &first).await;
+    assert_eq!(replayed.body["replayed"], true);
+    let second_id = second["id"].as_str().unwrap();
+    let untouched = app
+        .call(
+            Method::GET,
+            &format!("/v1/reservations/{second_id}"),
+            Some(&shop.organizer),
+            None,
+        )
+        .await;
+    assert_eq!(untouched.body["status"], "reserved");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn simultaneous_payments_for_one_reservation_both_get_an_answer() {
+    let app = TestApp::start().await;
+    let shop = app.shop(20, 1_000, json!({})).await;
+    let card = app.attestor("live").await;
+    app.accept_attestor(&shop, &card.id).await;
+    for round in 0..5 {
+        let reservation = app.reserve(&app.buyer().await, &shop, 1).await;
+        // Two payments of one buyer (say, a double tap), not one payment delivered twice.
+        let (once, twice) = (format!("pi_once_{round}"), format!("pi_twice_{round}"));
+        let (first, second) = tokio::join!(
+            app.pay(&card, &once, &reservation),
+            app.pay(&card, &twice, &reservation),
+        );
+        assert_eq!(first.status, StatusCode::OK, "{:?}", first.body);
+        assert_eq!(second.status, StatusCode::OK, "{:?}", second.body);
+        let mut dispositions = [
+            first.body["disposition"].clone(),
+            second.body["disposition"].clone(),
+        ];
+        dispositions.sort_by_key(ToString::to_string);
+        assert_eq!(dispositions, [json!("applied"), json!("refund_required")]);
+    }
 }
 
 #[tokio::test]
@@ -442,6 +719,277 @@ async fn the_waiting_room_admits_in_batches() {
         StatusCode::FORBIDDEN,
         "passes are bound to their holder"
     );
+}
+
+#[tokio::test]
+async fn the_waiting_room_admits_nobody_before_the_sale_opens() {
+    let app = TestApp::start().await;
+    // Within the access tokens' lifetime, so the clock can move to the opening.
+    let opens_at = app.now() + Duration::minutes(10);
+    let shop = app
+        .shop(
+            10,
+            1_000,
+            json!({
+                "opens_at": opens_at.to_string(),
+                "admission": { "mode": "waiting_room", "admit_per_tick": 2, "max_backlog": 100 },
+            }),
+        )
+        .await;
+    let path = format!("/v1/sales/{}/waiting-room", shop.sale_id);
+    let first = app.buyer().await;
+    let place = app.call(Method::POST, &path, Some(&first), None).await;
+    assert_eq!(place.status, StatusCode::OK, "{:?}", place.body);
+    for _ in 0..4 {
+        app.call(Method::POST, &path, Some(&app.buyer().await), None)
+            .await;
+    }
+    let progress = async || {
+        app.call(Method::GET, &path, Some(&shop.organizer), None)
+            .await
+            .body
+    };
+    let ask = async || {
+        app.call(
+            Method::POST,
+            &format!("/v1/sales/{}/admission", shop.sale_id),
+            Some(&first),
+            Some(json!({ "queue_ticket": place.body["queue_ticket"]["token"] })),
+        )
+        .await
+        .body
+    };
+
+    app.drain("admission").await;
+    assert_eq!(
+        progress().await,
+        json!({ "last_position": 5, "admitted_through": 0 }),
+        "an empty backlog before the opening admits nobody"
+    );
+    assert_eq!(ask().await["status"], "waiting");
+
+    app.clock.set(opens_at);
+    app.drain("admission").await;
+    assert_eq!(
+        progress().await,
+        json!({ "last_position": 5, "admitted_through": 2 }),
+        "the opening admits one batch, not the whole room"
+    );
+    assert_eq!(ask().await["status"], "admitted");
+}
+
+#[tokio::test]
+async fn a_sold_out_sale_admits_nobody_until_tickets_come_back() {
+    let app = TestApp::start().await;
+    // Two tickets, batches of ten.
+    let shop = app.shop(2, 1_000, json!({ "admission": { "mode": "waiting_room", "admit_per_tick": 10, "max_backlog": 100 } })).await;
+    let room = format!("/v1/sales/{}/waiting-room", shop.sale_id);
+    let admission = format!("/v1/sales/{}/admission", shop.sale_id);
+    let mut queue = Vec::new();
+    for _ in 0..5 {
+        let buyer = app.buyer().await;
+        let place = app.call(Method::POST, &room, Some(&buyer), None).await;
+        queue.push((buyer, place.body["queue_ticket"]["token"].clone()));
+    }
+    let admitted_through = async || {
+        app.call(Method::GET, &room, Some(&shop.organizer), None)
+            .await
+            .body["admitted_through"]
+            .clone()
+    };
+    app.drain("admission").await;
+    assert_eq!(admitted_through().await, 2, "no more people than tickets");
+
+    // The first two reserve the two tickets and do not pay.
+    for (buyer, ticket) in &queue[..2] {
+        let admitted = app
+            .call(
+                Method::POST,
+                &admission,
+                Some(buyer),
+                Some(json!({ "queue_ticket": ticket })),
+            )
+            .await;
+        let pass = admitted.body["admission_pass"]["token"].as_str().unwrap();
+        let reply = app
+            .call_with(
+                Method::POST,
+                &format!("/v1/sales/{}/purchase-requests", shop.sale_id),
+                Some(buyer),
+                Some(
+                    json!({ "items": [{ "ticket_type_id": shop.ticket_type_id, "quantity": 1 }] }),
+                ),
+                &[
+                    ("idempotency-key", &uuid_suffix()),
+                    ("kippu-admission-pass", pass),
+                ],
+            )
+            .await;
+        assert_eq!(reply.status, StatusCode::ACCEPTED, "{:?}", reply.body);
+    }
+    app.drain("purchases").await;
+    app.drain("admission").await;
+    assert_eq!(
+        admitted_through().await,
+        2,
+        "sold out: nobody more is let in"
+    );
+    let (third, ticket) = &queue[2];
+    let waiting = app
+        .call(
+            Method::POST,
+            &admission,
+            Some(third),
+            Some(json!({ "queue_ticket": ticket })),
+        )
+        .await;
+    assert_eq!(waiting.body["status"], "waiting");
+
+    // Unpaid, the reservations expire: their tickets go to the next two in line.
+    expire_everything(&app).await;
+    app.drain("admission").await;
+    assert_eq!(admitted_through().await, 4);
+}
+
+#[tokio::test]
+async fn a_closed_sale_turns_its_waiting_room_away() {
+    let app = TestApp::start().await;
+    // Within the access tokens' lifetime, so the clock can move to the closing.
+    let closes_at = app.now() + Duration::minutes(10);
+    let shop = app
+        .shop(
+            10,
+            1_000,
+            json!({
+                "closes_at": closes_at.to_string(),
+                "admission": { "mode": "waiting_room", "admit_per_tick": 2, "max_backlog": 100 },
+            }),
+        )
+        .await;
+    let room = format!("/v1/sales/{}/waiting-room", shop.sale_id);
+    let buyer = app.buyer().await;
+    let place = app.call(Method::POST, &room, Some(&buyer), None).await;
+    assert_eq!(place.status, StatusCode::OK, "{:?}", place.body);
+    let late = app.buyer().await;
+
+    app.clock.set(closes_at);
+    let asked = app
+        .call(
+            Method::POST,
+            &format!("/v1/sales/{}/admission", shop.sale_id),
+            Some(&buyer),
+            Some(json!({ "queue_ticket": place.body["queue_ticket"]["token"] })),
+        )
+        .await;
+    assert_eq!(asked.status, StatusCode::CONFLICT);
+    assert_eq!(
+        asked.body["type"], "urn:kippu:problem:sale-closed",
+        "nobody is left waiting for a sale that is over"
+    );
+    let joined = app.call(Method::POST, &room, Some(&late), None).await;
+    assert_eq!(joined.status, StatusCode::CONFLICT);
+    assert_eq!(joined.body["type"], "urn:kippu:problem:sale-closed");
+}
+
+#[tokio::test]
+async fn joining_the_waiting_room_again_keeps_the_place() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({ "admission": { "mode": "waiting_room", "admit_per_tick": 1, "max_backlog": 100 } })).await;
+    let path = format!("/v1/sales/{}/waiting-room", shop.sale_id);
+    let (first, second) = (app.buyer().await, app.buyer().await);
+    let join = async |buyer: &str| app.call(Method::POST, &path, Some(buyer), None).await.body;
+
+    let place = join(&first).await;
+    assert_eq!(join(&second).await["position"], 2);
+    let again = join(&first).await;
+    assert_eq!(
+        again["position"], place["position"],
+        "one place per account"
+    );
+    assert_eq!(
+        app.call(Method::GET, &path, Some(&shop.organizer), None)
+            .await
+            .body,
+        json!({ "last_position": 2, "admitted_through": 0 }),
+        "joining again hands out no new position"
+    );
+
+    app.drain("admission").await;
+    let admitted = app
+        .call(
+            Method::POST,
+            &format!("/v1/sales/{}/admission", shop.sale_id),
+            Some(&first),
+            Some(json!({ "queue_ticket": again["queue_ticket"]["token"] })),
+        )
+        .await;
+    assert_eq!(
+        admitted.body["status"], "admitted",
+        "the new queue ticket holds the old place"
+    );
+}
+
+#[tokio::test]
+async fn purchase_and_checkout_bodies_refuse_unknown_fields() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 0, json!({})).await;
+    let buyer = app.buyer().await;
+    let purchase = app
+        .call_with(
+            Method::POST,
+            &format!("/v1/sales/{}/purchase-requests", shop.sale_id),
+            Some(&buyer),
+            Some(json!({
+                "items": [{ "ticket_type_id": shop.ticket_type_id, "quantity": 1 }],
+                "discount": 100,
+            })),
+            &[("idempotency-key", "unknown-field")],
+        )
+        .await;
+    assert_eq!(purchase.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(purchase.body["type"], "urn:kippu:problem:invalid-json");
+
+    let reservation = app.reserve(&buyer, &shop, 1).await;
+    let checkout = app
+        .call(
+            Method::POST,
+            &format!(
+                "/v1/reservations/{}/checkout",
+                reservation["id"].as_str().unwrap()
+            ),
+            Some(&buyer),
+            Some(json!({ "attestor": "card" })),
+        )
+        .await;
+    assert_eq!(checkout.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(checkout.body["type"], "urn:kippu:problem:invalid-json");
+}
+
+#[tokio::test]
+async fn unknown_query_parameters_are_refused() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let attestor = app.attestor("live").await;
+    let buyer = app.buyer().await;
+    let submitted = app.purchase(&buyer, &shop, 1, "query").await;
+    let poll = app
+        .call(
+            Method::GET,
+            &format!(
+                "/v1/purchase-requests/{}?reciept=x",
+                submitted.body["id"].as_str().unwrap()
+            ),
+            Some(&buyer),
+            None,
+        )
+        .await;
+    assert_eq!(poll.status, StatusCode::BAD_REQUEST, "{:?}", poll.body);
+    assert_eq!(poll.body["type"], "urn:kippu:problem:invalid-parameter");
+    let feed = app
+        .signed(&attestor, Method::GET, "/v1/attestor/feed?since=0", None)
+        .await;
+    assert_eq!(feed.status, StatusCode::BAD_REQUEST, "{:?}", feed.body);
+    assert_eq!(feed.body["type"], "urn:kippu:problem:invalid-parameter");
 }
 
 #[tokio::test]
@@ -554,7 +1102,19 @@ async fn organizers_record_cash_payments_for_their_own_events_only() {
             Some(body.clone()),
         )
         .await;
-    assert_eq!(stranger.status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        stranger.status,
+        StatusCode::NOT_FOUND,
+        "hidden from other organizers"
+    );
+    let own = app
+        .call(Method::POST, &path, Some(&buyer), Some(body.clone()))
+        .await;
+    assert_eq!(
+        own.status,
+        StatusCode::FORBIDDEN,
+        "buyers never record payments"
+    );
     let paid = app
         .call(Method::POST, &path, Some(&shop.organizer), Some(body))
         .await;
@@ -577,7 +1137,7 @@ async fn drafts_are_invisible_to_the_public() {
             None,
         )
         .await;
-    let mut draft = event.body;
+    let mut draft = support::editable(event.body);
     draft["status"] = json!("draft");
     app.call(
         Method::PUT,
@@ -623,7 +1183,7 @@ async fn a_batch_of_buyers_is_served_in_arrival_order() {
         buyers.push(app.buyer().await);
     }
     // Six buyers for three tickets, then the first buyer again, beyond its limit of two: one
-    // batch, processed together except where an account repeats.
+    // batch, processed together.
     let mut submitted = Vec::new();
     for (buyer, quantity) in buyers
         .iter()
@@ -664,6 +1224,221 @@ async fn a_batch_of_buyers_is_served_in_arrival_order() {
             "limit_exceeded"
         ]
     );
+}
+
+#[tokio::test]
+async fn a_run_decides_each_request_as_serving_them_one_by_one_would() {
+    let app = TestApp::start().await;
+    let shop = app.shop(5, 1_000, json!({})).await;
+    let first = app.buyer().await;
+    app.reserve(&first, &shop, 2).await; // its limit of two; three tickets are left
+    let mut buyers = vec![first];
+    for _ in 0..4 {
+        buyers.push(app.buyer().await);
+    }
+    // One run of five accounts: the first is over its limit, and a pair that no longer fits
+    // does not keep a single ticket from the buyer behind it.
+    let mut submitted = Vec::new();
+    for (buyer, quantity) in buyers.iter().zip([1, 2, 2, 1, 1]) {
+        app.clock.advance(Duration::milliseconds(1));
+        let reply = app.purchase(buyer, &shop, quantity, &uuid_suffix()).await;
+        assert_eq!(reply.status, StatusCode::ACCEPTED, "{:?}", reply.body);
+        submitted.push((buyer, reply.body["id"].as_str().unwrap().to_owned()));
+    }
+    app.drain("purchases").await;
+
+    let mut outcomes = Vec::new();
+    let mut reservations = Vec::new();
+    for (buyer, id) in &submitted {
+        let request = app
+            .call(
+                Method::GET,
+                &format!("/v1/purchase-requests/{id}"),
+                Some(buyer),
+                None,
+            )
+            .await;
+        reservations.push(request.body["reservation_id"].as_str().map(str::to_owned));
+        outcomes.push(match request.body["status"].as_str().unwrap() {
+            "rejected" => request.body["reason"].as_str().unwrap().to_owned(),
+            status => status.to_owned(),
+        });
+    }
+    assert_eq!(
+        outcomes,
+        [
+            "limit_exceeded",
+            "reserved",
+            "sold_out",
+            "reserved",
+            "sold_out"
+        ]
+    );
+
+    // Requests turned away took no quota: once the pair before it is cancelled, the buyer
+    // whose pair did not fit gets two tickets, its whole limit.
+    let cancelled = app
+        .call(
+            Method::POST,
+            &format!(
+                "/v1/reservations/{}/cancel",
+                reservations[1].as_deref().unwrap()
+            ),
+            Some(&buyers[1]),
+            None,
+        )
+        .await;
+    assert_eq!(cancelled.body["status"], "cancelled");
+    app.reserve(&buyers[2], &shop, 2).await;
+}
+
+#[tokio::test]
+async fn an_accounts_requests_in_one_batch_are_decided_as_one_by_one() {
+    let app = TestApp::start().await;
+    let shop = app.shop(5, 1_000, json!({})).await;
+    let (a, b, c) = (app.buyer().await, app.buyer().await, app.buyer().await);
+    app.reserve(&c, &shop, 2).await; // its limit of two; three tickets are left
+    // One batch in which `a` asks three times.
+    let mut submitted = Vec::new();
+    for (buyer, quantity) in [(&b, 2), (&a, 2), (&a, 1), (&a, 2), (&c, 1)] {
+        app.clock.advance(Duration::milliseconds(1));
+        let reply = app.purchase(buyer, &shop, quantity, &uuid_suffix()).await;
+        assert_eq!(reply.status, StatusCode::ACCEPTED, "{:?}", reply.body);
+        submitted.push((buyer, reply.body["id"].as_str().unwrap().to_owned()));
+    }
+    app.drain("purchases").await;
+
+    let mut outcomes = Vec::new();
+    let mut reservations = Vec::new();
+    for (buyer, id) in &submitted {
+        let request = app
+            .call(
+                Method::GET,
+                &format!("/v1/purchase-requests/{id}"),
+                Some(buyer),
+                None,
+            )
+            .await;
+        reservations.push(request.body["reservation_id"].as_str().map(str::to_owned));
+        outcomes.push(match request.body["status"].as_str().unwrap() {
+            "rejected" => request.body["reason"].as_str().unwrap().to_owned(),
+            status => status.to_owned(),
+        });
+    }
+    assert_eq!(
+        outcomes,
+        [
+            "reserved",
+            // A pair no longer fits and takes no quota, so `a`'s single gets the last ticket.
+            "sold_out",
+            "reserved",
+            // Then `a` is over its limit, judged before stock, as is `c`.
+            "limit_exceeded",
+            "limit_exceeded"
+        ]
+    );
+
+    // `a` holds one ticket of its two: once `b` cancels, it gets a second.
+    let cancelled = app
+        .call(
+            Method::POST,
+            &format!(
+                "/v1/reservations/{}/cancel",
+                reservations[0].as_deref().unwrap()
+            ),
+            Some(&b),
+            None,
+        )
+        .await;
+    assert_eq!(cancelled.body["status"], "cancelled");
+    app.reserve(&a, &shop, 1).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_workers_serve_a_sale_in_arrival_order() {
+    // Small batches, so that four workers at once (as on four instances) take turns on one
+    // sale's queue.
+    let app = TestApp::start_with(Vec::new(), |config| {
+        config.workers.purchase_batch_size = 3.try_into().unwrap();
+    })
+    .await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let mut submitted = Vec::new();
+    for _ in 0..30 {
+        let buyer = app.buyer().await;
+        app.clock.advance(Duration::milliseconds(1));
+        let reply = app.purchase(&buyer, &shop, 1, &uuid_suffix()).await;
+        assert_eq!(reply.status, StatusCode::ACCEPTED, "{:?}", reply.body);
+        submitted.push((buyer, reply.body["id"].as_str().unwrap().to_owned()));
+    }
+    tokio::join!(
+        app.drain("purchases"),
+        app.drain("purchases"),
+        app.drain("purchases"),
+        app.drain("purchases"),
+    );
+
+    let mut served = Vec::new();
+    for (arrival, (buyer, id)) in submitted.iter().enumerate() {
+        let request = app
+            .call(
+                Method::GET,
+                &format!("/v1/purchase-requests/{id}"),
+                Some(buyer),
+                None,
+            )
+            .await;
+        if request.body["status"] == "reserved" {
+            served.push(arrival);
+        }
+    }
+    assert_eq!(
+        served,
+        (0..10).collect::<Vec<_>>(),
+        "the first ten buyers get the ten tickets"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_worker_that_dies_holds_up_nobody() {
+    let app = TestApp::start().await;
+    let store = app.app.state().store();
+    if !store.capabilities().concurrent_writers {
+        // One write transaction at a time: there is no other worker to hold anything up.
+        return;
+    }
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let buyer = app.buyer().await;
+    let reply = app.purchase(&buyer, &shop, 1, "k").await;
+    let path = format!(
+        "/v1/purchase-requests/{}",
+        reply.body["id"].as_str().unwrap()
+    );
+    let status = async || {
+        app.call(Method::GET, &path, Some(&buyer), None).await.body["status"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+
+    // A worker takes the sale's queue and dies in the middle of its transaction.
+    let sale: SaleId = shop.sale_id.parse().unwrap();
+    let mut dying = store.begin().await.unwrap();
+    assert!(dying.purchases().lock_purchase_queue(sale).await.unwrap());
+    app.drain("purchases").await;
+    assert_eq!(status().await, "queued", "the queue is held");
+    drop(dying);
+
+    // No lease to run out: once its transaction is gone, the next worker serves the sale,
+    // without the clock moving.
+    for _ in 0..50 {
+        app.drain("purchases").await;
+        if status().await != "queued" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(status().await, "reserved");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -710,7 +1485,7 @@ async fn the_attestor_feed_reads_past_other_attestors_events() {
     let their_shop = app.shop(10, 1_000, json!({})).await;
     app.accept_attestor(&their_shop, &theirs.id).await;
 
-    let checkout = async |buyer: &str, shop: &support::Shop, attestor: &support::Attestor| {
+    let checkout = async |buyer: &str, shop: &Shop, attestor: &Attestor| {
         let reservation = app.reserve(buyer, shop, 1).await;
         let checked_out = app
             .call(
@@ -733,7 +1508,7 @@ async fn the_attestor_feed_reads_past_other_attestors_events() {
     checkout(&second, &our_shop, &ours).await;
 
     // A window of two holds only the other attestor's events; the feed reads on.
-    let poll = async |attestor: &support::Attestor, after: i64| {
+    let poll = async |attestor: &Attestor, after: i64| {
         let reply = app
             .signed(
                 attestor,
@@ -771,4 +1546,339 @@ async fn the_attestor_feed_reads_past_other_attestors_events() {
     assert_eq!(position, our_sequence);
     let (events, last) = poll(&theirs, position).await;
     assert!(events.is_empty() && last == our_sequence);
+}
+
+#[tokio::test]
+async fn organizers_read_the_reservations_of_their_events() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let other_shop = app.shop(10, 1_000, json!({})).await;
+    let buyer = app.buyer().await;
+    let reservation = app.reserve(&buyer, &shop, 1).await;
+    let id = reservation["id"].as_str().unwrap();
+    let path = format!("/v1/reservations/{id}");
+
+    let read = app
+        .call(Method::GET, &path, Some(&shop.organizer), None)
+        .await;
+    assert_eq!(read.status, StatusCode::OK);
+    assert_eq!(read.body, reservation);
+    let stranger = app
+        .call(Method::GET, &path, Some(&other_shop.organizer), None)
+        .await;
+    assert_eq!(stranger.status, StatusCode::NOT_FOUND);
+    // Reading is all: the buyer's actions stay the buyer's.
+    for action in ["cancel", "checkout"] {
+        let refused = app
+            .call(
+                Method::POST,
+                &format!("{path}/{action}"),
+                Some(&shop.organizer),
+                Some(json!({})),
+            )
+            .await;
+        assert_eq!(refused.status, StatusCode::NOT_FOUND, "{action}");
+    }
+
+    let listing = format!("/v1/events/{}/reservations", shop.event_id);
+    for (query, expected) in [
+        ("", json!([id])),
+        ("?status=reserved", json!([id])),
+        ("?status=issued", json!([])),
+    ] {
+        let listed = app
+            .call(
+                Method::GET,
+                &format!("{listing}{query}"),
+                Some(&shop.organizer),
+                None,
+            )
+            .await;
+        assert_eq!(listed.status, StatusCode::OK, "{:?}", listed.body);
+        let ids: Vec<Value> = listed.body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|reservation| reservation["id"].clone())
+            .collect();
+        assert_eq!(json!(ids), expected, "{query}");
+    }
+    for (token, status) in [
+        (Some(other_shop.organizer.as_str()), StatusCode::FORBIDDEN),
+        (Some(buyer.as_str()), StatusCode::FORBIDDEN),
+        (None, StatusCode::UNAUTHORIZED),
+    ] {
+        let refused = app.call(Method::GET, &listing, token, None).await;
+        assert_eq!(refused.status, status);
+    }
+    let invalid = app
+        .call(
+            Method::GET,
+            &format!("{listing}?status=sold"),
+            Some(&shop.organizer),
+            None,
+        )
+        .await;
+    assert_eq!(invalid.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn buyers_see_the_payment_methods_a_sale_accepts() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let live = app.attestor("live").await;
+    let sandbox = app.attestor("sandbox").await;
+    let free = "00000000-0000-0000-0000-000000000001";
+    let manual = "00000000-0000-0000-0000-000000000002";
+    let sale_path = format!("/v1/sales/{}", shop.sale_id);
+    let mut sale = support::editable(app.call(Method::GET, &sale_path, None, None).await.body);
+    sale["accepted_attestors"] = json!([sandbox.id, manual, live.id, free]);
+    let updated = app
+        .call(Method::PUT, &sale_path, Some(&shop.organizer), Some(sale))
+        .await;
+    assert_eq!(updated.status, StatusCode::OK, "{:?}", updated.body);
+
+    // A live sale cannot be settled by a sandbox attestor; free reservations need no choice.
+    let methods = format!("{sale_path}/payment-methods");
+    let listed = app.call(Method::GET, &methods, None, None).await;
+    assert_eq!(listed.status, StatusCode::OK, "{:?}", listed.body);
+    assert_eq!(
+        listed.body["items"],
+        json!([
+            { "id": manual, "name": listed.body["items"][0]["name"] },
+            { "id": live.id, "name": "gateway-live" },
+        ])
+    );
+
+    let revoked = app
+        .call(
+            Method::PUT,
+            &format!("/v1/admin/attestors/{}/revoked", live.id),
+            Some(&app.root_token()),
+            Some(json!({ "revoked": true })),
+        )
+        .await;
+    assert_eq!(revoked.status, StatusCode::NO_CONTENT);
+    let listed = app.call(Method::GET, &methods, None, None).await;
+    assert_eq!(listed.body["items"].as_array().unwrap().len(), 1);
+    assert_eq!(listed.body["items"][0]["id"], manual);
+
+    let unknown = app
+        .call(
+            Method::GET,
+            "/v1/sales/0190a7c4-0000-7000-8000-000000000000/payment-methods",
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn organizers_watch_the_waiting_room_fill_and_advance() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({ "admission": { "mode": "waiting_room", "admit_per_tick": 2, "max_backlog": 100 } })).await;
+    let path = format!("/v1/sales/{}/waiting-room", shop.sale_id);
+    let buyer = app.buyer().await;
+    for _ in 0..3 {
+        let joined = app
+            .call(Method::POST, &path, Some(&app.buyer().await), None)
+            .await;
+        assert_eq!(joined.status, StatusCode::OK);
+    }
+    let progress = async || {
+        app.call(Method::GET, &path, Some(&shop.organizer), None)
+            .await
+            .body
+    };
+    assert_eq!(
+        progress().await,
+        json!({ "last_position": 3, "admitted_through": 0 })
+    );
+    app.drain("admission").await;
+    assert_eq!(
+        progress().await,
+        json!({ "last_position": 3, "admitted_through": 2 })
+    );
+
+    let other = app.shop(10, 1_000, json!({})).await;
+    for token in [&buyer, &other.organizer] {
+        let refused = app.call(Method::GET, &path, Some(token), None).await;
+        assert_eq!(refused.status, StatusCode::FORBIDDEN);
+    }
+    let open = app
+        .call(
+            Method::GET,
+            &format!("/v1/sales/{}/waiting-room", other.sale_id),
+            Some(&other.organizer),
+            None,
+        )
+        .await;
+    assert_eq!(open.status, StatusCode::CONFLICT);
+    assert_eq!(open.body["type"], "urn:kippu:problem:no-waiting-room");
+}
+
+#[tokio::test]
+async fn organizers_reach_the_buyers_of_their_events() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let other_shop = app.shop(10, 1_000, json!({})).await;
+    let buyer = app.buyer().await;
+    app.call(
+        Method::PATCH,
+        "/v1/me",
+        Some(&buyer),
+        Some(json!({ "contacts": { "X": "@miku" } })),
+    )
+    .await;
+    let reservation = app.reserve(&buyer, &shop, 1).await;
+    let account_id = reservation["account_id"].as_str().unwrap();
+    let path = format!("/v1/events/{}/buyers/{account_id}", shop.event_id);
+
+    let seen = app
+        .call(Method::GET, &path, Some(&shop.organizer), None)
+        .await;
+    assert_eq!(seen.status, StatusCode::OK, "{:?}", seen.body);
+    assert_eq!(
+        seen.body,
+        json!({
+            "account_id": account_id,
+            "display_name": "Buyer",
+            "contacts": { "X": "@miku" },
+            "deleted_at": null,
+        }),
+        "no email"
+    );
+    let stranger = app
+        .call(Method::GET, &path, Some(&other_shop.organizer), None)
+        .await;
+    assert_eq!(
+        stranger.status,
+        StatusCode::NOT_FOUND,
+        "hidden from other organizers"
+    );
+    let themself = app.call(Method::GET, &path, Some(&buyer), None).await;
+    assert_eq!(
+        themself.status,
+        StatusCode::FORBIDDEN,
+        "buyers read no buyers"
+    );
+    let not_a_buyer = app
+        .call(
+            Method::GET,
+            &format!("/v1/events/{}/buyers/{account_id}", other_shop.event_id),
+            Some(&other_shop.organizer),
+            None,
+        )
+        .await;
+    assert_eq!(not_a_buyer.status, StatusCode::NOT_FOUND);
+
+    // A reservation given up is no order.
+    app.call(
+        Method::POST,
+        &format!(
+            "/v1/reservations/{}/cancel",
+            reservation["id"].as_str().unwrap()
+        ),
+        Some(&buyer),
+        None,
+    )
+    .await;
+    let gone = app
+        .call(Method::GET, &path, Some(&shop.organizer), None)
+        .await;
+    assert_eq!(gone.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn an_event_with_orders_is_cancelled_not_withdrawn() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let path = format!("/v1/events/{}", shop.event_id);
+    let set_status = async |status: &str| {
+        let current = app
+            .call(Method::GET, &path, Some(&shop.organizer), None)
+            .await;
+        app.call(
+            Method::PATCH,
+            &path,
+            Some(&shop.organizer),
+            Some(json!({ "version": current.body["version"], "status": status })),
+        )
+        .await
+    };
+    // Nobody ordered yet: it can go back to a draft and be published again.
+    assert_eq!(set_status("draft").await.status, StatusCode::OK);
+    assert_eq!(set_status("published").await.status, StatusCode::OK);
+
+    let buyer = app.buyer().await;
+    app.reserve(&buyer, &shop, 1).await;
+    let withdrawn = set_status("draft").await;
+    assert_eq!(withdrawn.status, StatusCode::CONFLICT);
+    assert_eq!(
+        withdrawn.body["type"],
+        "urn:kippu:problem:illegal-transition"
+    );
+    assert_eq!(set_status("cancelled").await.status, StatusCode::OK);
+
+    // Cancelled for good: a new event takes its place. Its other fields stay editable.
+    for status in ["published", "draft"] {
+        let revived = set_status(status).await;
+        assert_eq!(revived.status, StatusCode::CONFLICT, "{status}");
+        assert_eq!(revived.body["type"], "urn:kippu:problem:illegal-transition");
+    }
+    assert_eq!(set_status("cancelled").await.status, StatusCode::OK);
+    let current = app
+        .call(Method::GET, &path, Some(&shop.organizer), None)
+        .await;
+    let renamed = app
+        .call(
+            Method::PATCH,
+            &path,
+            Some(&shop.organizer),
+            Some(json!({ "version": current.body["version"], "title": "Moved to next year" })),
+        )
+        .await;
+    assert_eq!(renamed.status, StatusCode::OK, "{:?}", renamed.body);
+    assert_eq!(renamed.body["status"], "cancelled");
+}
+
+#[tokio::test]
+async fn a_cancelled_event_sells_nothing_more() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let buyer = app.buyer().await;
+    // Queued before the cancellation, processed after it.
+    let queued = app.purchase(&buyer, &shop, 1, "before").await;
+    assert_eq!(queued.status, StatusCode::ACCEPTED);
+    let path = format!("/v1/events/{}", shop.event_id);
+    let current = app
+        .call(Method::GET, &path, Some(&shop.organizer), None)
+        .await;
+    let cancelled = app
+        .call(
+            Method::PATCH,
+            &path,
+            Some(&shop.organizer),
+            Some(json!({ "version": current.body["version"], "status": "cancelled" })),
+        )
+        .await;
+    assert_eq!(cancelled.status, StatusCode::OK);
+
+    app.drain("purchases").await;
+    let request = app
+        .call(
+            Method::GET,
+            &format!(
+                "/v1/purchase-requests/{}",
+                queued.body["id"].as_str().unwrap()
+            ),
+            Some(&buyer),
+            None,
+        )
+        .await;
+    assert_eq!(request.body["status"], "rejected", "{:?}", request.body);
+    let after = app.purchase(&buyer, &shop, 1, "after").await;
+    assert_eq!(after.status, StatusCode::CONFLICT);
+    assert_eq!(after.body["type"], "urn:kippu:problem:sale-closed");
 }

@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use kippu_domain::payment::{Attestor, AttestorKey, PaymentAttestation, PaymentDisposition};
-use kippu_domain::refund::Refund;
-use kippu_domain::{AttestorId, RefundId, ReservationId, Timestamp};
-use kippu_store::{Insertion, PaymentStore, PaymentsTx, StoreResult};
+use kippu_domain::refund::{Refund, RefundStatus};
+use kippu_domain::{AccountId, AttestorId, EventId, RefundId, ReservationId, Timestamp};
+use kippu_store::{Insertion, Keyset, PageRequest, PaymentStore, PaymentsTx, StoreResult};
 use sqlx::types::Json;
 
 use crate::convert::{AttestationRow, AttestorKeyRow, AttestorRow, RefundRow, all, at, optional};
@@ -177,6 +177,48 @@ impl PaymentStore for PostgresStore {
             "{REFUND_COLUMNS} WHERE reservation_id = $1 ORDER BY created_at, id"
         )))
         .bind(reservation.as_uuid())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(error)?;
+        all(rows)
+    }
+
+    async fn refunds_for_account(
+        &self,
+        account: AccountId,
+        page: PageRequest<Keyset>,
+    ) -> StoreResult<Vec<Refund>> {
+        let rows = sqlx::query_as::<_, RefundRow>(sqlx::AssertSqlSafe(format!(
+            "{REFUND_COLUMNS} WHERE account_id = $1
+               AND ($2 IS NULL OR created_at < $2 OR (created_at = $2 AND id > $3))
+             ORDER BY created_at DESC, id LIMIT $4"
+        )))
+        .bind(account.as_uuid())
+        .bind(page.after.map(|after| at(after.at)))
+        .bind(page.after.map(|after| after.id))
+        .bind(i64::from(page.limit))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(error)?;
+        all(rows)
+    }
+
+    async fn refunds_for_event(
+        &self,
+        event: EventId,
+        status: Option<RefundStatus>,
+        page: PageRequest<Keyset>,
+    ) -> StoreResult<Vec<Refund>> {
+        let rows = sqlx::query_as::<_, RefundRow>(sqlx::AssertSqlSafe(format!(
+            "{REFUND_COLUMNS} WHERE event_id = $1 AND ($2 IS NULL OR status = $2)
+               AND ($3 IS NULL OR created_at > $3 OR (created_at = $3 AND id > $4))
+             ORDER BY created_at, id LIMIT $5"
+        )))
+        .bind(event.as_uuid())
+        .bind(status.map(RefundStatus::as_str))
+        .bind(page.after.map(|after| at(after.at)))
+        .bind(page.after.map(|after| after.id))
+        .bind(i64::from(page.limit))
         .fetch_all(&self.pool)
         .await
         .map_err(error)?;

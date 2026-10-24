@@ -16,6 +16,8 @@ POST /v1/admin/attestors
 
 - `environment` is `live` or `sandbox`. A sandbox attestor can never settle a live sale.
 - Each sale lists the attestors it accepts (`accepted_attestors`). Organizers choose per sale.
+  A reservation checked out with an attestor keeps accepting that attestor's payment even if
+  the sale stops accepting it afterwards: the buyer may already have paid.
 - Revoking an attestor or a key (`PUT …/revoked`) takes effect on every instance immediately.
   Adding a key alongside the old one allows rotation without downtime.
 
@@ -41,6 +43,10 @@ kippu-attestor-v1
 
 Kippu rejects the request (401) if the attestor or key is unknown or revoked, the signature
 does not verify, or `ts` is more than 300 seconds from Kippu's clock.
+
+Send only the fields and query parameters this document names. Kippu refuses anything else,
+so a misspelled field fails instead of being ignored: `422 invalid-json` for an unknown field in
+a body, `400 invalid-parameter` for an unknown query parameter. Neither is worth retrying.
 
 ## 3. Learning what to charge
 
@@ -80,13 +86,15 @@ Kippu-Signature: …
   the first).
 - `amount` must equal the reservation total exactly, or the request fails with 422 and nothing
   is recorded.
+- An `attestation_id` already recorded for another reservation or amount is refused with
+  `422 attestation-id-reused`: it is never answered as a replay.
 
 The response says what became of the money:
 
 | `disposition` | Meaning | What the attestor does |
 |---|---|---|
 | `applied` | Tickets were issued, in the same transaction that recorded the payment. | Nothing. |
-| `refund_required` | The money cannot be used: the reservation lapsed and its tickets sold out, or the reservation was already paid. | Refund the buyer, then report it (§5). |
+| `refund_required` | The money cannot be used: the event was cancelled or the buyer closed the account; the reservation lapsed and its tickets sold out, or the buyer was denied entry meanwhile; or the reservation was already paid. | Refund the buyer, then report it (§5). |
 
 A 200 with `refund_required` is a successful delivery: stop retrying. Kippu also records a
 `refund.required` event in the feed.

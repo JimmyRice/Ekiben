@@ -9,7 +9,8 @@ mod settlement;
 pub use attestors::*;
 pub use feed::*;
 pub use refunds::{
-    RefundRequest, confirm_manual_refund, refund, request_refund, reservation_refunds,
+    RefundRequest, confirm_manual_refund, event_refunds, my_refunds, refund, request_refund,
+    reservation_refunds,
 };
 pub use settlement::{
     AttestorReport, IncomingPayment, ManualPayment, PaymentResult, confirm_refund,

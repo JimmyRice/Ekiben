@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use kippu_domain::ticket::Ticket;
-use kippu_domain::{AccountId, ReservationId, TicketId};
+use kippu_domain::{AccountId, EventId, ReservationId, TicketId};
 use kippu_store::{Keyset, PageRequest, StoreResult, TicketStore, TicketsTx};
 
 use crate::convert::{TicketRow, all, micros, optional, ticket_status};
@@ -26,14 +26,16 @@ impl TicketStore for SqliteStore {
     async fn tickets_for_account(
         &self,
         account: AccountId,
+        event: Option<EventId>,
         page: PageRequest<Keyset>,
     ) -> StoreResult<Vec<Ticket>> {
         let rows = sqlx::query_as::<_, TicketRow>(sqlx::AssertSqlSafe(format!(
-            "{TICKET_COLUMNS} WHERE account_id = ?1
-               AND (?2 IS NULL OR issued_at < ?2 OR (issued_at = ?2 AND id > ?3))
-             ORDER BY issued_at DESC, id LIMIT ?4"
+            "{TICKET_COLUMNS} WHERE account_id = ?1 AND (?2 IS NULL OR event_id = ?2)
+               AND (?3 IS NULL OR issued_at < ?3 OR (issued_at = ?3 AND id > ?4))
+             ORDER BY issued_at DESC, id LIMIT ?5"
         )))
         .bind(account.as_uuid())
+        .bind(event.map(|id| id.as_uuid()))
         .bind(page.after.map(|after| micros(after.at)))
         .bind(page.after.map(|after| after.id))
         .bind(page.limit)

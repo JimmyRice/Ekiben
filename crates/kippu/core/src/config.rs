@@ -367,14 +367,17 @@ impl Default for WebhooksConfig {
 pub struct WorkersConfig {
     /// Run background tasks in this process. Disable to serve HTTP only.
     pub enabled: bool,
-    /// Purchase requests claimed per batch.
+    /// Purchase requests per batch: how many of the oldest a worker looks at, and at most how
+    /// many of one sale it serves before it looks again.
     pub purchase_batch_size: NonZeroU32,
     /// Pause between purchase batches when the queue is empty.
     pub purchase_interval_ms: NonZeroU64,
-    /// How long a claimed purchase request is reserved for the claiming worker.
+    /// How long a purchase request that failed on its own waits before it is tried again, so
+    /// that it holds up nobody behind it.
     pub purchase_lease_seconds: NonZeroU32,
-    /// How many sales one batch processes at once, when the database allows concurrent
-    /// writers (PostgreSQL, MySQL). Requests of the same sale are always processed in order.
+    /// How many sales one batch serves at once, when the database allows concurrent writers
+    /// (PostgreSQL, MySQL). A sale's requests are always served in arrival order, one
+    /// transaction at a time, however many workers and instances run.
     pub purchase_concurrency: NonZeroU32,
     /// How often overdue reservations are expired.
     pub expiry_interval_ms: NonZeroU64,

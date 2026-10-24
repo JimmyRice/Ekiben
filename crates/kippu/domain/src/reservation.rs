@@ -58,8 +58,9 @@ pub struct IllegalTransition {
 pub enum Settlement {
     /// Inventory is still held: sell it and issue tickets.
     Issue,
-    /// The hold lapsed: try to take the inventory again. If that succeeds, issue tickets;
-    /// otherwise the reservation becomes `RefundRequired`.
+    /// The hold lapsed: try to take the inventory again, as a purchase would (the service
+    /// also checks the event is on sale and the buyer may still buy). If that succeeds,
+    /// issue tickets; otherwise the reservation becomes `RefundRequired`.
     Reacquire,
     /// The reservation was already settled by another payment: this one must be refunded.
     /// The reservation itself is unchanged.
@@ -127,10 +128,13 @@ impl ReservationStatus {
         }
     }
 
-    /// The outcome of a failed [`Settlement::Reacquire`].
+    /// The outcome of a payment its reservation cannot use: a failed
+    /// [`Settlement::Reacquire`], or a hold whose event was called off before the money came.
     pub fn require_refund(self) -> Result<Self, IllegalTransition> {
         match self {
-            Self::Expired | Self::Cancelled => Ok(Self::RefundRequired),
+            Self::Reserved | Self::PaymentPending | Self::Expired | Self::Cancelled => {
+                Ok(Self::RefundRequired)
+            }
             from => Err(IllegalTransition {
                 from,
                 action: "require a refund for",
@@ -337,7 +341,7 @@ mod tests {
         Checkout,
         Cancel,
         Expire,
-        Pay { stock_left: bool },
+        Pay { stock_left: bool, on_sale: bool },
         Refunded,
     }
 
@@ -346,7 +350,10 @@ mod tests {
             Just(Step::Checkout),
             Just(Step::Cancel),
             Just(Step::Expire),
-            any::<bool>().prop_map(|stock_left| Step::Pay { stock_left }),
+            (any::<bool>(), any::<bool>()).prop_map(|(stock_left, on_sale)| Step::Pay {
+                stock_left,
+                on_sale
+            }),
             Just(Step::Refunded),
         ]
     }
@@ -358,10 +365,13 @@ mod tests {
             Step::Cancel => status.cancel(),
             Step::Expire => status.expire(),
             Step::Refunded => status.refunded(),
-            Step::Pay { stock_left } => match status.settle() {
-                Settlement::Issue => status.issue(),
-                Settlement::Reacquire if stock_left => status.issue(),
-                Settlement::Reacquire => status.require_refund(),
+            Step::Pay {
+                stock_left,
+                on_sale,
+            } => match status.settle() {
+                Settlement::Issue if on_sale => status.issue(),
+                Settlement::Reacquire if on_sale && stock_left => status.issue(),
+                Settlement::Issue | Settlement::Reacquire => status.require_refund(),
                 Settlement::RefundPayment => Ok(status),
             },
         };

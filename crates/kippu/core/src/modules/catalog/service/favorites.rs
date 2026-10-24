@@ -7,7 +7,7 @@ use kippu_store::{Favorite, Keyset, Page, PageRequest};
 use super::visible_event;
 use crate::app::AppState;
 use crate::auth::{Principal, Scope};
-use crate::error::ApiResult;
+use crate::error::{ApiError, ApiResult};
 use crate::modules::catalog::permissions::FAVORITES_MANAGE;
 
 /// The caller's own account, after checking they may keep favourites.
@@ -66,4 +66,15 @@ pub async fn remove_favorite(
     let account = own_account(state, principal)?;
     state.store().remove_favorite(account, event_id).await?;
     Ok(())
+}
+
+/// Succeeds if the caller marked the event as a favourite, and reports it missing otherwise.
+#[tracing::instrument(skip_all)]
+pub async fn favorite(state: &AppState, principal: &Principal, event_id: EventId) -> ApiResult<()> {
+    let account = own_account(state, principal)?;
+    if state.store().is_favorite(account, event_id).await? {
+        Ok(())
+    } else {
+        Err(ApiError::not_found("favorite"))
+    }
 }

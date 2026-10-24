@@ -3,13 +3,16 @@
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use kippu_domain::catalog::{Event, EventSummary, Sale, TicketType};
-use kippu_domain::{EventId, OrganizationId, SaleId, TicketTypeId};
+use kippu_domain::invitation::Invitation;
+use kippu_domain::validation::Slug;
+use kippu_domain::{AccountId, EventId, OrganizationId, SaleId, TicketTypeId};
 
 use super::dto::{
-    CreateEventRequest, EventPatch, EventsQuery, SaleDetail, SalePatch, SaleRequest,
-    TicketTypeOffer, TicketTypePatch, TicketTypeRequest, UpdateEventRequest, event_listing,
-    required_version,
+    CreateEventRequest, EventPatch, EventsQuery, InventoryView, OrganizationProfile, SaleDetail,
+    SalePatch, SaleRequest, TicketTypeOffer, TicketTypePatch, TicketTypeRequest,
+    UpdateEventRequest, event_listing, required_version,
 };
 use super::service;
 use crate::app::AppState;
@@ -37,27 +40,85 @@ pub(crate) async fn list_events(
     })))
 }
 
-/// All events of an organization, drafts included, one page at a time.
+/// Organizations with a published or cancelled event, for everyone, in id order.
+#[utoipa::path(
+    get, path = "/v1/organizations", tag = TAG,
+    params(PageQuery),
+    responses((status = 200, body = Listing<OrganizationProfile>), (status = 400, body = Problem))
+)]
+pub(crate) async fn list_organizations(
+    State(state): State<AppState>,
+    Query(query): Query<PageQuery>,
+) -> ApiResult<Json<Listing<OrganizationProfile>>> {
+    let page = query.page(ListingTag::PUBLIC_ORGANIZATIONS)?;
+    let organizations = service::public_organizations(&state, page).await?;
+    Ok(Json(Listing::page(
+        organizations,
+        ListingTag::PUBLIC_ORGANIZATIONS,
+        OrganizationProfile::from,
+    )))
+}
+
+/// An organization: one with a published or cancelled event, or, for its organizers, their
+/// own.
+#[utoipa::path(
+    get, path = "/v1/organizations/{organization_id}", tag = TAG,
+    params(("organization_id" = OrganizationId, Path)),
+    responses((status = 200, body = OrganizationProfile), (status = 404, body = Problem))
+)]
+pub(crate) async fn get_organization(
+    State(state): State<AppState>,
+    principal: Option<Principal>,
+    Path(organization_id): Path<OrganizationId>,
+) -> ApiResult<Json<OrganizationProfile>> {
+    Ok(Json(
+        service::visible_organization(&state, principal.as_ref(), organization_id)
+            .await?
+            .into(),
+    ))
+}
+
+/// An organization by its slug, under the same rules as by its id.
+#[utoipa::path(
+    get, path = "/v1/organizations/by-slug/{slug}", tag = TAG,
+    params(("slug" = String, Path)),
+    responses((status = 200, body = OrganizationProfile), (status = 404, body = Problem))
+)]
+pub(crate) async fn get_organization_by_slug(
+    State(state): State<AppState>,
+    principal: Option<Principal>,
+    Path(slug): Path<Slug>,
+) -> ApiResult<Json<OrganizationProfile>> {
+    Ok(Json(
+        service::visible_organization_by_slug(&state, principal.as_ref(), &slug)
+            .await?
+            .into(),
+    ))
+}
+
+/// An organization's events, one page at a time: published and cancelled ones for everyone,
+/// drafts too for its organizers. Listings leave out each event's `content`.
 #[utoipa::path(
     get, path = "/v1/organizations/{organization_id}/events", tag = TAG,
-    security(("bearer" = [])),
     params(("organization_id" = OrganizationId, Path), EventsQuery),
-    responses(
-        (status = 200, body = Listing<EventSummary>),
-        (status = 400, body = Problem),
-        (status = 403, body = Problem)
-    )
+    responses((status = 200, body = Listing<EventSummary>), (status = 400, body = Problem))
 )]
 pub(crate) async fn list_organization_events(
     State(state): State<AppState>,
-    principal: Principal,
+    principal: Option<Principal>,
     Path(organization_id): Path<OrganizationId>,
     Query(query): Query<EventsQuery>,
 ) -> ApiResult<Json<Listing<EventSummary>>> {
     let (filter, order, page) = query.into_parts()?;
-    let events =
-        service::organization_events(&state, &principal, organization_id, filter, order, page)
-            .await?;
+    let events = service::organization_events(
+        &state,
+        principal.as_ref(),
+        organization_id,
+        filter,
+        order,
+        page,
+    )
+    .await?;
     Ok(Json(Listing::page(events, event_listing(order), |event| {
         event
     })))
@@ -81,6 +142,22 @@ pub(crate) async fn create_event(
     Ok((StatusCode::CREATED, Json(event)))
 }
 
+/// An event by its slug, under the same rules as by its id.
+#[utoipa::path(
+    get, path = "/v1/events/by-slug/{slug}", tag = TAG,
+    params(("slug" = String, Path)),
+    responses((status = 200, body = Event), (status = 404, body = Problem))
+)]
+pub(crate) async fn get_event_by_slug(
+    State(state): State<AppState>,
+    principal: Option<Principal>,
+    Path(slug): Path<Slug>,
+) -> ApiResult<Json<Event>> {
+    Ok(Json(
+        service::event_by_slug(&state, principal.as_ref(), &slug).await?,
+    ))
+}
+
 /// An event.
 #[utoipa::path(
     get, path = "/v1/events/{event_id}", tag = TAG,
@@ -97,13 +174,14 @@ pub(crate) async fn get_event(
     ))
 }
 
-/// Edit an event, including publishing or cancelling it.
+/// Edit an event, including publishing or cancelling it. Cancelling is final: a cancelled
+/// event keeps its status (409 `illegal-transition`), though its other fields stay editable.
 #[utoipa::path(
     put, path = "/v1/events/{event_id}", tag = TAG,
     security(("bearer" = [])),
     params(("event_id" = EventId, Path)),
     request_body = UpdateEventRequest,
-    responses((status = 200, body = Event), (status = 412, description = "Edited concurrently", body = Problem))
+    responses((status = 200, body = Event), (status = 409, description = "Not a transition the event can make: withdrawing an event people ordered for, or reviving a cancelled one", body = Problem), (status = 412, description = "Edited concurrently", body = Problem))
 )]
 pub(crate) async fn update_event(
     State(state): State<AppState>,
@@ -117,13 +195,14 @@ pub(crate) async fn update_event(
     ))
 }
 
-/// Change some of an event's fields, including publishing or cancelling it.
+/// Change some of an event's fields, including publishing or cancelling it. Cancelling is
+/// final: a cancelled event keeps its status (409 `illegal-transition`).
 #[utoipa::path(
     patch, path = "/v1/events/{event_id}", tag = TAG,
     security(("bearer" = [])),
     params(("event_id" = EventId, Path)),
     request_body(content((EventPatch = "application/merge-patch+json"), (EventPatch = "application/json"))),
-    responses((status = 200, body = Event), (status = 412, description = "Edited concurrently", body = Problem))
+    responses((status = 200, body = Event), (status = 409, description = "Not a transition the event can make: withdrawing an event people ordered for, or reviving a cancelled one", body = Problem), (status = 412, description = "Edited concurrently", body = Problem))
 )]
 pub(crate) async fn patch_event(
     State(state): State<AppState>,
@@ -135,6 +214,27 @@ pub(crate) async fn patch_event(
     Ok(Json(
         service::update_event(&state, &principal, event_id, version, patch.into()).await?,
     ))
+}
+
+/// Delete a draft that has no sales, with its images. Cancel a published event instead.
+#[utoipa::path(
+    delete, path = "/v1/events/{event_id}", tag = TAG,
+    security(("bearer" = [])),
+    params(("event_id" = EventId, Path)),
+    responses(
+        (status = 204),
+        (status = 403, body = Problem),
+        (status = 404, body = Problem),
+        (status = 409, description = "Not a draft, or it has a sale", body = Problem)
+    )
+)]
+pub(crate) async fn delete_event(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(event_id): Path<EventId>,
+) -> ApiResult<StatusCode> {
+    service::delete_event(&state, &principal, event_id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// The sales of an event, with availability.
@@ -170,6 +270,29 @@ pub(crate) async fn create_sale(
 ) -> ApiResult<(StatusCode, Json<Sale>)> {
     let sale = service::create_sale(&state, &principal, event_id, request.into()).await?;
     Ok((StatusCode::CREATED, Json(sale)))
+}
+
+/// The stock of every ticket type of a sale, for its organizers: held by unpaid reservations,
+/// sold, and left.
+#[utoipa::path(
+    get, path = "/v1/sales/{sale_id}/inventory", tag = TAG,
+    security(("bearer" = [])),
+    params(("sale_id" = SaleId, Path)),
+    responses(
+        (status = 200, body = Listing<InventoryView>),
+        (status = 403, body = Problem),
+        (status = 404, body = Problem)
+    )
+)]
+pub(crate) async fn get_sale_inventory(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(sale_id): Path<SaleId>,
+) -> ApiResult<Json<Listing<InventoryView>>> {
+    let inventory = service::sale_inventory(&state, &principal, sale_id).await?;
+    Ok(Json(Listing::all(
+        inventory.into_iter().map(InventoryView::from).collect(),
+    )))
 }
 
 /// A sale, with its ticket types and availability.
@@ -325,6 +448,101 @@ pub(crate) async fn list_favorites(
         ListingTag::FAVORITES,
         |event| event,
     )))
+}
+
+/// Whether an event is one of your favourites: 204 if it is, 404 if not.
+#[utoipa::path(
+    get, path = "/v1/me/favorites/{event_id}", tag = TAG,
+    security(("bearer" = [])),
+    params(("event_id" = EventId, Path)),
+    responses((status = 204), (status = 404, body = Problem))
+)]
+pub(crate) async fn get_favorite(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(event_id): Path<EventId>,
+) -> ApiResult<StatusCode> {
+    service::favorite(&state, &principal, event_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// A sale's invitation list, most recently invited first. Only these accounts see and buy
+/// from a sale whose audience is `invited`.
+#[utoipa::path(
+    get, path = "/v1/sales/{sale_id}/invitations", tag = TAG,
+    security(("bearer" = [])),
+    params(("sale_id" = SaleId, Path), PageQuery),
+    responses(
+        (status = 200, body = Listing<Invitation>),
+        (status = 403, body = Problem),
+        (status = 404, body = Problem),
+        (status = 409, description = "A private sale has no list", body = Problem)
+    )
+)]
+pub(crate) async fn list_invitations(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(sale_id): Path<SaleId>,
+    Query(query): Query<PageQuery>,
+) -> ApiResult<Json<Listing<Invitation>>> {
+    let page = query.page(ListingTag::SALE_INVITATIONS)?;
+    let invitations = service::invitations(&state, &principal, sale_id, page).await?;
+    Ok(Json(Listing::page(
+        invitations,
+        ListingTag::SALE_INVITATIONS,
+        |invitation| invitation,
+    )))
+}
+
+/// Invite an account to a sale: once the sale's audience is `invited`, it sees the sale and
+/// may buy from it. The list can be kept while the sale is still public. Inviting an account
+/// again answers 200 with the invitation already there.
+#[utoipa::path(
+    put, path = "/v1/sales/{sale_id}/invitations/{account_id}", tag = TAG,
+    security(("bearer" = [])),
+    params(("sale_id" = SaleId, Path), ("account_id" = AccountId, Path)),
+    responses(
+        (status = 201, body = Invitation),
+        (status = 200, description = "The account was invited already", body = Invitation),
+        (status = 403, body = Problem),
+        (status = 404, body = Problem),
+        (status = 409, description = "The sale is private, or the account closed", body = Problem)
+    )
+)]
+pub(crate) async fn invite(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((sale_id, account_id)): Path<(SaleId, AccountId)>,
+) -> ApiResult<Response> {
+    let added = service::invite(&state, &principal, sale_id, account_id).await?;
+    let status = if added.created {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+    Ok((status, Json(added.invitation)).into_response())
+}
+
+/// Take an account off a sale's invitation list. It buys no more from the sale while the sale
+/// is for invited accounts only; tickets it already has stay valid (deny them to refuse entry).
+#[utoipa::path(
+    delete, path = "/v1/sales/{sale_id}/invitations/{account_id}", tag = TAG,
+    security(("bearer" = [])),
+    params(("sale_id" = SaleId, Path), ("account_id" = AccountId, Path)),
+    responses(
+        (status = 204),
+        (status = 403, body = Problem),
+        (status = 404, body = Problem),
+        (status = 409, description = "A private sale has no list", body = Problem)
+    )
+)]
+pub(crate) async fn uninvite(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((sale_id, account_id)): Path<(SaleId, AccountId)>,
+) -> ApiResult<StatusCode> {
+    service::uninvite(&state, &principal, sale_id, account_id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Mark an event as a favourite.

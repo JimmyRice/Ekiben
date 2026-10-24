@@ -62,10 +62,16 @@ impl ProblemKind {
         self.0
     }
 
+    /// The account was closed: it cannot sign in again.
+    pub const ACCOUNT_CLOSED: Self = Self::new("account-closed");
+    /// The account is on a deny list for the event.
+    pub const ACCOUNT_DENIED: Self = Self::new("account-denied");
     /// A waiting room must be passed first.
     pub const ADMISSION_REQUIRED: Self = Self::new("admission-required");
     /// A payment does not match the reservation total.
     pub const AMOUNT_MISMATCH: Self = Self::new("amount-mismatch");
+    /// The attestation id was already recorded for another reservation or amount.
+    pub const ATTESTATION_ID_REUSED: Self = Self::new("attestation-id-reused");
     /// The sale does not accept that payment method.
     pub const ATTESTOR_NOT_ACCEPTED: Self = Self::new("attestor-not-accepted");
     /// The request conflicts with the current state.
@@ -74,6 +80,8 @@ impl ProblemKind {
     pub const EMAIL_ALREADY_REGISTERED: Self = Self::new("email-already-registered");
     /// A sandbox payment method cannot pay for a live sale.
     pub const ENVIRONMENT_MISMATCH: Self = Self::new("environment-mismatch");
+    /// Only a draft event without sales can be deleted.
+    pub const EVENT_NOT_DELETABLE: Self = Self::new("event-not-deletable");
     /// Authenticated, but not allowed.
     pub const FORBIDDEN: Self = Self::new("forbidden");
     /// The `Idempotency-Key` was used for a different request.
@@ -96,6 +104,8 @@ impl ProblemKind {
     pub const INVALID_REQUEST: Self = Self::new("invalid-request");
     /// The account's last way to sign in cannot be removed.
     pub const LAST_SIGN_IN_METHOD: Self = Self::new("last-sign-in-method");
+    /// The account would hold more tickets of a type than one account may.
+    pub const LIMIT_EXCEEDED: Self = Self::new("limit-exceeded");
     /// The route does not take the method.
     pub const METHOD_NOT_ALLOWED: Self = Self::new("method-not-allowed");
     /// The sale has no waiting room.
@@ -118,6 +128,8 @@ impl ProblemKind {
     pub const RESERVATION_NOT_ISSUED: Self = Self::new("reservation-not-issued");
     /// The sale is not open.
     pub const SALE_CLOSED: Self = Self::new("sale-closed");
+    /// Not enough tickets are left.
+    pub const SOLD_OUT: Self = Self::new("sold-out");
     /// The record changed since the caller read it.
     pub const STALE_VERSION: Self = Self::new("stale-version");
     /// A ticket is not part of the reservation.
@@ -136,15 +148,22 @@ impl ProblemKind {
     pub const WEBHOOKS_NOT_CONFIGURED: Self = Self::new("webhooks-not-configured");
     /// The current password is wrong.
     pub const WRONG_PASSWORD: Self = Self::new("wrong-password");
+    /// The sale's audience does not allow this: nobody buys from a private sale, and only a
+    /// private sale's tickets are granted.
+    pub const WRONG_SALE_AUDIENCE: Self = Self::new("wrong-sale-audience");
 
     /// Every kind Kippu itself reports.
-    pub const ALL: [Self; 37] = [
+    pub const ALL: [Self; 44] = [
+        Self::ACCOUNT_CLOSED,
+        Self::ACCOUNT_DENIED,
         Self::ADMISSION_REQUIRED,
         Self::AMOUNT_MISMATCH,
+        Self::ATTESTATION_ID_REUSED,
         Self::ATTESTOR_NOT_ACCEPTED,
         Self::CONFLICT,
         Self::EMAIL_ALREADY_REGISTERED,
         Self::ENVIRONMENT_MISMATCH,
+        Self::EVENT_NOT_DELETABLE,
         Self::FORBIDDEN,
         Self::IDEMPOTENCY_KEY_REUSED,
         Self::IDENTITY_LINKED_ELSEWHERE,
@@ -156,6 +175,7 @@ impl ProblemKind {
         Self::INVALID_PARAMETER,
         Self::INVALID_REQUEST,
         Self::LAST_SIGN_IN_METHOD,
+        Self::LIMIT_EXCEEDED,
         Self::METHOD_NOT_ALLOWED,
         Self::NO_WAITING_ROOM,
         Self::NOT_FOUND,
@@ -167,6 +187,7 @@ impl ProblemKind {
         Self::REQUEST_TIMEOUT,
         Self::RESERVATION_NOT_ISSUED,
         Self::SALE_CLOSED,
+        Self::SOLD_OUT,
         Self::STALE_VERSION,
         Self::TICKET_NOT_IN_RESERVATION,
         Self::TICKET_REVOKED,
@@ -176,6 +197,7 @@ impl ProblemKind {
         Self::UNSUPPORTED_MEDIA_TYPE,
         Self::WEBHOOKS_NOT_CONFIGURED,
         Self::WRONG_PASSWORD,
+        Self::WRONG_SALE_AUDIENCE,
     ];
 }
 
@@ -426,12 +448,16 @@ mod tests {
         assert_eq!(
             kinds,
             [
+                "account-closed",
+                "account-denied",
                 "admission-required",
                 "amount-mismatch",
+                "attestation-id-reused",
                 "attestor-not-accepted",
                 "conflict",
                 "email-already-registered",
                 "environment-mismatch",
+                "event-not-deletable",
                 "forbidden",
                 "idempotency-key-reused",
                 "identity-linked-elsewhere",
@@ -443,6 +469,7 @@ mod tests {
                 "invalid-parameter",
                 "invalid-request",
                 "last-sign-in-method",
+                "limit-exceeded",
                 "method-not-allowed",
                 "no-waiting-room",
                 "not-found",
@@ -454,6 +481,7 @@ mod tests {
                 "request-timeout",
                 "reservation-not-issued",
                 "sale-closed",
+                "sold-out",
                 "stale-version",
                 "ticket-not-in-reservation",
                 "ticket-revoked",
@@ -463,6 +491,7 @@ mod tests {
                 "unsupported-media-type",
                 "webhooks-not-configured",
                 "wrong-password",
+                "wrong-sale-audience",
             ]
         );
     }

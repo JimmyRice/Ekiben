@@ -1,5 +1,5 @@
 //! Buying tickets under contention: purchase requests, reservations, and the workers that
-//! process and expire them.
+//! process and expire them; and organizers' grants of a private sale's free tickets.
 
 mod dto;
 mod routes;
@@ -26,6 +26,11 @@ pub mod permissions {
     pub const PURCHASES_CREATE: Permission = Permission::new("purchases.create");
     /// Read purchase requests and reservations (account-scoped: your own).
     pub const RESERVATIONS_READ: Permission = Permission::new("reservations.read");
+    /// Read the reservations and tickets of the organization's events, whoever bought them,
+    /// and how to reach those buyers (organization-scoped).
+    pub const ORDERS_READ: Permission = Permission::new("orders.read");
+    /// Grant a private sale's free tickets to any account (organization-scoped).
+    pub const TICKETS_GRANT: Permission = Permission::new("tickets.grant");
 }
 
 /// The purchasing module.
@@ -41,24 +46,30 @@ impl Module for Purchasing {
         vec![
             (Role::User, permissions::PURCHASES_CREATE),
             (Role::User, permissions::RESERVATIONS_READ),
+            (Role::Organizer, permissions::ORDERS_READ),
+            (Role::Organizer, permissions::TICKETS_GRANT),
         ]
     }
 
     fn routes(&self) -> OpenApiRouter<AppState> {
         OpenApiRouter::new()
             .routes(routes!(routes::create_purchase_request))
+            .routes(routes!(routes::grant_tickets))
             .routes(routes!(routes::get_purchase_request))
             .routes(routes!(routes::my_reservations))
+            .routes(routes!(routes::list_event_reservations))
+            .routes(routes!(routes::get_buyer))
             .routes(routes!(routes::get_reservation))
             .routes(routes!(routes::checkout_reservation))
             .routes(routes!(routes::cancel_reservation))
     }
 
     fn idempotent_routes(&self) -> Vec<IdempotentRoute> {
-        // The request id is derived from the key.
-        vec![IdempotentRoute::post(
-            "/v1/sales/{sale_id}/purchase-requests",
-        )]
+        // The request id is derived from the key, for purchases and grants alike.
+        vec![
+            IdempotentRoute::post("/v1/sales/{sale_id}/purchase-requests"),
+            IdempotentRoute::post("/v1/sales/{sale_id}/grants"),
+        ]
     }
 
     fn tasks(&self, config: &Config) -> Vec<BackgroundTask> {

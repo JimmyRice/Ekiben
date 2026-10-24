@@ -4,14 +4,14 @@ use axum::extract::{Path, Query, State};
 use axum::http::HeaderValue;
 use axum::http::header::CONTENT_TYPE;
 use axum::response::IntoResponse;
-use kippu_domain::TicketId;
+use kippu_domain::{ReservationId, TicketId};
 
-use super::dto::{TicketKeys, TicketView};
+use super::dto::{TicketKeys, TicketView, TicketsQuery};
 use super::service;
 use crate::app::AppState;
 use crate::auth::Principal;
 use crate::error::{ApiResult, Problem};
-use crate::http::{Json, Listing, ListingTag, PageQuery};
+use crate::http::{Json, Listing, ListingTag};
 
 const TAG: &str = "ticketing";
 
@@ -24,20 +24,20 @@ pub(crate) async fn ticket_keys(State(state): State<AppState>) -> Json<TicketKey
     Json(service::gate_keys(&state).into())
 }
 
-/// Your tickets, most recently issued first.
+/// Your tickets, most recently issued first; with `event_id`, those for one event.
 #[utoipa::path(
     get, path = "/v1/me/tickets", tag = TAG,
     security(("bearer" = [])),
-    params(PageQuery),
+    params(TicketsQuery),
     responses((status = 200, body = Listing<TicketView>), (status = 400, body = Problem))
 )]
 pub(crate) async fn my_tickets(
     State(state): State<AppState>,
     principal: Principal,
-    Query(query): Query<PageQuery>,
+    Query(query): Query<TicketsQuery>,
 ) -> ApiResult<Json<Listing<TicketView>>> {
-    let page = query.page(ListingTag::TICKETS)?;
-    let tickets = service::tickets(&state, &principal, page).await?;
+    let (event, page) = query.into_parts()?;
+    let tickets = service::tickets(&state, &principal, event, page).await?;
     Ok(Json(Listing::page(
         tickets,
         ListingTag::TICKETS,
@@ -45,7 +45,26 @@ pub(crate) async fn my_tickets(
     )))
 }
 
-/// A ticket.
+/// The tickets issued for a reservation, in id order: your own, or, for organizers, one for
+/// their event.
+#[utoipa::path(
+    get, path = "/v1/reservations/{reservation_id}/tickets", tag = TAG,
+    security(("bearer" = [])),
+    params(("reservation_id" = ReservationId, Path)),
+    responses((status = 200, body = Listing<TicketView>), (status = 404, body = Problem))
+)]
+pub(crate) async fn list_reservation_tickets(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(reservation_id): Path<ReservationId>,
+) -> ApiResult<Json<Listing<TicketView>>> {
+    let tickets = service::reservation_tickets(&state, &principal, reservation_id).await?;
+    Ok(Json(Listing::all(
+        tickets.into_iter().map(TicketView::from).collect(),
+    )))
+}
+
+/// A ticket: your own, or, for organizers, one for their event (without its signed bytes).
 #[utoipa::path(
     get, path = "/v1/tickets/{ticket_id}", tag = TAG,
     security(("bearer" = [])),
@@ -62,7 +81,7 @@ pub(crate) async fn get_ticket(
     )))
 }
 
-/// A ticket's signed KP1 bytes, as they are to reach the gate.
+/// A ticket's signed KP1 bytes, as they are to reach the gate. Only for its holder.
 #[utoipa::path(
     get, path = "/v1/tickets/{ticket_id}/raw", tag = TAG,
     security(("bearer" = [])),
