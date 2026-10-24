@@ -86,6 +86,8 @@ Kippu-Signature: …
   the first).
 - `amount` must equal the reservation total exactly, or the request fails with 422 and nothing
   is recorded.
+- An `attestation_id` already recorded for another reservation or amount is refused with
+  `422 attestation-id-reused`: it is never answered as a replay.
 
 The response says what became of the money:
 

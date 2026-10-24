@@ -548,6 +548,27 @@ async fn the_checkout_attestor_settles_after_the_sale_drops_it() {
     // The organizer stops taking the wallet while the buyer is paying with it.
     app.accept_attestor(&shop, &card.id).await;
 
+    let chosen_id = chosen["id"].as_str().unwrap();
+    let looked_up = app
+        .signed(
+            &wallet,
+            Method::GET,
+            &format!("/v1/attestor/reservations/{chosen_id}"),
+            None,
+        )
+        .await;
+    assert_eq!(looked_up.status, StatusCode::OK, "{:?}", looked_up.body);
+    let other_id = other["id"].as_str().unwrap();
+    let hidden = app
+        .signed(
+            &wallet,
+            Method::GET,
+            &format!("/v1/attestor/reservations/{other_id}"),
+            None,
+        )
+        .await;
+    assert_eq!(hidden.status, StatusCode::NOT_FOUND);
+
     let paid = app.pay(&wallet, "w-1", &chosen).await;
     assert_eq!(paid.status, StatusCode::OK, "{:?}", paid.body);
     assert_eq!(paid.body["disposition"], "applied");
@@ -556,6 +577,42 @@ async fn the_checkout_attestor_settles_after_the_sale_drops_it() {
         app.pay(&wallet, "w-2", &other).await.body["type"],
         "urn:kippu:problem:attestor-not-accepted"
     );
+}
+
+#[tokio::test]
+async fn an_attestation_id_cannot_pay_for_another_reservation() {
+    let app = TestApp::start().await;
+    let shop = app.shop(10, 1_000, json!({})).await;
+    let attestor = app.attestor("live").await;
+    app.accept_attestor(&shop, &attestor.id).await;
+    let first = app.reserve(&app.buyer().await, &shop, 1).await;
+    let second = app.reserve(&app.buyer().await, &shop, 2).await;
+    let paid = app.pay(&attestor, "pi_once", &first).await;
+    assert_eq!(paid.body["disposition"], "applied");
+
+    for other in [
+        &second,
+        &json!({ "id": first["id"], "total": second["total"] }),
+    ] {
+        let reused = app.pay(&attestor, "pi_once", other).await;
+        assert_eq!(reused.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            reused.body["type"],
+            "urn:kippu:problem:attestation-id-reused"
+        );
+    }
+    let replayed = app.pay(&attestor, "pi_once", &first).await;
+    assert_eq!(replayed.body["replayed"], true);
+    let second_id = second["id"].as_str().unwrap();
+    let untouched = app
+        .call(
+            Method::GET,
+            &format!("/v1/reservations/{second_id}"),
+            Some(&shop.organizer),
+            None,
+        )
+        .await;
+    assert_eq!(untouched.body["status"], "reserved");
 }
 
 #[tokio::test]

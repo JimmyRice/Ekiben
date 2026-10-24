@@ -70,6 +70,8 @@ impl ProblemKind {
     pub const ADMISSION_REQUIRED: Self = Self::new("admission-required");
     /// A payment does not match the reservation total.
     pub const AMOUNT_MISMATCH: Self = Self::new("amount-mismatch");
+    /// The attestation id was already recorded for another reservation or amount.
+    pub const ATTESTATION_ID_REUSED: Self = Self::new("attestation-id-reused");
     /// The sale does not accept that payment method.
     pub const ATTESTOR_NOT_ACCEPTED: Self = Self::new("attestor-not-accepted");
     /// The request conflicts with the current state.
@@ -151,11 +153,12 @@ impl ProblemKind {
     pub const WRONG_SALE_AUDIENCE: Self = Self::new("wrong-sale-audience");
 
     /// Every kind Kippu itself reports.
-    pub const ALL: [Self; 43] = [
+    pub const ALL: [Self; 44] = [
         Self::ACCOUNT_CLOSED,
         Self::ACCOUNT_DENIED,
         Self::ADMISSION_REQUIRED,
         Self::AMOUNT_MISMATCH,
+        Self::ATTESTATION_ID_REUSED,
         Self::ATTESTOR_NOT_ACCEPTED,
         Self::CONFLICT,
         Self::EMAIL_ALREADY_REGISTERED,
@@ -449,6 +452,7 @@ mod tests {
                 "account-denied",
                 "admission-required",
                 "amount-mismatch",
+                "attestation-id-reused",
                 "attestor-not-accepted",
                 "conflict",
                 "email-already-registered",
